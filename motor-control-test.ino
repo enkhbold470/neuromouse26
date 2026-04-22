@@ -47,8 +47,8 @@ void loop() {
     // Run motor at a steady test speedmotor.drive(1023); 
     // delay(10); // 10ms burst to break friction
 
-    motor.drive(1023); 
-    delay(10); // 10ms burst to break friction
+    // motor.drive(1023); 
+    // delay(10); // 10ms burst to break friction
     motor.drive(400); 
 
     // Every 100ms, calculate the speed
