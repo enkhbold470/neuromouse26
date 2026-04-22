@@ -1,45 +1,69 @@
+// --- Encoder Test for Motor 1 ---
 #include "MicromouseMotor.h"
-// 1. Define your locked-in pins
+
+// Pin Definitions
 #define MOTOR1_IN1 15
 #define MOTOR1_IN2 16
-#define MOTOR2_IN3 17
-#define MOTOR2_IN4 18
+#define ENC1_A 14
+#define ENC1_B 21
 #define DRV_SLEEP_PIN 41
 
-// 2. Instantiate the classes
-MicromouseMotor leftMotor(MOTOR1_IN1, MOTOR1_IN2);
-MicromouseMotor rightMotor(MOTOR2_IN3, MOTOR2_IN4);
+MicromouseMotor motor(MOTOR1_IN1, MOTOR1_IN2);
+
+// Volatile variables for Interrupt Service Routine (ISR)
+volatile long pulseCount = 0;
+long lastTime = 0;
+double currentSpeed = 0; // Pulses per second
+
+// ISR: This runs every time Phase A changes state
+void IRAM_ATTR handleEncoder() {
+    // Check Phase B to determine direction
+    if (digitalRead(ENC1_B) == HIGH) {
+        pulseCount++;
+    } else {
+        pulseCount--;
+    }
+}
 
 void setup() {
-    // 3. Wake up the DRV8833 driver
     Serial.begin(115200);
-    Serial.println("START...");
-    pinMode(DRV_SLEEP_PIN, OUTPUT);
-    digitalWrite(DRV_SLEEP_PIN, HIGH); // HIGH = Awake, LOW = Sleep
-
-    // 4. Initialize the hardware PWM timers
-    leftMotor.begin();
-    rightMotor.begin();
     
-    // Optional delay to let hardware settle
-    delay(10);
+    // Enable Motor Driver
+    pinMode(DRV_SLEEP_PIN, OUTPUT);
+    digitalWrite(DRV_SLEEP_PIN, HIGH);
+    
+    // Setup Encoder Pins
+    pinMode(ENC1_A, INPUT_PULLUP);
+    pinMode(ENC1_B, INPUT_PULLUP);
+    
+    // Attach Interrupt to Phase A
+    attachInterrupt(digitalPinToInterrupt(ENC1_A), handleEncoder, RISING);
+    
+    motor.begin();
+    Serial.println("Encoder Test Initialized...");
 }
 
 void loop() {
-    // --- Example PID Implementation ---
-    // Let's assume your PID calculates we need to steer right.
-    // Base speed is 500, steering correction is 150.
-    
-    // int base_speed = 500;
-    // int turn_correction = 150;
-    
-    // int left_pwm = base_speed + turn_correction;  // 650
-    // int right_pwm = base_speed - turn_correction; // 350
-    
-    leftMotor.drive(1023);
-    // rightMotor.drive(right_pwm);
-    
-    // To instantly stop at a wall:
-    // leftMotor.brake();
-    // rightMotor.brake();
+    // Run motor at a steady test speedmotor.drive(1023); 
+    // delay(10); // 10ms burst to break friction
+
+    motor.drive(1023); 
+    delay(10); // 10ms burst to break friction
+    motor.drive(400); 
+
+    // Every 100ms, calculate the speed
+    if (millis() - lastTime >= 100) {
+        noInterrupts(); // Temporarily disable to read volatile long safely
+        long currentCount = pulseCount;
+        pulseCount = 0; // Reset for next interval
+        interrupts();
+
+        // Speed in Pulses per Second
+        currentSpeed = currentCount / 0.1; 
+
+        Serial.print("Target PWM: 400 | Current Pulses/Sec: ");
+        Serial.println(currentSpeed);
+        
+        lastTime = millis();
+    }
 }
