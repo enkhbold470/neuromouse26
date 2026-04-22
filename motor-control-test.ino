@@ -3,87 +3,92 @@
 #include "MicromouseIMU.h"
 #include "PinConfig.h"
 
-// Instantiate hardware using PinConfig.h definitions
+// --- Hardware Objects ---
 MicromouseEncoder leftEnc(ENC_L_A, ENC_L_B);
-MicromouseMotor leftMotor(MOTOR_L_IN1, MOTOR_L_IN2);
-MicromouseIMU imu;
+MicromouseMotor   leftMotor(MOTOR_L_IN1, MOTOR_L_IN2);
+MicromouseIMU     imu;
 
-// Callback wrappers for interrupts
+// ISR wrapper — must be a free function, calls into the encoder object
 void IRAM_ATTR leftISR() { leftEnc.handleInterrupt(); }
 
-// --- PID Control Variables ---
-float Kp = 0.2;  // Proportional gain (reduced drastically to stop shaking)
-float Ki = 0.05; // Integral gain
-float Kd = 0.0;  // Derivative gain (Disabled: causes massive spikes due to tick quantization noise)
+// ---------------------------------------------------------------------------
+// PID Configuration
+// ---------------------------------------------------------------------------
+// Speed unit: ticks/second (single-channel RISING encoder)
+// Motor free-run at 6V ≈ 500 RPM → 500/60 * 210 ticks/rev ≈ 1750 ticks/sec
+// Start with a modest target well below free-run to leave PID headroom.
+// ---------------------------------------------------------------------------
+float Kp = 1.5;   // Tuning start point. Raise until motor responds, back off if it oscillates.
+float Ki = 0.8;   // Removes steady-state error. Raise slowly after Kp is set.
+float Kd = 0.05;  // Light derivative to dampen overshoot. Keep low due to encoder quantization.
 
-float target_speed = 500.0; // Desired ticks per second
-float current_speed = 0.0;  // Measured ticks per second
+float target_speed = 800.0; // ticks/sec  (~23% of free-run — safe starting point)
 
-// State tracking for PID
-long prev_ticks = 0;
-unsigned long prev_time = 0;
-float integral = 0.0;
-float prev_error = 0.0;
-const unsigned long PID_INTERVAL = 20000; // 20ms (50Hz) to collect more ticks per loop
+// --- PID State ---
+float         current_speed = 0.0;
+long          prev_ticks    = 0;
+unsigned long prev_time     = 0;
+float         integral      = 0.0;
+float         prev_error    = 0.0;
+
+// Integral windup clamp: max integral contribution = MAX_PWM / Ki
+// This means integral can never push output beyond ±1023 on its own.
+const float INTEGRAL_MAX = 1023.0f / 0.8f; // ≈ 1278 — recalculate if you change Ki
+
+const unsigned long PID_INTERVAL_US = 20000; // 20 ms → 50 Hz
 
 void setup() {
     Serial.begin(115200);
 
-    // Wake up motor driver
+    // Wake up DRV8833 driver (active HIGH)
     pinMode(DRV_SLEEP_PIN, OUTPUT);
     digitalWrite(DRV_SLEEP_PIN, HIGH);
 
-    // Initialize subsystems
     leftMotor.begin();
     leftEnc.begin(leftISR);
     imu.begin(IMU_SDA, IMU_SCL);
 
-    Serial.println("Sensors & Motors Online");
     prev_time = micros();
+    Serial.println("=== Motor PID Online ===");
+    Serial.println("Target(t/s)\tSpeed(t/s)\tYaw");
 }
 
 void loop() {
-    // 1. Keep IMU updated
-    imu.update(); 
-    
-    // 2. Fixed-Interval PID Loop (100Hz)
-    unsigned long current_time = micros();
-    if (current_time - prev_time >= PID_INTERVAL) {
-        // Calculate dynamic dt (should be close to 0.010s)
-        float dt = (current_time - prev_time) / 1000000.0;
-        prev_time = current_time;
+    // 1. Keep IMU integrated
+    imu.update();
 
-        // Estimate current speed (ticks per sec)
-        long current_ticks = leftEnc.getTicks();
-        float raw_speed = (float)(current_ticks - prev_ticks) / dt;
-        prev_ticks = current_ticks;
+    // 2. Fixed-interval PID (50 Hz)
+    unsigned long now = micros();
+    if (now - prev_time >= PID_INTERVAL_US) {
+        float dt = (float)(now - prev_time) / 1000000.0f;
+        prev_time = now;
 
-        // Apply Low-Pass Filter to smooth out quantization noise from low encoder resolution
-        current_speed = (0.7 * current_speed) + (0.3 * raw_speed);
+        // --- Measure speed ---
+        long  ticks = leftEnc.getTicks();
+        float raw_speed = (float)(ticks - prev_ticks) / dt;
+        prev_ticks = ticks;
 
-        // PID Error math
+        // Low-pass filter to smooth encoder quantization noise (α=0.5 — balanced)
+        current_speed = (0.5f * current_speed) + (0.5f * raw_speed);
+
+        // --- PID ---
         float error = target_speed - current_speed;
-        
-        // Integral with windup clamping
-        integral += error * dt;
-        integral = constrain(integral, -1000, 1000); // Adjust bounds as needed
-        
-        // Derivative
+
+        integral  += error * dt;
+        integral   = constrain(integral, -INTEGRAL_MAX, INTEGRAL_MAX);
+
         float derivative = (error - prev_error) / dt;
         prev_error = error;
 
-        // Compute control signal
-        float control_signal = (Kp * error) + (Ki * integral) + (Kd * derivative);
+        float output = (Kp * error) + (Ki * integral) + (Kd * derivative);
 
-        // Apply to motor
-        leftMotor.drive((int)control_signal);
+        leftMotor.drive((int)output);
     }
 
-    // 3. Serial Telemetry (Non-blocking, ~20Hz)
+    // 3. Serial telemetry (tab-separated for Serial Plotter, ~20 Hz)
     static unsigned long last_print = 0;
     if (millis() - last_print >= 50) {
         last_print = millis();
-        // Format works beautifully in Arduino Serial Plotter
-        Serial.printf("Target:%.2f Speed:%.2f Yaw:%.2f\n", target_speed, current_speed, imu.getYaw());
+        Serial.printf("%.1f\t%.1f\t%.1f\n", target_speed, current_speed, imu.getYaw());
     }
 }

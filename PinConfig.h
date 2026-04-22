@@ -43,8 +43,12 @@
 #define BAT_V_SENSE    5  // BAT-TEST
 
 // 7. Competition Physics Constants
-#define WHEEL_DIAMETER 32.0  // mm (Example for standard Micromouse wheels)
-#define TICKS_PER_REV  600.0 // PPR * Gear Ratio (Adjust based on your N20)
-#define MOTOR_MIN_PWM  100   // Based on your stiction testing
-#define PWM_FREQ       20000 // 20kHz silent frequency
-#define PWM_RES        10    // 10-bit resolution
+// Motor: N20 1:30 gear ratio, 6V, 500RPM
+// Encoder: 7 pulses/rev (motor shaft), single-channel RISING only
+// Effective ticks/wheel-rev = 7 * 30 = 210
+// If using full quadrature (both edges, both channels) = 7 * 4 * 30 = 840
+#define WHEEL_DIAMETER  32.0   // mm
+#define TICKS_PER_REV   210.0  // Single-channel RISING: 7 PPR * 30 gear ratio
+                               // Change to 840.0 if using full quadrature decoding
+#define PWM_FREQ        20000  // 20kHz silent frequency
+#define PWM_RES         10     // 10-bit resolution (0–1023)
