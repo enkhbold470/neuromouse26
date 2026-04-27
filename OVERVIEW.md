@@ -339,3 +339,141 @@ Other tagged prefixes:
 - Diagonal movement
 - Battery voltage monitoring via ADC
 - OLED display for status without Serial
+
+---
+
+## Code Review — Bugs & Risks Found (2026-04-27)
+
+> This section records findings from a full static analysis of all source files.
+> Fix the **Critical Bugs** before running the robot on a real maze.
+
+### Verdict
+The architecture is sound (FSM + flood-fill BFS + PID + IMU yaw turns), but
+two bugs make the forward-drive yaw correction effectively dead code, one bug
+corrupts PID output for both motors simultaneously, and one bug can break the
+BFS queue on complex mazes.
+
+---
+
+### Critical Bugs
+
+#### BUG-1 — Shared `static` inside `computePID()` corrupts both motors
+**File:** `src/main.cpp` — `computePID()` function
+
+```cpp
+static float filteredSpeed = 0.0f;  // NOTE: this static is shared
+```
+
+`filteredSpeed` is `static`, so it is one variable shared across every call
+to `computePID()`. Left motor and right motor both call this function. The
+left motor's filtered speed bleeds into the right motor's PID on the very
+next call and vice versa. Both motors receive wrong proportional and
+derivative terms whenever they differ in speed (i.e., almost always).
+
+**Fix:** Add `filteredSpeed` as a field to `PIDState`:
+```cpp
+struct PIDState {
+    float integral      = 0.0f;
+    float prevError     = 0.0f;
+    long  prevTicks     = 0;
+    float filteredSpeed = 0.0f;  // <-- add this
+};
+```
+Then replace the static line inside `computePID()` with `pid.filteredSpeed = ...`.
+
+---
+
+#### BUG-2 — `imu.update()` never called inside `moveForwardOneCell()` — yaw correction is dead code
+**File:** `src/main.cpp` — `moveForwardOneCell()` while-loop
+
+The yaw correction code:
+```cpp
+float yaw = imu.getYaw();
+float yawCorr = yaw * 0.5f;
+leftMotor.drive((int)(outL - yawCorr));
+rightMotor.drive((int)(outR + yawCorr));
+```
+`imu.getYaw()` returns `currentYaw`, which only changes when `imu.update()`
+is called. `imu.update()` is called at the top of `loop()`, but `loop()` is
+blocked for the entire duration of the move. The while-loop inside
+`moveForwardOneCell()` never calls `imu.update()`, so `yaw` is always 0.0°
+(the value after `imu.resetYaw()` at move start). Yaw correction does nothing.
+
+**Fix:** Call `imu.update()` at the top of the PID while-loop:
+```cpp
+while (ticksL < TICKS_PER_CELL && ticksR < TICKS_PER_CELL) {
+    imu.update();   // <-- add this line
+    if (millis() - moveStart > 5000) { ... }
+    ...
+}
+```
+
+---
+
+#### BUG-3 — PID output units do not match `drive()` input units; integral saturates
+**File:** `src/main.cpp` — `computePID()` and `moveForwardOneCell()`
+
+`computePID()` works in **ticks/second** (target ≈ 800 t/s). With `Kp=1.5`
+the raw output at zero speed is `1.5 × 800 = 1200`, which exceeds the
+`drive()` PWM range of `±1023`. `drive()` clamps the value (safe), but the
+integrator (`Ki=0.8`) continues winding up well past the useful range. The
+anti-windup clamp of `±1278` was chosen to match this accidental overflow
+rather than the actual control range, so the integrator provides almost no
+benefit during normal operation.
+
+**Fix (minimal):** Scale the PID output before calling `drive()`:
+```cpp
+const float pwmScale = (float)PWM_MAX / PID_TARGET_EXPLORE; // 1023/800 ≈ 1.28
+leftMotor.drive( (int)((outL - yawCorr) * pwmScale));
+rightMotor.drive((int)((outR + yawCorr) * pwmScale));
+```
+Also tighten anti-windup clamp to `±(PWM_MAX / Ki)`.
+
+---
+
+#### BUG-4 — BFS queue in `floodFill()` mixes modulo-wrapped and bare indexing
+**File:** `include/MicromouseMaze.h` — `floodFill()`
+
+Goal cells are enqueued without `% MAZE_CELLS`:
+```cpp
+qRow[tail] = goalRow[i];   // bare index — safe only while tail < 256
+qCol[tail] = goalCol[i];
+tail++;
+```
+BFS expansion does use `tail % MAZE_CELLS`. When `tail` (uint16_t) grows
+beyond 255, the head/tail comparison `head != tail` can fail to terminate
+correctly because the indices are no longer in the same numeric domain.
+For the default 4-goal seeding this cannot overflow, but the BFS itself
+can enqueue all 256 cells, pushing `tail` to ~260 while `head` is still
+below 256 — the loop may then spin far too long or terminate early.
+
+**Fix:** Use `% MAZE_CELLS` consistently for every enqueue and dequeue, or
+use a power-of-two ring buffer (size 256, mask 0xFF).
+
+---
+
+### Design Risks (not outright bugs, but will hurt real-world performance)
+
+| # | Location | Issue |
+|---|---|---|
+| R1 | `turnRight()` / `turnLeft()` | No ramp-down before target angle. At 400 PWM, mechanical overshoot is typically 5–15°. Add a slow zone when `|yaw| > 75°`. |
+| R2 | `wallFront()` in `MicromouseIR.h` | Requires **both** front sensors to trigger (`&&`). One dirty or misaligned sensor causes missed front walls and the robot drives into them. Consider `||` or a dedicated single front sensor. |
+| R3 | All motion functions | Entire `loop()` is blocked during movement. Top-level `imu.update()` and `printTelemetry()` do not run. All real-time updates must be inlined into motion functions (BUG-2 is a direct consequence of this). |
+| R4 | `IR_THRESH_*` in `MicromouseIR.h` | Placeholder values (800/600/500). Must be calibrated for your specific hardware and maze wall material before exploration is reliable. |
+| R5 | Everywhere | Every `drive()`, `getTicks()`, PID tick, and IR sample prints to Serial. At 115200 baud this adds milliseconds of blocking UART time per PID cycle, skewing `dt` and risking cell overshoot. Comment out verbose prints before any speed run. |
+| R6 | `turnAround()` | Implemented as two `turnRight()` calls. Works because `turnRight()` resets yaw internally. Correct but fragile — document this implicit dependency. |
+
+---
+
+### What is correct and can be trusted
+
+- FSM state transitions and button debounce logic
+- Flood-fill BFS algorithm (correct aside from BUG-4 edge case)
+- Wall mirroring in `setWall()` — neighbour cell always updated symmetrically
+- Outer border wall initialisation in `reset()`
+- Encoder direction detection — B-pin sampled on A-pin rising edge
+- Differential IR reading — ambient subtraction cancels background IR correctly
+- Motor `drive()` minimum-power mapping avoids stall zone
+- Turn direction calculation: `(targetDir − heading + 4) % 4`
+- Safety timeouts in all motion functions (3 s turn, 5 s forward)
+- `imu.resetYaw()` called correctly before each turn and each forward move
