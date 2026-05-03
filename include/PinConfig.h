@@ -40,7 +40,8 @@
 #define BOOT_BUTTON    0  // Pin 27/GPIO0
 #define BUZZER_PIN     40 
 #define WS2812_DATA    3  // LED_WS2812B
-#define BAT_V_SENSE    5  // BAT-TEST
+#define BAT_V_SENSE       5      // BAT-TEST
+#define BAT_VDIV_MULT     3.1197f // calibrated: 100k+50k divider, corrected vs multimeter
 
 // 7. Competition Physics Constants
 // Motor: N20 1:30 gear ratio, 6V, 500RPM
