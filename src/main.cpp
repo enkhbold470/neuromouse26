@@ -55,10 +55,12 @@ void bleSetup() {
 
 struct IRPair { const char* name; uint8_t emit; uint8_t rx; };
 static const IRPair PAIRS[] = {
-    { "LF", EMIT_LF, RX_LF },
-    { "RF", EMIT_RF, RX_RF },
+    { "LF ", EMIT_LF,  RX_LF  },
+    { "L45", EMIT_L45, RX_L45 },
+    { "R45", EMIT_R45, RX_R45 },
+    { "RF ", EMIT_RF,  RX_RF  },
 };
-static const int N = 2;
+static const int N = 4;
 
 int readDelta(const IRPair& p) {
     int ambient = analogRead(p.rx);
@@ -89,17 +91,17 @@ void setup() {
 
     bleSetup();
 
-    blePrintf("\n[IR-TEST] LF + RF pairs\n");
-    blePrintf("LF: emit=GPIO%d rx=GPIO%d\n", EMIT_LF, RX_LF);
-    blePrintf("RF: emit=GPIO%d rx=GPIO%d\n\n", EMIT_RF, RX_RF);
+    blePrintf("\n[IR-TEST] LF L45 R45 RF\n\n");
 }
 
 // ── loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-    for (int i = 0; i < N; i++) {
-        int d = readDelta(PAIRS[i]);
-        blePrintf("%s: d=%4d %s\n", PAIRS[i].name, d, classify(d));
-    }
-    blePrintf("---\n");
+    int d[N];
+    for (int i = 0; i < N; i++) d[i] = readDelta(PAIRS[i]);
+    blePrintf("LF:%4d %s | L45:%4d %s | R45:%4d %s | RF:%4d %s\n",
+              d[0], classify(d[0]),
+              d[1], classify(d[1]),
+              d[2], classify(d[2]),
+              d[3], classify(d[3]));
     delay(200);
 }
