@@ -4,13 +4,13 @@
 // 1. Motor Control (DRV8833 PWM)
 #define MOTOR_L_IN1    15 // IN1
 #define MOTOR_L_IN2    16 // IN2
-#define MOTOR_R_IN3    17 // IN3
-#define MOTOR_R_IN4    18 // IN4
+#define MOTOR_R_IN3    18 // IN3 (swapped: right motor FWD was physically REV)
+#define MOTOR_R_IN4    17 // IN4
 #define DRV_SLEEP_PIN  41 // Driver Wake/Sleep logic
 
 // 2. Motor Encoders
-#define ENC_L_A        14 
-#define ENC_L_B        21 
+#define ENC_L_A        21  // swapped: left encoder counted negative on FWD
+#define ENC_L_B        14 
 #define ENC_R_A        38 // MOT34-ENA
 #define ENC_R_B        39 // MOT34-ENB
 
