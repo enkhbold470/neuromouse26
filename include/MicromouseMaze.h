@@ -142,7 +142,7 @@ public:
         goalCount  = 1;
         goalRow[0] = row;
         goalCol[0] = col;
-        Serial.printf(F("[MAZE] Goal set to single cell: (%d,%d)\n"), row, col);
+        Serial.printf("[MAZE] Goal set to single cell: (%d,%d)\n", row, col);
     }
 
     // ---- isGoal() ----

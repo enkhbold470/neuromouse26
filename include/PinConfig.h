@@ -50,5 +50,5 @@
 #define WHEEL_DIAMETER  32.0   // mm
 #define TICKS_PER_REV   210.0  // Single-channel RISING: 7 PPR * 30 gear ratio
                                // Change to 840.0 if using full quadrature decoding
-#define PWM_FREQ        20000  // 20kHz silent frequency
-#define PWM_RES         10     // 10-bit resolution (0–1023)
+#define MOTOR_PWM_FREQ  20000  // 20kHz silent frequency
+#define MOTOR_PWM_RES   10     // 10-bit resolution (0–1023)
