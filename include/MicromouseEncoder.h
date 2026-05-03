@@ -43,13 +43,12 @@ public:
     }
 
     // --------------------------------------------------------------------------
-    // handleInterrupt() — called from ISR; must be in IRAM
+    // handleInterrupt() — called from ISR; must be in IRAM.
+    // Definition lives in src/MicromouseEncoder.cpp (not inline — inline
+    // IRAM_ATTR methods cause "literal placed after use" linker errors on
+    // Xtensa ESP32-S3).
     // --------------------------------------------------------------------------
-    void IRAM_ATTR handleInterrupt() {
-        // B HIGH when A rises → forward (count++)
-        // B LOW  when A rises → reverse (count--)
-        digitalRead(pinB) ? count++ : count--;
-    }
+    void IRAM_ATTR handleInterrupt();
 
     // --------------------------------------------------------------------------
     // getTicks() — return current accumulated tick count (thread-safe read)
