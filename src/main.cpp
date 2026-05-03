@@ -1,76 +1,82 @@
-// main.cpp — Button + Buzzer test (minimal)
-// SMD5020 magnetic buzzer @ 4kHz resonant freq, 10% duty (quiet)
-// LEDC ch4, 8-bit res → duty 25/255 ≈ 10%
-// Press BUTTON_1 → 1 short beep
-// Hold BUTTON_1 3s → long tone
+// main.cpp — IR sensor array test (minimal)
+// Hardware: SFH4545 emitter + TEFT4300 phototransistor receiver, 6 pairs
+// Method: differential reading — emitter OFF (ambient) then ON (lit), subtract
+// Only LF pair soldered initially — unsoldered sensors will read 0 diff, that is expected
 #include <Arduino.h>
 #include "PinConfig.h"
 
-#define BUZZ_CH     4
-#define BUZZ_FREQ   4000
-#define BUZZ_RES    8
-#define BUZZ_DUTY   100    // 25/255 ≈ 10% volume
+// Sensor table — name, emitter pin, receiver pin
+struct IRPair {
+    const char* name;
+    uint8_t     emitPin;
+    uint8_t     rxPin;
+};
 
-void beep(int ms) {
-    ledcWrite(BUZZ_CH, BUZZ_DUTY);
-    delay(ms);
-    ledcWrite(BUZZ_CH, 0);
+static const IRPair SENSORS[] = {
+    { "LF  (Left-Front) ", EMIT_LF,  RX_LF  },
+    { "L45 (Left-45)    ", EMIT_L45, RX_L45 },
+    { "L   (Left-Side)  ", EMIT_L,   RX_L   },
+    { "R   (Right-Side) ", EMIT_R,   RX_R   },
+    { "R45 (Right-45)   ", EMIT_R45, RX_R45 },
+    { "RF  (Right-Front)", EMIT_RF,  RX_RF  },
+};
+static const int N_SENSORS = sizeof(SENSORS) / sizeof(SENSORS[0]);
+
+// Read one differential value for a sensor
+int readDiff(const IRPair& s) {
+    // Ambient (emitter off)
+    int ambient = analogRead(s.rxPin);
+
+    // Fire emitter
+    digitalWrite(s.emitPin, HIGH);
+    delayMicroseconds(100);  // TEFT4300 rise time ~100µs
+
+    // Lit reading
+    int lit = analogRead(s.rxPin);
+
+    // Emitter off
+    digitalWrite(s.emitPin, LOW);
+
+    int diff = lit - ambient;
+    return diff < 0 ? 0 : diff;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    pinMode(BUTTON_1, INPUT_PULLUP);
+    // Emitter pins: output, default off
+    for (int i = 0; i < N_SENSORS; i++) {
+        pinMode(SENSORS[i].emitPin, OUTPUT);
+        digitalWrite(SENSORS[i].emitPin, LOW);
+    }
+    // Receiver pins: analog input
+    for (int i = 0; i < N_SENSORS; i++) {
+        pinMode(SENSORS[i].rxPin, INPUT);
+    }
 
-    ledcSetup(BUZZ_CH, BUZZ_FREQ, BUZZ_RES);
-    ledcAttachPin(BUZZER_PIN, BUZZ_CH);
-    ledcWrite(BUZZ_CH, 0);
-
-    Serial.println("\n[BTN-BUZZ] Button + Buzzer test");
-    Serial.printf("[BTN-BUZZ] Button=GPIO%d  Buzzer=GPIO%d  freq=%dHz  duty=%d/255\n",
-                  BUTTON_1, BUZZER_PIN, BUZZ_FREQ, BUZZ_DUTY);
-    Serial.println("[BTN-BUZZ] Short press → 1 beep");
-    Serial.println("[BTN-BUZZ] Hold 3s     → long tone\n");
-
-    // Startup beep — confirms buzzer alive
-    beep(100);
+    Serial.println("\n[IR-TEST] ==============================");
+    Serial.println("[IR-TEST] IR sensor array test");
+    Serial.println("[IR-TEST] SFH4545 emitter + TEFT4300 receiver");
+    Serial.println("[IR-TEST] Unsoldered sensors will read ~0 — expected");
+    Serial.println("[IR-TEST] ==============================\n");
+    Serial.println("[IR-TEST] Point sensors at a white wall ~5cm away for best result\n");
 }
 
 void loop() {
-    static bool     lastBtn    = HIGH;
-    static unsigned long pressStart = 0;
-    static bool     longFired  = false;
+    Serial.println("[IR] --------");
+    for (int i = 0; i < N_SENSORS; i++) {
+        int diff = readDiff(SENSORS[i]);
 
-    bool btn = digitalRead(BUTTON_1);
+        // Simple wall threshold indicator
+        const char* status;
+        if      (diff == 0)    status = "no signal (not soldered?)";
+        else if (diff < 200)   status = "open / far";
+        else if (diff < 600)   status = "object nearby";
+        else                   status = "WALL detected";
 
-    // Falling edge — button down
-    if (lastBtn == HIGH && btn == LOW) {
-        pressStart = millis();
-        longFired  = false;
-        Serial.println("[BTN] pressed");
+        Serial.printf("[IR] %s  diff=%4d  %s\n",
+                      SENSORS[i].name, diff, status);
     }
-
-    // Held — check for long press threshold
-    if (btn == LOW && !longFired) {
-        unsigned long held = millis() - pressStart;
-        if (held >= 3000) {
-            longFired = true;
-            Serial.printf("[BTN] long hold (%lums) → long tone\n", held);
-            beep(800);
-        }
-    }
-
-    // Rising edge — button released
-    if (lastBtn == LOW && btn == HIGH) {
-        unsigned long held = millis() - pressStart;
-        Serial.printf("[BTN] released  held=%lums\n", held);
-        if (!longFired) {
-            Serial.println("[BTN] short press → beep");
-            beep(100);
-        }
-    }
-
-    lastBtn = btn;
-    delay(10);
+    delay(200);
 }
