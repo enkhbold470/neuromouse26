@@ -1,82 +1,127 @@
-// main.cpp — IR sensor array test (minimal)
-// Hardware: SFH4545 emitter + TEFT4300 phototransistor receiver, 6 pairs
-// Method: differential reading — emitter OFF (ambient) then ON (lit), subtract
-// Only LF pair soldered initially — unsoldered sensors will read 0 diff, that is expected
+// main.cpp — BLE UART (Nordic UART Service) test
+// Mirrors Serial output to BLE notify characteristic
+// App: "Serial Bluetooth Terminal" (Android/iOS) — connect to "Micromouse26"
+// NUS UUIDs (standard Nordic UART Service):
+//   Service : 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
+//   TX (notify, ESP→phone) : 6E400003-B5A3-F393-E0A9-E50E24DCCA9E
+//   RX (write, phone→ESP)  : 6E400002-B5A3-F393-E0A9-E50E24DCCA9E
 #include <Arduino.h>
+#include <NimBLEDevice.h>
 #include "PinConfig.h"
 
-// Sensor table — name, emitter pin, receiver pin
-struct IRPair {
-    const char* name;
-    uint8_t     emitPin;
-    uint8_t     rxPin;
-};
+// ── NUS UUIDs ────────────────────────────────────────────────────────────────
+#define NUS_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_RX_UUID       "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_TX_UUID       "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-static const IRPair SENSORS[] = {
-    { "LF  (Left-Front) ", EMIT_LF,  RX_LF  },
-    { "L45 (Left-45)    ", EMIT_L45, RX_L45 },
-    { "L   (Left-Side)  ", EMIT_L,   RX_L   },
-    { "R   (Right-Side) ", EMIT_R,   RX_R   },
-    { "R45 (Right-45)   ", EMIT_R45, RX_R45 },
-    { "RF  (Right-Front)", EMIT_RF,  RX_RF  },
-};
-static const int N_SENSORS = sizeof(SENSORS) / sizeof(SENSORS[0]);
+NimBLEServer*         pServer   = nullptr;
+NimBLECharacteristic* pTX       = nullptr;
+bool                  bleConnected = false;
 
-// Read one differential value for a sensor
-int readDiff(const IRPair& s) {
-    // Ambient (emitter off)
-    int ambient = analogRead(s.rxPin);
-
-    // Fire emitter
-    digitalWrite(s.emitPin, HIGH);
-    delayMicroseconds(100);  // TEFT4300 rise time ~100µs
-
-    // Lit reading
-    int lit = analogRead(s.rxPin);
-
-    // Emitter off
-    digitalWrite(s.emitPin, LOW);
-
-    int diff = lit - ambient;
-    return diff < 0 ? 0 : diff;
+// ── Send string over BLE TX (splits into 20-byte MTU chunks) ─────────────────
+void blePrint(const char* str) {
+    if (!bleConnected || !pTX) return;
+    size_t len = strlen(str);
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunk = min((size_t)20, len - offset);
+        pTX->setValue((uint8_t*)(str + offset), chunk);
+        pTX->notify();
+        offset += chunk;
+        delay(10);  // avoid flooding BLE stack
+    }
 }
 
+void blePrintf(const char* fmt, ...) {
+    char buf[128];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    blePrint(buf);
+}
+
+// ── Server callbacks ──────────────────────────────────────────────────────────
+class ServerCallbacks : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* s) override {
+        bleConnected = true;
+        Serial.println("[BLE] client connected");
+    }
+    void onDisconnect(NimBLEServer* s) override {
+        bleConnected = false;
+        Serial.println("[BLE] client disconnected — restarting advertising");
+        NimBLEDevice::startAdvertising();
+    }
+};
+
+// ── RX callback — phone → ESP ─────────────────────────────────────────────────
+class RXCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* c) override {
+        std::string val = c->getValue();
+        if (!val.empty()) {
+            Serial.printf("[BLE-RX] received: %s\n", val.c_str());
+            // Echo back
+            blePrintf("echo: %s\n", val.c_str());
+        }
+    }
+};
+
+// ── setup ────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    // Emitter pins: output, default off
-    for (int i = 0; i < N_SENSORS; i++) {
-        pinMode(SENSORS[i].emitPin, OUTPUT);
-        digitalWrite(SENSORS[i].emitPin, LOW);
-    }
-    // Receiver pins: analog input
-    for (int i = 0; i < N_SENSORS; i++) {
-        pinMode(SENSORS[i].rxPin, INPUT);
-    }
+    Serial.println("\n[BLE-TEST] ==============================");
+    Serial.println("[BLE-TEST] NimBLE UART (NUS) test");
+    Serial.println("[BLE-TEST] Device name: Micromouse26");
+    Serial.println("[BLE-TEST] App: Serial Bluetooth Terminal");
+    Serial.println("[BLE-TEST] ==============================\n");
 
-    Serial.println("\n[IR-TEST] ==============================");
-    Serial.println("[IR-TEST] IR sensor array test");
-    Serial.println("[IR-TEST] SFH4545 emitter + TEFT4300 receiver");
-    Serial.println("[IR-TEST] Unsoldered sensors will read ~0 — expected");
-    Serial.println("[IR-TEST] ==============================\n");
-    Serial.println("[IR-TEST] Point sensors at a white wall ~5cm away for best result\n");
+    NimBLEDevice::init("Micromouse26");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // max TX power
+
+    pServer = NimBLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
+
+    NimBLEService* pService = pServer->createService(NUS_SERVICE_UUID);
+
+    // TX characteristic — ESP notifies phone
+    pTX = pService->createCharacteristic(
+        NUS_TX_UUID,
+        NIMBLE_PROPERTY::NOTIFY
+    );
+
+    // RX characteristic — phone writes to ESP
+    NimBLECharacteristic* pRX = pService->createCharacteristic(
+        NUS_RX_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    );
+    pRX->setCallbacks(new RXCallbacks());
+
+    pService->start();
+
+    NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+    pAdv->addServiceUUID(NUS_SERVICE_UUID);
+    pAdv->start();
+
+    Serial.println("[BLE] advertising started — connect with phone app");
 }
 
+// ── loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-    Serial.println("[IR] --------");
-    for (int i = 0; i < N_SENSORS; i++) {
-        int diff = readDiff(SENSORS[i]);
+    static unsigned long last = 0;
+    static uint32_t      count = 0;
 
-        // Simple wall threshold indicator
-        const char* status;
-        if      (diff == 0)    status = "no signal (not soldered?)";
-        else if (diff < 200)   status = "open / far";
-        else if (diff < 600)   status = "object nearby";
-        else                   status = "WALL detected";
+    if (millis() - last >= 1000) {
+        last = millis();
+        count++;
 
-        Serial.printf("[IR] %s  diff=%4d  %s\n",
-                      SENSORS[i].name, diff, status);
+        // Print to USB serial always
+        Serial.printf("[TICK] %lu  ble=%s\n", count, bleConnected ? "connected" : "waiting...");
+
+        // Print to BLE when connected
+        if (bleConnected) {
+            blePrintf("[TICK] %lu\n", count);
+        }
     }
-    delay(200);
 }
