@@ -1,4 +1,4 @@
-// main.cpp — LF IR pair test + BLE UART debug
+// main.cpp — LF + RF IR pair test + BLE UART debug
 // TEFT4300 behavior: high ADC = IR present, low ADC = no IR
 // delta = lit - ambient  (positive = wall/object)
 // BLE: connect "Micromouse26" in Serial Bluetooth Terminal app
@@ -53,36 +53,53 @@ void bleSetup() {
     Serial.println("[BLE] advertising — connect to 'Micromouse26'");
 }
 
+struct IRPair { const char* name; uint8_t emit; uint8_t rx; };
+static const IRPair PAIRS[] = {
+    { "LF", EMIT_LF, RX_LF },
+    { "RF", EMIT_RF, RX_RF },
+};
+static const int N = 2;
+
+int readDelta(const IRPair& p) {
+    int ambient = analogRead(p.rx);
+    digitalWrite(p.emit, HIGH);
+    delayMicroseconds(100);
+    int lit = analogRead(p.rx);
+    digitalWrite(p.emit, LOW);
+    return lit - ambient;
+}
+
+const char* classify(int delta) {
+    if (delta < 50)  return "open";
+    if (delta < 300) return "far";
+    if (delta < 800) return "near";
+    return "WALL";
+}
+
 // ── setup ────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    pinMode(EMIT_LF, OUTPUT);
-    digitalWrite(EMIT_LF, LOW);
-    pinMode(RX_LF, INPUT);
+    for (int i = 0; i < N; i++) {
+        pinMode(PAIRS[i].emit, OUTPUT);
+        digitalWrite(PAIRS[i].emit, LOW);
+        pinMode(PAIRS[i].rx, INPUT);
+    }
 
     bleSetup();
 
-    blePrintf("\n[LF-TEST] emit=GPIO%d rx=GPIO%d\n", EMIT_LF, RX_LF);
-    blePrintf("[LF-TEST] delta=ambient-lit, positive=wall\n\n");
+    blePrintf("\n[IR-TEST] LF + RF pairs\n");
+    blePrintf("LF: emit=GPIO%d rx=GPIO%d\n", EMIT_LF, RX_LF);
+    blePrintf("RF: emit=GPIO%d rx=GPIO%d\n\n", EMIT_RF, RX_RF);
 }
 
 // ── loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-    int ambient = analogRead(RX_LF);
-
-    digitalWrite(EMIT_LF, HIGH);
-    delayMicroseconds(100);
-    int lit = analogRead(RX_LF);
-    digitalWrite(EMIT_LF, LOW);
-
-    int delta = lit - ambient;  // TEFT4300: lit = higher ADC when wall present
-
-    blePrintf("amb=%4d lit=%4d d=%4d %s\n",
-              ambient, lit, delta,
-              delta < 50  ? "open" :
-              delta < 300 ? "far"  :
-              delta < 800 ? "near" : "WALL");
-    delay(100);
+    for (int i = 0; i < N; i++) {
+        int d = readDelta(PAIRS[i]);
+        blePrintf("%s: d=%4d %s\n", PAIRS[i].name, d, classify(d));
+    }
+    blePrintf("---\n");
+    delay(200);
 }
