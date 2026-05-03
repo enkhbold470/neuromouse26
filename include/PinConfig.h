@@ -38,7 +38,11 @@
 // 6. User Interface & Indicators
 #define BUTTON_1       42 // Main User Button
 #define BOOT_BUTTON    0  // Pin 27/GPIO0
-#define BUZZER_PIN     40 
+#define BUZZER_PIN     40
+#define BUZZER_LEDC_CH 4      // LEDC channel (0-3 used by motors)
+#define BUZZER_FREQ    4000   // SMD5020 resonant frequency Hz
+#define BUZZER_RES     8      // 8-bit — NEVER use duty 255 (DC = coil burn)
+#define BUZZER_DUTY    25     // 25/255 = 10% — hard cap, DO NOT EXCEED 50
 #define WS2812_DATA    3  // LED_WS2812B
 #define BAT_V_SENSE       5      // BAT-TEST
 #define BAT_VDIV_MULT     3.1197f // calibrated: 100k+50k divider, corrected vs multimeter
