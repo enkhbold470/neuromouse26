@@ -3,7 +3,7 @@
 #include <FastLED.h>
 #include "PinConfig.h"
 
-#define NUM_LEDS 1
+#define NUM_LEDS 8
 CRGB leds[NUM_LEDS];
 
 void setup() {
@@ -12,8 +12,10 @@ void setup() {
     Serial.println("[LED] WS2812B test start");
 
     FastLED.addLeds<WS2812B, WS2812_DATA, GRB>(leds, NUM_LEDS);
-    FastLED.setBrightness(80);
-    leds[0] = CRGB::Black;
+    FastLED.setBrightness(10);
+    for (int i = 0; i < NUM_LEDS; i++) {
+        leds[i] = CRGB::Black;
+    }
     FastLED.show();
     Serial.println("[LED] FastLED init done");
 }
@@ -29,7 +31,9 @@ void loop() {
     };
     static uint8_t idx = 0;
 
-    leds[0] = steps[idx].colour;
+    for (int i = 0; i < NUM_LEDS; i++) {
+        leds[i] = steps[idx].colour;
+    }
     FastLED.show();
     Serial.printf("[LED] colour=%s\n", steps[idx].name);
 
