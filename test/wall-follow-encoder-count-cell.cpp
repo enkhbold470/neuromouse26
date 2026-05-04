@@ -32,7 +32,7 @@
 
 // Encoder straight-keeping PID (differential tick error → motor correction)
 // Tune ENC_KP first; KI/KD can be zeroed initially.
-#define ENC_KP          6.0f
+#define ENC_KP          9.0f
 #define ENC_KI          0.8f
 #define ENC_KD          0.5f
 #define ENC_MAX_CORR    120
@@ -40,7 +40,16 @@
 // Cell distance in encoder ticks (see math above)
 #define TICKS_PER_CELL  360L
 #define MAX_CELLS       5
-#define CELL_PAUSE_MS   500
+#define CELL_PAUSE_MS   50
+
+// 90-degree pivot turn
+// WHEEL_TRACK_MM: centre-to-centre axle width — measure physically and tune.
+// Formula: ticks = (π × track / 4) × (TICKS_PER_REV / (π × WHEEL_DIAMETER))
+//                = track × TICKS_PER_REV / (4 × WHEEL_DIAMETER)
+//                = 74 × 210 / (4 × 33.4) ≈ 116  (tune ±10 ticks on real hardware)
+#define WHEEL_TRACK_MM  74.0f
+#define TICKS_PER_90    (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER))
+#define TURN_PWM        400
 
 // ── Hardware ──────────────────────────────────────────────────────────────────
 MicromouseMotor leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "L");
@@ -110,6 +119,25 @@ void stopMotors() {
     leftMotor.coast(); rightMotor.coast();
 }
 
+// Pivot right 90°: left wheel forward, right wheel backward.
+// Encoder interrupts count ticks in IRAM — accurate even at speed.
+// Change leftMotor/rightMotor signs for left turn.
+void turnRight90() {
+    encLeft.reset();
+    encRight.reset();
+
+    while (true) {
+        long fwd = encLeft.getTicks();         // left goes forward → positive
+        long rev = -encRight.getTicks();       // right goes backward → ticks negative, negate
+        if ((fwd + rev) / 2 >= TICKS_PER_90) break;
+
+        leftMotor.drive( TURN_PWM);
+        rightMotor.drive(-TURN_PWM);
+    }
+
+    stopMotors();
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 bool running   = false;
 long cellCount = 0;    // total cells completed (informational)
@@ -122,8 +150,6 @@ void resetCellBase() {
 }
 
 void setup() {
-    Serial.begin(115200);
-
     pinMode(BUTTON_1, INPUT_PULLUP);
     pinMode(DRV_SLEEP_PIN, OUTPUT);
     digitalWrite(DRV_SLEEP_PIN, HIGH);
@@ -139,8 +165,6 @@ void setup() {
         digitalWrite(EMIT_PINS[i], LOW);
         pinMode(RX_PINS[i], INPUT);
     }
-
-    Serial.println("[ENC-WALL] ready. Press button to start.");
 }
 
 void loop() {
@@ -148,7 +172,6 @@ void loop() {
         running = !running;
         if (!running) {
             stopMotors();
-            Serial.printf("[ENC-WALL] stopped after %ld cells\n", cellCount);
         } else {
             wallPid.reset();
             encPid.reset();
@@ -156,7 +179,6 @@ void loop() {
             encRight.reset();
             cellCount = 0;
             resetCellBase();
-            Serial.println("[ENC-WALL] running");
         }
         delay(30);
     }
@@ -192,15 +214,14 @@ void loop() {
     long avgTicks = (tL + tR) / 2;
     if (avgTicks >= TICKS_PER_CELL) {
         cellCount++;
-        Serial.printf("[ENC-WALL] cell %ld/%d complete  encL=%ld  encR=%ld  diff=%ld\n",
-                      cellCount, MAX_CELLS, tL, tR, tL - tR);
 
-        stopMotors();
-        delay(CELL_PAUSE_MS);
+        // stopMotors();
+        // delay(CELL_PAUSE_MS);
 
         if (cellCount >= MAX_CELLS) {
+            delay(CELL_PAUSE_MS);
+            turnRight90();
             running = false;
-            Serial.println("[ENC-WALL] all cells done — stopped");
             return;
         }
 
