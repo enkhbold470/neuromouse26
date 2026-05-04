@@ -80,16 +80,16 @@ public:
 
         if (speed > 0) {
             int pwm = map(speed, 1, MAX_PWM, MIN_POWER, MAX_PWM);
-            Serial.printf("[MOTOR:%s] drive(%d) → FORWARD  raw_pwm=%d  in1=%d in2=0\n",
-                          label, original, pwm);
             ledcWrite(ch1, pwm);
             ledcWrite(ch2, 0);
+            Serial.printf("[MOTOR:%s] drive(%d) → FORWARD  pwm=%d\n",
+                          label, original, pwm);
         } else {
             int pwm = map(-speed, 1, MAX_PWM, MIN_POWER, MAX_PWM);
-            Serial.printf("[MOTOR:%s] drive(%d) → REVERSE  raw_pwm=%d  in1=0 in2=%d\n",
-                          label, original, pwm);
             ledcWrite(ch1, 0);
             ledcWrite(ch2, pwm);
+            Serial.printf("[MOTOR:%s] drive(%d) → REVERSE  pwm=%d\n",
+                          label, original, pwm);
         }
     }
 
