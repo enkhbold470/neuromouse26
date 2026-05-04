@@ -189,17 +189,12 @@ public:
     // ---- floodFill() — BFS from goal(s) outward ----
     // Recalculates the entire flood array from scratch.
     // Must be called after any wall update.
+    // No Serial prints — called every cell during EXPLORE, prints would add ~25ms latency.
     void floodFill() {
-        Serial.println(F("[MAZE] floodFill() — starting BFS"));
-        unsigned long t0 = millis();
-
-        // Step 1: reset all distances to infinity
         for (int r = 0; r < MAZE_SIZE; r++)
             for (int c = 0; c < MAZE_SIZE; c++)
                 flood[r][c] = FLOOD_INFINITY;
 
-        // Step 2: seed goal cells with distance 0
-        // Use a simple queue implemented as a circular buffer (256 cells max)
         static uint8_t qRow[MAZE_CELLS];
         static uint8_t qCol[MAZE_CELLS];
         uint16_t head = 0, tail = 0;
@@ -209,43 +204,32 @@ public:
             qRow[tail] = goalRow[i];
             qCol[tail] = goalCol[i];
             tail++;
-            Serial.printf("[MAZE] floodFill() seeded goal cell (%d,%d) = 0\n",
-                          goalRow[i], goalCol[i]);
         }
 
-        // Step 3: BFS
-        uint16_t processed = 0;
         while (head != tail) {
             uint8_t r = qRow[head];
             uint8_t c = qCol[head];
             head++;
-            processed++;
 
             uint8_t nextDist = flood[r][c] + 1;
 
             for (int d = 0; d < 4; d++) {
-                if (hasWall(r, c, (AbsDir)d)) continue;  // wall blocks passage
+                if (hasWall(r, c, (AbsDir)d)) continue;
                 int nr = r + DIR_DR[d];
                 int nc = c + DIR_DC[d];
                 if (!inBounds(nr, nc)) continue;
-                if (flood[nr][nc] <= nextDist) continue; // already better or equal
+                if (flood[nr][nc] <= nextDist) continue;
                 flood[nr][nc] = nextDist;
                 qRow[tail % MAZE_CELLS] = nr;
                 qCol[tail % MAZE_CELLS] = nc;
                 tail++;
             }
         }
-
-        unsigned long elapsed = millis() - t0;
-        Serial.printf("[MAZE] floodFill() done — processed %d cells in %lu ms\n",
-                      processed, elapsed);
     }
 
-    // ---- bestDirection() — returns the neighbour direction with lowest flood value ----
-    // Returns DIR_NORTH (0) by default if all neighbours are blocked/equal.
-    // Sets 'bestDist' to the flood value of the best neighbour.
+    // ---- bestDirection() — lowest flood neighbour, no tie-breaking ----
     AbsDir bestDirection(uint8_t row, uint8_t col, uint8_t &bestDist) const {
-        bestDist   = FLOOD_INFINITY;
+        bestDist    = FLOOD_INFINITY;
         AbsDir best = DIR_NORTH;
         for (int d = 0; d < 4; d++) {
             if (hasWall(row, col, (AbsDir)d)) continue;
@@ -257,8 +241,39 @@ public:
                 best     = (AbsDir)d;
             }
         }
-        Serial.printf("[MAZE] bestDirection from (%d,%d) → dir=%d floodDist=%d\n",
-                      row, col, (int)best, (int)bestDist);
+        return best;
+    }
+
+    // ---- bestDirectionBiased() — tie-break by: forward > turn-left > turn-right > U-turn ----
+    // Reduces unnecessary turns when multiple neighbours share the minimum flood value.
+    AbsDir bestDirectionBiased(uint8_t row, uint8_t col,
+                               AbsDir currentHeading, uint8_t &bestDist) const {
+        bestDist    = FLOOD_INFINITY;
+        AbsDir best = currentHeading;
+        int    bestPref = 99;
+
+        for (int d = 0; d < 4; d++) {
+            if (hasWall(row, col, (AbsDir)d)) continue;
+            int nr = row + DIR_DR[d];
+            int nc = col + DIR_DC[d];
+            if (!inBounds(nr, nc)) continue;
+            uint8_t dist = flood[nr][nc];
+
+            // turn cost relative to current heading: 0=fwd, 1=right, 2=U, 3=left
+            int turn = ((int)d - (int)currentHeading + 4) % 4;
+            // preference: fwd=0, left=1, right=2, U-turn=3
+            int pref;
+            if      (turn == 0) pref = 0;
+            else if (turn == 3) pref = 1;
+            else if (turn == 1) pref = 2;
+            else                pref = 3;
+
+            if (dist < bestDist || (dist == bestDist && pref < bestPref)) {
+                bestDist = dist;
+                best     = (AbsDir)d;
+                bestPref = pref;
+            }
+        }
         return best;
     }
 

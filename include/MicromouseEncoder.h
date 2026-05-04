@@ -37,6 +37,10 @@ public:
         return v;
     }
 
+    // Atomic read without disabling interrupts — safe from esp_timer task.
+    // 32-bit aligned volatile read is single-instruction on Xtensa LX7.
+    long getTicksRaw() const { return count; }
+
     void reset() {
         noInterrupts();
         count = 0;
