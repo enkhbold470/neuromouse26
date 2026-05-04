@@ -215,6 +215,7 @@ void ledsUpdate(float vBat) {
 
 NimBLECharacteristic* pTX     = nullptr;
 bool                  bleConn = false;
+char                  rxCmd   = 0;
 
 void bleSend(const char* fmt, ...) {
     char buf[160];
@@ -238,6 +239,13 @@ class BLECb : public NimBLEServerCallbacks {
     void onDisconnect(NimBLEServer*) override { bleConn = false; NimBLEDevice::startAdvertising(); }
 };
 
+class RXCb : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* c) override {
+        std::string v = c->getValue();
+        if (!v.empty()) rxCmd = v[0];
+    }
+};
+
 void bleSetup() {
     NimBLEDevice::init("Micromouse26");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -245,7 +253,8 @@ void bleSetup() {
     srv->setCallbacks(new BLECb());
     auto* svc = srv->createService(NUS_SERVICE_UUID);
     pTX = svc->createCharacteristic(NUS_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
-    svc->createCharacteristic(NUS_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    auto* pRX = svc->createCharacteristic(NUS_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    pRX->setCallbacks(new RXCb());
     svc->start();
     NimBLEDevice::getAdvertising()->addServiceUUID(NUS_SERVICE_UUID);
     NimBLEDevice::startAdvertising();
@@ -483,6 +492,147 @@ void runIrCalibration() {
     bleSend("[CAL] done\n");
 }
 
+// ── Motor test helpers ────────────────────────────────────────────────────────
+// Move N cells with per-tick logging over BLE (mirrors test/motor-ble-drive.cpp)
+void moveCells(int n) {
+    long target = TICKS_PER_CELL * (long)n;
+
+    encodersEnable();
+    resetPIDs();
+
+    bleSend("[MOVE] %d cell(s) target=%ld ticks (%.0fmm)\n",
+            n, target, target * MM_PER_TICK);
+
+    unsigned long startMs = millis();
+    unsigned long lastMs  = millis();
+    unsigned long lastLog = 0;
+
+    while (true) {
+        if (Serial.available()) rxCmd = Serial.read();
+        if (rxCmd == 's') {
+            rxCmd = 0;
+            stopMotors();
+            encodersDisable();
+            bleSend("[STOP] L=%ld(%.0fmm) R=%ld(%.0fmm)\n",
+                    leftEnc.getTicks(),  leftEnc.getTicks()  * MM_PER_TICK,
+                    rightEnc.getTicks(), rightEnc.getTicks() * MM_PER_TICK);
+            return;
+        }
+
+        unsigned long now = millis();
+        float dt = (now - lastMs) / 1000.0f;
+        if (dt < 0.001f) dt = 0.001f;
+        lastMs = now;
+
+        long tL  = leftEnc.getTicks();
+        long tR  = rightEnc.getTicks();
+        long avg = (tL + tR) / 2;
+
+        float elapsed = (float)(now - startMs);
+        float v_fwd;
+        bool  inDecel;
+        if (elapsed < RAMP_TIME_MS) {
+            v_fwd   = CRUISE_SPEED * (elapsed / RAMP_TIME_MS);
+            inDecel = false;
+        } else if (avg < (long)(target * 0.55f)) {
+            v_fwd   = CRUISE_SPEED;
+            inDecel = false;
+        } else {
+            float rem = (float)(target - avg) / (target * 0.45f);
+            v_fwd   = CRUISE_SPEED * constrain(rem, 0.0f, 1.0f);
+            inDecel = true;
+        }
+
+        float balance = Kp_balance * (float)(tL - tR);
+        int pwmL = computeSpeedPID(pidL, tL, CRUISE_SPEED - balance, dt, !inDecel);
+        int pwmR = computeSpeedPID(pidR, tR, CRUISE_SPEED + balance, dt, !inDecel);
+        leftMotor.drive(pwmL);
+        rightMotor.drive(pwmR);
+
+        if (now - lastLog >= 150) {
+            lastLog = now;
+            bleSend("avg=%4ld/%-4ld L=%4ld(%.0f) R=%4ld(%.0f) pwm=%d/%d\n",
+                    avg, target,
+                    tL, tL * MM_PER_TICK,
+                    tR, tR * MM_PER_TICK,
+                    pwmL, pwmR);
+        }
+
+        if (avg >= target - BRAKE_COMP_TICKS) {
+            stopMotors();
+            encodersDisable();
+            tL = leftEnc.getTicks();
+            tR = rightEnc.getTicks();
+            long avgFinal = (tL + tR) / 2;
+            float distMM  = avgFinal * MM_PER_TICK;
+            float errMM   = (tL - tR) * MM_PER_TICK;
+            bleSend("[DONE] avg=%ld(%.0fmm) L=%ld R=%ld diff=%.1fmm t=%lums\n",
+                    avgFinal, distMM, tL, tR, errMM, millis() - startMs);
+            if (fabsf(distMM - (target * MM_PER_TICK)) > 5.0f)
+                bleSend("[WARN] dist err>5mm — tune BRAKE_COMP_TICKS (cur=%d)\n", BRAKE_COMP_TICKS);
+            else
+                bleSend("[PASS] distance OK\n");
+            if (fabsf(errMM) > 5.0f)
+                bleSend("[WARN] L-R diff>5mm — raise Kp_balance\n");
+            return;
+        }
+
+        if (millis() - startMs > (unsigned long)(12000 * n)) {
+            stopMotors();
+            encodersDisable();
+            bleSend("[TIMEOUT] avg=%ld target=%ld — raise MIN_PWM_OUT\n", avg, target);
+            return;
+        }
+    }
+}
+
+void freeRun() {
+    encodersEnable();
+    resetPIDs();
+    bleSend("[FREE] send 's' to stop\n");
+
+    unsigned long lastMs  = millis();
+    unsigned long lastLog = 0;
+
+    while (true) {
+        if (Serial.available()) rxCmd = Serial.read();
+        if (rxCmd == 's') {
+            rxCmd = 0;
+            stopMotors();
+            encodersDisable();
+            long tL = leftEnc.getTicks();
+            long tR = rightEnc.getTicks();
+            bleSend("[FREE] stopped L=%ld(%.0fmm) R=%ld(%.0fmm) diff=%.1fmm\n",
+                    tL, tL * MM_PER_TICK,
+                    tR, tR * MM_PER_TICK,
+                    (tL - tR) * MM_PER_TICK);
+            return;
+        }
+
+        unsigned long now = millis();
+        float dt = (now - lastMs) / 1000.0f;
+        if (dt < 0.001f) dt = 0.001f;
+        lastMs = now;
+
+        long tL = leftEnc.getTicks();
+        long tR = rightEnc.getTicks();
+
+        float balance = Kp_balance * (float)(tL - tR);
+        int pwmL = computeSpeedPID(pidL, tL, CRUISE_SPEED - balance, dt, true);
+        int pwmR = computeSpeedPID(pidR, tR, CRUISE_SPEED + balance, dt, true);
+        leftMotor.drive(pwmL);
+        rightMotor.drive(pwmR);
+
+        if (now - lastLog >= 200) {
+            lastLog = now;
+            bleSend("L=%ld(%.0f) R=%ld(%.0f) diff=%+ld pwm=%d/%d\n",
+                    tL, tL * MM_PER_TICK,
+                    tR, tR * MM_PER_TICK,
+                    tL - tR, pwmL, pwmR);
+        }
+    }
+}
+
 // ── FSM ───────────────────────────────────────────────────────────────────────
 enum State {
     STATE_IDLE,
@@ -491,7 +641,8 @@ enum State {
     STATE_ARMED,
     STATE_EXPLORE,
     STATE_GOAL_REACHED,
-    STATE_STOP
+    STATE_STOP,
+    STATE_MOTOR_TEST
 };
 State state = STATE_IDLE;
 
@@ -563,7 +714,14 @@ void loop() {
     case STATE_STANDBY:
         leds[7] = CRGB(0, 200, 200);  // cyan
         ledsUpdate(vBat);
-        bleSend("[STANDBY] place robot at (0,0), press button to arm\n");
+        if (Serial.available()) rxCmd = Serial.read();
+        if (rxCmd == 'm') {
+            rxCmd = 0;
+            bleSend("[MOTOR_TEST] cmds: 1-5=cells f=free s=stop r=reset ?=status q=exit\n");
+            state = STATE_MOTOR_TEST;
+            break;
+        }
+        rxCmd = 0;
         if (buttonPressed()) {
             resetRunState();
             beep(80);
@@ -676,6 +834,50 @@ void loop() {
             state = STATE_STANDBY;
         }
         delay(100);
+        break;
+
+    case STATE_MOTOR_TEST:
+        leds[7] = CRGB(0, 0, 200);  // blue = motor test
+        FastLED.show();
+        if (Serial.available()) rxCmd = Serial.read();
+        if (rxCmd == 0) { delay(20); break; }
+        {
+            char cmd = rxCmd;
+            rxCmd = 0;
+            switch (cmd) {
+                case '1': moveCells(1); break;
+                case '2': moveCells(2); break;
+                case '3': moveCells(3); break;
+                case '4': moveCells(4); break;
+                case '5': moveCells(5); break;
+                case 'f': freeRun(); break;
+                case 's':
+                    stopMotors();
+                    encodersDisable();
+                    bleSend("[STOP]\n");
+                    break;
+                case 'r':
+                    encodersDisable();
+                    bleSend("[RESET] encoders detached\n");
+                    break;
+                case '?':
+                    bleSend("[STATUS] L=%ld(%.0fmm) R=%ld(%.0fmm) diff=%+ld\n",
+                            leftEnc.getTicks(),  leftEnc.getTicks()  * MM_PER_TICK,
+                            rightEnc.getTicks(), rightEnc.getTicks() * MM_PER_TICK,
+                            leftEnc.getTicks() - rightEnc.getTicks());
+                    break;
+                case 'q':
+                    stopMotors();
+                    encodersDisable();
+                    fill_solid(leds, NUM_LEDS, CRGB::Black);
+                    FastLED.show();
+                    bleSend("[MOTOR_TEST] exit → STANDBY\n");
+                    state = STATE_STANDBY;
+                    break;
+                default:
+                    bleSend("[?] '%c' unknown. cmds: 1-5 f s r ? q\n", cmd);
+            }
+        }
         break;
     }
 }
