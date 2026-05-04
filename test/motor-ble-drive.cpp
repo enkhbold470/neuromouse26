@@ -26,7 +26,8 @@ static const float CRUISE_SPEED = 400.0f;  // ticks/sec
 static const float RAMP_TIME_MS = 200.0f;  // ms to ramp from 0 → cruise
 static const float Kp_speed     = 2.0f;
 static const float Ki_speed     = 0.8f;
-static const float Kp_heading   = 3.0f;    // ticks/sec per degree yaw error
+static const float Kp_heading   = 1.5f;    // ticks/sec per degree yaw error
+                                            // at 1° → 1.5 t/s on 400 t/s base = 0.4% correction
 static const int   MIN_PWM_OUT  = 200;     // minimum PWM written to motor — ensures motion
                                             // raise if motors still don't move (try 250, 300)
 
@@ -97,7 +98,7 @@ void imuBegin() {
 // ── Motors + Encoders ─────────────────────────────────────────────────────────
 MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "L");
 MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, "R");
-MicromouseEncoder leftEnc   (ENC_L_A, ENC_L_B, "L");
+MicromouseEncoder leftEnc   (ENC_L_A, ENC_L_B, "L", true);  // reversed: A/B swapped on PCB
 MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B, "R");
 
 void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
