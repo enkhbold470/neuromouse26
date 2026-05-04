@@ -39,24 +39,24 @@
 
 // Cell distance in encoder ticks (see math above)
 #define TICKS_PER_CELL  360L
-#define MAX_CELLS       5
+#define MAX_CELLS       3
 #define CELL_PAUSE_MS   50
 
-// 90-degree pivot turn
-// WHEEL_TRACK_MM: centre-to-centre axle width — measure physically and tune.
-// Formula: ticks = (π × track / 4) × (TICKS_PER_REV / (π × WHEEL_DIAMETER))
-//                = track × TICKS_PER_REV / (4 × WHEEL_DIAMETER)
-//                = 74 × 210 / (4 × 33.4) ≈ 116  (tune ±10 ticks on real hardware)
+// 90-degree encoder pivot turn
+// WHEEL_TRACK_MM: centre-to-centre axle width — measure and tune physically.
+// ticks = track × TICKS_PER_REV / (4 × WHEEL_DIAMETER)
+// = 74 × 210 / (4 × 33.4) ≈ 116 ticks
 #define WHEEL_TRACK_MM  74.0f
 #define TICKS_PER_90    (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER))
-#define TURN_PWM        400
+#define TURN_PWM        200
+// TURN_DIR after 5 cells: 1 = right (left fwd / right back), -1 = left (left back / right fwd)
+#define TURN_DIR        1
 
 // ── Hardware ──────────────────────────────────────────────────────────────────
-MicromouseMotor leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "L");
-MicromouseMotor rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, "R");
-
-MicromouseEncoder encLeft (ENC_L_A, ENC_L_B);
-MicromouseEncoder encRight(ENC_R_A, ENC_R_B);
+MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "L");
+MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, "R");
+MicromouseEncoder encLeft   (ENC_L_A, ENC_L_B);
+MicromouseEncoder encRight  (ENC_R_A, ENC_R_B);
 
 void IRAM_ATTR isrLeft()  { encLeft.handleInterrupt();  }
 void IRAM_ATTR isrRight() { encRight.handleInterrupt(); }
@@ -119,20 +119,27 @@ void stopMotors() {
     leftMotor.coast(); rightMotor.coast();
 }
 
-// Pivot right 90°: left wheel forward, right wheel backward.
-// Encoder interrupts count ticks in IRAM — accurate even at speed.
-// Change leftMotor/rightMotor signs for left turn.
-void turnRight90() {
+// Pivot 90° in either direction.
+// dir =  1 → right: left forward,  right backward
+// dir = -1 → left:  left backward, right forward
+// Averages absolute ticks from both wheels for a symmetrical stop.
+void turn90(int dir) {
     encLeft.reset();
     encRight.reset();
 
     while (true) {
-        long fwd = encLeft.getTicks();         // left goes forward → positive
-        long rev = -encRight.getTicks();       // right goes backward → ticks negative, negate
-        if ((fwd + rev) / 2 >= TICKS_PER_90) break;
+        // For right turn: encLeft positive (fwd), encRight negative (back) → negate
+        // For left  turn: encRight positive (fwd), encLeft negative (back) → negate
+        long ticksL = encLeft.getTicks();
+        long ticksR = encRight.getTicks();
+        long avg = (dir == 1)
+                   ? ( ticksL + (-ticksR)) / 2   // right: L fwd, R back
+                   : ((-ticksL) + ticksR)  / 2;  // left:  L back, R fwd
 
-        leftMotor.drive( TURN_PWM);
-        rightMotor.drive(-TURN_PWM);
+        if (avg >= TICKS_PER_90) break;
+
+        leftMotor.drive( dir * TURN_PWM);
+        rightMotor.drive(-dir * TURN_PWM);
     }
 
     stopMotors();
@@ -165,6 +172,7 @@ void setup() {
         digitalWrite(EMIT_PINS[i], LOW);
         pinMode(RX_PINS[i], INPUT);
     }
+
 }
 
 void loop() {
@@ -180,7 +188,7 @@ void loop() {
             cellCount = 0;
             resetCellBase();
         }
-        delay(30);
+        delay(2000);
     }
 
     if (!running) return;
@@ -220,7 +228,7 @@ void loop() {
 
         if (cellCount >= MAX_CELLS) {
             delay(CELL_PAUSE_MS);
-            turnRight90();
+            turn90(TURN_DIR);
             running = false;
             return;
         }
