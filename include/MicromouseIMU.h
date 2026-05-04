@@ -112,16 +112,17 @@ public:
 
         float delta = rate * dt;
         currentYaw += delta;
-
-        // Verbose: log every integration step (very chatty — comment out for speed runs)
-        Serial.printf("[IMU] update() dt=%.4fs  rate=%.4f°/s  delta=%.4f°  yaw=%.3f°\n",
-                      dt, rate, delta, currentYaw);
     }
 
     // --------------------------------------------------------------------------
     // getYaw() — current integrated yaw angle in degrees
     // --------------------------------------------------------------------------
     float getYaw() const { return currentYaw; }
+
+    // --------------------------------------------------------------------------
+    // getBias() — calibrated Z-axis gyro bias in °/s (used by self-test)
+    // --------------------------------------------------------------------------
+    float getBias() const { return gyroBiasZ; }
 
     // --------------------------------------------------------------------------
     // resetYaw() — zero the accumulated yaw (call at start of each move)
