@@ -1,14 +1,11 @@
 // test/motor-ble-drive.cpp
 //
-// Straight-line drive using:
-//   - Per-wheel speed PID (inner loop, 1 kHz via hw timer)
-//   - Gyro yaw correction applied SYMMETRICALLY to both wheels (outer loop)
-//   - Encoder distance for stop condition
-//   - Trapezoidal velocity profile (ramp up → cruise → ramp down)
-//
-// Architecture matches micromouse-algorithm doc:
-//   Inner 1kHz: encoder ticks → speed PID → PWM
-//   Outer 100Hz: gyro heading → correction → adjust speed targets
+// Fixes vs previous version:
+//   1. Ramp is TIME-based, not encoder-based — no deadlock
+//   2. Speed PID output has a PWM floor (MIN_PWM_OUT) — motor always gets
+//      enough to overcome stiction regardless of integral windup state
+//   3. Encoder ISRs disabled until motors actually start — kills false counts
+//   4. drive() no longer prints every call — control loop can run at 100Hz
 //
 // BLE / Serial commands:
 //   1-5  → move N cells (180mm each)
@@ -16,14 +13,6 @@
 //   s    → stop
 //   r    → reset
 //   ?    → status
-//
-// ── Tuning (change these first) ──────────────────────────────────────────────
-// CRUISE_SPEED_TICKS_S : target wheel speed in ticks/sec
-//   500rpm motor → ~8.3 rev/s → 8.3 * 210 ticks ≈ 1750 ticks/s max
-//   Start at 400 (~23% max speed) — reliable and easy to correct
-// Kp_speed, Ki_speed   : inner speed loop. Start Kp=1.5, Ki=0.3
-// Kp_heading           : yaw correction gain. Start at 3.0
-//   At 1° error → 3 ticks/s correction on each motor (very mild)
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -33,11 +22,13 @@
 #include "MicromouseEncoder.h"
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-static const float CRUISE_SPEED   = 400.0f;  // ticks/sec target speed
-static const float RAMP_TICKS     = 30.0f;   // ticks to ramp up over (~15mm)
-static const float Kp_speed       = 1.5f;    // inner speed PID
-static const float Ki_speed       = 0.3f;
-static const float Kp_heading     = 3.0f;    // outer heading correction (ticks/s per degree)
+static const float CRUISE_SPEED = 400.0f;  // ticks/sec
+static const float RAMP_TIME_MS = 200.0f;  // ms to ramp from 0 → cruise
+static const float Kp_speed     = 2.0f;
+static const float Ki_speed     = 0.8f;
+static const float Kp_heading   = 3.0f;    // ticks/sec per degree yaw error
+static const int   MIN_PWM_OUT  = 200;     // minimum PWM written to motor — ensures motion
+                                            // raise if motors still don't move (try 250, 300)
 
 // ── Physics ───────────────────────────────────────────────────────────────────
 #define CELL_MM        180.0f
@@ -52,9 +43,8 @@ static const float Kp_heading     = 3.0f;    // outer heading correction (ticks/
 #define GYRO_NOISE_FLOOR 0.05f
 #define CALIB_SAMPLES    200
 
-float         gyroBiasZ  = 0.0f;
-volatile float yawDeg    = 0.0f;    // updated in 1kHz ISR
-unsigned long lastIMU_us = 0;
+float gyroBiasZ = 0.0f;
+float yawDeg    = 0.0f;
 
 struct IMURaw { int16_t ax, ay, az, temp, gx, gy, gz; };
 bool imuReadAll(IMURaw& d) {
@@ -90,19 +80,16 @@ void imuBegin() {
     Wire.setClock(400000);
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(REG_PWR_MGMT_1); Wire.write(0x00);
-    if (Wire.endTransmission() != 0) {
-        Serial.println("[IMU] ERROR: wake failed");
-        return;
-    }
+    if (Wire.endTransmission() != 0) { Serial.println("[IMU] wake FAIL"); return; }
     delay(100);
-    Serial.printf("[IMU] calibrating %d samples...\n", CALIB_SAMPLES);
+    Serial.printf("[IMU] calibrating %d samples — keep still...\n", CALIB_SAMPLES);
     float sum = 0; int good = 0;
     for (int i = 0; i < CALIB_SAMPLES; i++) {
         IMURaw d;
         if (imuReadAll(d)) { sum += d.gz / GYRO_SCALE_DPS; good++; }
         delay(2);
     }
-    gyroBiasZ = good ? sum / good : 0;
+    gyroBiasZ = good ? sum / good : 0.0f;
     Serial.printf("[IMU] bias=%.4f dps (%d good)\n", gyroBiasZ, good);
     imuResetYaw();
 }
@@ -116,36 +103,48 @@ MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B, "R");
 void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
 void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
 
-// ── Inner speed PID state ─────────────────────────────────────────────────────
+void encodersEnable() {
+    leftEnc.reset();
+    rightEnc.reset();
+    attachInterrupt(digitalPinToInterrupt(ENC_L_A), leftISR,  RISING);
+    attachInterrupt(digitalPinToInterrupt(ENC_R_A), rightISR, RISING);
+}
+
+void encodersDisable() {
+    detachInterrupt(digitalPinToInterrupt(ENC_L_A));
+    detachInterrupt(digitalPinToInterrupt(ENC_R_A));
+}
+
+// ── Speed PID ─────────────────────────────────────────────────────────────────
 struct SpeedPID {
-    float integral   = 0;
-    long  prevTicks  = 0;
-    float prevSpeed  = 0;
+    float integral  = 0;
+    long  prevTicks = 0;
+    float prevSpeed = 0;
 };
 SpeedPID pidL, pidR;
 
-// Compute PWM output for one wheel.
-// target: desired speed in ticks/sec
-// Returns signed PWM for motor.drive()
-int computeSpeedPID(SpeedPID& pid, long currentTicks, float target, float dt) {
-    // Speed estimate (ticks/sec), low-pass filtered
-    float raw_speed = (currentTicks - pid.prevTicks) / dt;
-    pid.prevSpeed   = 0.7f * pid.prevSpeed + 0.3f * raw_speed;  // LP filter
-    pid.prevTicks   = currentTicks;
+// Returns PWM for motor.drive(). Always >= MIN_PWM_OUT when target > 0.
+int computeSpeedPID(SpeedPID& pid, long ticks, float target, float dt) {
+    float rawSpeed   = (ticks - pid.prevTicks) / dt;
+    pid.prevSpeed    = 0.7f * pid.prevSpeed + 0.3f * rawSpeed;
+    pid.prevTicks    = ticks;
 
-    float error     = target - pid.prevSpeed;
-    pid.integral   += error * dt;
-    pid.integral    = constrain(pid.integral, -500.0f, 500.0f);  // anti-windup
+    float error      = target - pid.prevSpeed;
+    pid.integral    += error * dt;
+    pid.integral     = constrain(pid.integral, -800.0f, 800.0f);
 
     float output = Kp_speed * error + Ki_speed * pid.integral;
+
+    // Floor: if we want forward motion, never give less than MIN_PWM_OUT
+    if (target > 0 && output < MIN_PWM_OUT) output = MIN_PWM_OUT;
+    if (target < 0 && output > -MIN_PWM_OUT) output = -MIN_PWM_OUT;
+
     return (int)constrain(output, -1023.0f, 1023.0f);
 }
 
-void resetPID() {
-    pidL = SpeedPID();
-    pidR = SpeedPID();
-    pidL.prevTicks = leftEnc.getTicks();
-    pidR.prevTicks = rightEnc.getTicks();
+void resetPID(long tL, long tR) {
+    pidL = SpeedPID(); pidL.prevTicks = tL;
+    pidR = SpeedPID(); pidR.prevTicks = tR;
 }
 
 void stopMotors() {
@@ -200,7 +199,8 @@ void bleSetup() {
     srv->setCallbacks(new BLECb());
     auto* svc = srv->createService(NUS_SERVICE_UUID);
     pTX = svc->createCharacteristic(NUS_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
-    auto* pRX = svc->createCharacteristic(NUS_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    auto* pRX = svc->createCharacteristic(NUS_RX_UUID,
+                    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     pRX->setCallbacks(new RXCb());
     svc->start();
     NimBLEDevice::getAdvertising()->addServiceUUID(NUS_SERVICE_UUID);
@@ -209,115 +209,102 @@ void bleSetup() {
 
 // ── Move N cells ──────────────────────────────────────────────────────────────
 //
-// Outer loop runs at ~100Hz (every 10ms).
-// Inner speed PID runs inside this loop but uses its own dt measurement.
+// Velocity profile — TIME based (not encoder based):
+//   0 → RAMP_TIME_MS         : ramp 0 → CRUISE_SPEED
+//   until distance 80% done  : cruise
+//   last 20% distance        : ramp down to 0
 //
-// Velocity profile:
-//   0 → RAMP_TICKS       : linearly ramp from 0 → CRUISE_SPEED
-//   RAMP_TICKS → target-RAMP_TICKS : cruise at CRUISE_SPEED
-//   target-RAMP_TICKS → target      : linearly ramp from CRUISE_SPEED → 0
-//
-// Heading correction (symmetric):
-//   yaw > 0 → drifting left → slow left, speed right
-//   correction = Kp_heading * yaw  (in ticks/sec)
-//   v_left  = v_forward - correction
-//   v_right = v_forward + correction
+// Heading correction — SYMMETRIC:
+//   correction = Kp_heading * yawDeg  (ticks/sec)
+//   v_left  = v_fwd - correction
+//   v_right = v_fwd + correction
 
 void moveCells(int n) {
-    long target   = TICKS_PER_CELL * (long)n;
-    long rampDown = target - (long)RAMP_TICKS;
+    long target = TICKS_PER_CELL * (long)n;
 
-    leftEnc.reset();
-    rightEnc.reset();
     imuResetYaw();
-    resetPID();
+    encodersEnable();   // attach ISRs fresh — clears noisy pre-counts
+    resetPID(0, 0);
 
-    bleSend("[MOVE] %d cell(s) target=%ld ticks (%.0fmm)\n",
-            n, target, target * MM_PER_TICK);
-    bleSend("[MOVE] speed=%.0f t/s  Kp_h=%.1f  ramp=%d ticks\n",
-            CRUISE_SPEED, Kp_heading, (int)RAMP_TICKS);
+    bleSend("[MOVE] %d cell(s) target=%ld ticks (%.0fmm) MIN_PWM=%d\n",
+            n, target, target * MM_PER_TICK, MIN_PWM_OUT);
 
-    unsigned long startMs  = millis();
-    unsigned long lastMs   = millis();
-    unsigned long lastLog  = 0;
+    unsigned long startMs = millis();
+    unsigned long lastMs  = millis();
+    unsigned long lastLog = 0;
 
     while (true) {
-        // Check stop command
         if (Serial.available()) rxCmd = Serial.read();
         if (rxCmd == 's') {
             rxCmd = 0;
             stopMotors();
-            bleSend("[MOVE] stopped L=%ld R=%ld yaw=%.2f\n",
-                    leftEnc.getTicks(), rightEnc.getTicks(), yawDeg);
+            encodersDisable();
+            bleSend("[MOVE] stopped L=%ld R=%ld\n",
+                    leftEnc.getTicks(), rightEnc.getTicks());
             return;
         }
 
         unsigned long now = millis();
         float dt = (now - lastMs) / 1000.0f;
-        if (dt < 0.001f) dt = 0.001f;  // guard against dt=0
+        if (dt < 0.001f) dt = 0.001f;
         lastMs = now;
 
-        // Update gyro
         imuUpdateYaw(dt);
 
         long tL  = leftEnc.getTicks();
         long tR  = rightEnc.getTicks();
         long avg = (tL + tR) / 2;
 
-        // Trapezoidal speed profile
+        // Time-based ramp up
+        float elapsed = (float)(now - startMs);
         float v_forward;
-        if (avg < (long)RAMP_TICKS) {
-            // Ramp up
-            v_forward = CRUISE_SPEED * ((float)avg / RAMP_TICKS);
-            v_forward = max(v_forward, CRUISE_SPEED * 0.15f);  // min 15% to overcome stiction
-        } else if (avg < rampDown) {
-            // Cruise
+        if (elapsed < RAMP_TIME_MS) {
+            v_forward = CRUISE_SPEED * (elapsed / RAMP_TIME_MS);
+        } else if (avg < (long)(target * 0.80f)) {
             v_forward = CRUISE_SPEED;
         } else {
-            // Ramp down
-            float remaining = (float)(target - avg);
-            v_forward = CRUISE_SPEED * (remaining / RAMP_TICKS);
-            v_forward = max(v_forward, CRUISE_SPEED * 0.15f);  // keep moving
+            // Ramp down over last 20% of distance
+            float remaining = (float)(target - avg) / (target * 0.20f);
+            v_forward = CRUISE_SPEED * constrain(remaining, 0.0f, 1.0f);
         }
 
-        // Heading correction — symmetric on both motors
-        float correction = Kp_heading * yawDeg;  // ticks/sec
-        float v_left_cmd  = v_forward - correction;
-        float v_right_cmd = v_forward + correction;
+        // Symmetric heading correction
+        float corr    = Kp_heading * yawDeg;
+        float vL_cmd  = v_forward - corr;
+        float vR_cmd  = v_forward + corr;
 
-        // Inner speed PID — converts speed targets to PWM
-        int pwmL = computeSpeedPID(pidL, tL, v_left_cmd,  dt);
-        int pwmR = computeSpeedPID(pidR, tR, v_right_cmd, dt);
+        int pwmL = computeSpeedPID(pidL, tL, vL_cmd, dt);
+        int pwmR = computeSpeedPID(pidR, tR, vR_cmd, dt);
 
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
-        // Log every 150ms
         if (now - lastLog >= 150) {
             lastLog = now;
-            bleSend("avg=%4ld v=%.0f yaw=%+.2f corr=%+.0f L=%d R=%d\n",
-                    avg, v_forward, yawDeg, correction, pwmL, pwmR);
+            bleSend("avg=%4ld v=%.0f yaw=%+.2f L=%d R=%d\n",
+                    avg, v_forward, yawDeg, pwmL, pwmR);
         }
 
-        // Done
         if (avg >= target) {
             stopMotors();
+            encodersDisable();
             tL = leftEnc.getTicks();
             tR = rightEnc.getTicks();
-            bleSend("[DONE] L=%ld(%.1fmm) R=%ld(%.1fmm) yaw=%+.2f t=%lums\n",
-                    tL, tL * MM_PER_TICK, tR, tR * MM_PER_TICK,
+            bleSend("[DONE] L=%ld(%.0fmm) R=%ld(%.0fmm) yaw=%+.2f t=%lums\n",
+                    tL, tL*MM_PER_TICK, tR, tR*MM_PER_TICK,
                     yawDeg, millis() - startMs);
             if (fabsf(yawDeg) > 3.0f)
-                bleSend("[WARN] yaw>3deg — raise Kp_heading (now %.1f)\n", Kp_heading);
+                bleSend("[WARN] yaw>3deg — raise Kp_heading\n");
             else
                 bleSend("[PASS] heading OK\n");
             return;
         }
 
-        // Timeout
         if (millis() - startMs > (unsigned long)(8000 * n)) {
             stopMotors();
-            bleSend("[TIMEOUT] avg=%ld target=%ld — raise CRUISE_SPEED?\n", avg, target);
+            encodersDisable();
+            bleSend("[TIMEOUT] avg=%ld target=%ld — raise MIN_PWM_OUT or CRUISE_SPEED\n",
+                    avg, target);
             return;
         }
     }
@@ -325,11 +312,10 @@ void moveCells(int n) {
 
 // ── Free-run ──────────────────────────────────────────────────────────────────
 void freeRun() {
-    leftEnc.reset();
-    rightEnc.reset();
     imuResetYaw();
-    resetPID();
-    bleSend("[FREE] running — send 's' to stop\n");
+    encodersEnable();
+    resetPID(0, 0);
+    bleSend("[FREE] send 's' to stop\n");
 
     unsigned long lastMs  = millis();
     unsigned long lastLog = 0;
@@ -339,6 +325,7 @@ void freeRun() {
         if (rxCmd == 's') {
             rxCmd = 0;
             stopMotors();
+            encodersDisable();
             bleSend("[FREE] stopped L=%ld R=%ld yaw=%.2f\n",
                     leftEnc.getTicks(), rightEnc.getTicks(), yawDeg);
             return;
@@ -351,16 +338,16 @@ void freeRun() {
 
         imuUpdateYaw(dt);
 
-        float correction  = Kp_heading * yawDeg;
-        int pwmL = computeSpeedPID(pidL, leftEnc.getTicks(),  CRUISE_SPEED - correction, dt);
-        int pwmR = computeSpeedPID(pidR, rightEnc.getTicks(), CRUISE_SPEED + correction, dt);
+        float corr = Kp_heading * yawDeg;
+        int pwmL = computeSpeedPID(pidL, leftEnc.getTicks(),  CRUISE_SPEED - corr, dt);
+        int pwmR = computeSpeedPID(pidR, rightEnc.getTicks(), CRUISE_SPEED + corr, dt);
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
         if (now - lastLog >= 200) {
             lastLog = now;
-            bleSend("L=%ld R=%ld yaw=%+.2f\n",
-                    leftEnc.getTicks(), rightEnc.getTicks(), yawDeg);
+            bleSend("L=%ld R=%ld yaw=%+.2f pwmL=%d pwmR=%d\n",
+                    leftEnc.getTicks(), rightEnc.getTicks(), yawDeg, pwmL, pwmR);
         }
     }
 }
@@ -370,12 +357,11 @@ void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    Serial.println("\n[INIT] motor-ble-drive v2 (speed PID + gyro heading)");
+    Serial.println("\n[INIT] motor-ble-drive v3");
     Serial.printf("[INIT] TICKS_PER_CELL=%ld  MM_PER_TICK=%.4f\n",
                   TICKS_PER_CELL, MM_PER_TICK);
-    Serial.printf("[INIT] CRUISE=%.0f t/s  Kp_spd=%.1f  Ki_spd=%.2f  Kp_hdg=%.1f\n",
-                  CRUISE_SPEED, Kp_speed, Ki_speed, Kp_heading);
-    Serial.println("[INIT] Keep robot STILL during IMU calibration...");
+    Serial.printf("[INIT] CRUISE=%.0f t/s  MIN_PWM=%d  Kp_spd=%.1f  Kp_hdg=%.1f\n",
+                  CRUISE_SPEED, MIN_PWM_OUT, Kp_speed, Kp_heading);
 
     pinMode(DRV_SLEEP_PIN, OUTPUT);
     digitalWrite(DRV_SLEEP_PIN, HIGH);
@@ -383,16 +369,14 @@ void setup() {
     leftMotor.begin();
     rightMotor.begin();
 
+    // Set encoder pins but DO NOT attach ISRs yet — prevents noise counts at idle
     pinMode(ENC_L_A, INPUT_PULLUP); pinMode(ENC_L_B, INPUT_PULLUP);
     pinMode(ENC_R_A, INPUT_PULLUP); pinMode(ENC_R_B, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(ENC_L_A), leftISR,  RISING);
-    attachInterrupt(digitalPinToInterrupt(ENC_R_A), rightISR, RISING);
 
     imuBegin();
     bleSetup();
 
-    Serial.println("[INIT] ready — BLE: 'Micromouse26-Motor'");
-    Serial.println("[INIT] cmds: 1-5=N cells  f=freerun  s=stop  r=reset  ?=status");
+    Serial.println("[INIT] ready — cmds: 1-5=cells  f=free  s=stop  r=reset  ?=status");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
@@ -408,18 +392,19 @@ void loop() {
         case '3': moveCells(3); break;
         case '4': moveCells(4); break;
         case '5': moveCells(5); break;
-        case 'f': freeRun(); break;
-        case 's': stopMotors(); bleSend("[STOP]\n"); break;
+        case 'f': freeRun();    break;
+        case 's': stopMotors(); encodersDisable(); bleSend("[STOP]\n"); break;
         case 'r':
-            leftEnc.reset(); rightEnc.reset(); imuResetYaw(); resetPID();
-            bleSend("[RESET] done\n");
+            encodersDisable();
+            imuResetYaw();
+            bleSend("[RESET] yaw=0 encoders detached\n");
             break;
         case '?':
-            bleSend("[STATUS] L=%ld(%.1fmm) R=%ld yaw=%.2f\n",
+            bleSend("[STATUS] L=%ld(%.0fmm) R=%ld yaw=%.2f\n",
                     leftEnc.getTicks(), leftEnc.getTicks()*MM_PER_TICK,
                     rightEnc.getTicks(), yawDeg);
             break;
         default:
-            bleSend("[?] unknown '%c'\n", cmd);
+            bleSend("[?] '%c' unknown\n", cmd);
     }
 }

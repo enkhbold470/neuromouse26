@@ -72,24 +72,16 @@ public:
         int original = speed;
         speed = constrain(speed, -MAX_PWM, MAX_PWM);
 
-        if (speed == 0) {
-            Serial.printf("[MOTOR:%s] drive(%d) → COAST\n", label, original);
-            coast();
-            return;
-        }
+        if (speed == 0) { coast(); return; }
 
         if (speed > 0) {
             int pwm = map(speed, 1, MAX_PWM, MIN_POWER, MAX_PWM);
             ledcWrite(ch1, pwm);
             ledcWrite(ch2, 0);
-            Serial.printf("[MOTOR:%s] drive(%d) → FORWARD  pwm=%d\n",
-                          label, original, pwm);
         } else {
             int pwm = map(-speed, 1, MAX_PWM, MIN_POWER, MAX_PWM);
             ledcWrite(ch1, 0);
             ledcWrite(ch2, pwm);
-            Serial.printf("[MOTOR:%s] drive(%d) → REVERSE  pwm=%d\n",
-                          label, original, pwm);
         }
     }
 
