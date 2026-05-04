@@ -2,10 +2,16 @@
 // main.cpp — Micromouse26 full firmware
 //
 // FSM:
-//   IDLE → (button) → CALIBRATE → (cal done) → READY
-//   READY → (finger on LF sensor) → 1s delay → EXPLORE
-//   EXPLORE → (goal reached) → GOAL_REACHED → STOP
-//   STOP → (button) → IDLE
+//   IDLE      → (button)         → CALIBRATE
+//   CALIBRATE → (cal done)       → STANDBY
+//   STANDBY   → (button)         → ARMED        ← place robot at (0,0) first
+//   ARMED     → (3 waves on LF)  → 1s delay → EXPLORE
+//   ARMED     → (button)         → STANDBY       ← cancel / re-place
+//   EXPLORE   → (goal reached)   → GOAL_REACHED → STOP
+//   EXPLORE   → (trapped/timeout)→ STOP
+//   STOP      → (button)         → STANDBY       ← irCal preserved, maze reset
+//
+// IR calibration survives across runs. Only re-run explicitly from IDLE.
 //
 // Maze: 3×6 draft, goal = (row=5, col=2)
 //   Uses 16×16 MicromouseMaze with setGoalSingle(5,2)
@@ -24,7 +30,7 @@
 //   4 = R45 sensor   (green=open → red=wall)
 //   5 = RF sensor    (green=open → red=wall)
 //   6 = battery      (blue=full → red=low)
-//   7 = state        (IDLE=off CALIBRATE=yellow READY=cyan EXPLORE=green GOAL=white)
+//   7 = state        (IDLE=off CALIBRATE=yellow STANDBY=cyan ARMED=white EXPLORE=green GOAL=white STOP=red)
 // =============================================================================
 
 #include <Arduino.h>
@@ -49,8 +55,8 @@
 #define TURN_STOP_DEG   88.0f  // stop turn at this angle
 #define MOVE_TIMEOUT_MS 4000   // forward move safety cutoff
 #define TURN_TIMEOUT_MS 3000   // turn safety cutoff
-#define FINGER_THRESH   0.5f   // normalized LF reading to trigger start (finger blocks sensor)
-#define FINGER_CONFIRM  3      // consecutive readings above threshold to confirm
+#define FINGER_THRESH   0.5f   // normalized LF reading to detect hand (wave trigger)
+#define WAVES_NEEDED    3      // number of wave events (enter+leave) to start run
 
 // ── Physics ───────────────────────────────────────────────────────────────────
 #define CELL_MM        180.0f
@@ -69,7 +75,7 @@ void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
 void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
 
 // ── IR calibration ────────────────────────────────────────────────────────────
-IrCal irCal[IR_COUNT];   // LF, L45, R45, RF
+IrCal irCal[IR_COUNT];   // LF, L45, R45, RF — persists across runs, only cleared in CALIBRATE
 
 // ── IMU ───────────────────────────────────────────────────────────────────────
 #define MPU_ADDR         0x68
@@ -120,7 +126,6 @@ void imuResetYaw() {
 }
 
 void imuCalibrate() {
-    // Called once at boot — Serial only, BLE not up yet
     Wire.begin(IMU_SDA, IMU_SCL);
     Wire.setClock(400000);
     Wire.beginTransmission(MPU_ADDR);
@@ -159,7 +164,6 @@ int speedPID(SpeedPID& p, long ticks, float target, float dt) {
     p.integral     += err * dt;
     p.integral      = constrain(p.integral, -600.0f, 600.0f);
     float out       = Kp_speed * err + Ki_speed * p.integral;
-    // floor: always enough to overcome stiction when target > 0
     if (target > 0 && out < (float)CRUISE_PWM * 0.3f)
         out = (float)CRUISE_PWM * 0.3f;
     return (int)constrain(out, 0.0f, 1023.0f);
@@ -278,24 +282,31 @@ void stopMotors() {
     rightMotor.coast();
 }
 
+// ── resetRunState() ───────────────────────────────────────────────────────────
+// Reset maze + position for new run. irCal is NOT touched.
+void resetRunState() {
+    robotRow = 0;
+    robotCol = 0;
+    heading  = DIR_NORTH;
+    maze.reset();
+    maze.setGoalSingle(5, 2);
+    // Note: no DIR_EAST wall on (0,0) — the manual wall was causing flood-fill
+    // to box in the start cell → "TRAPPED" on first explore step.
+    maze.floodFill();
+    bleSend("[RUN] maze reset, floodFill done, pos=(0,0) heading=N\n");
+}
+
 // ── moveForwardOneCell() ──────────────────────────────────────────────────────
-// Steering priority:
-//   Both 45° sensors see walls → IR lateral centering
-//   One or no walls            → gyro heading hold
-// No Serial inside loop.
 void moveForwardOneCell() {
     leftEnc.reset();
     rightEnc.reset();
     imuResetYaw();
     resetPIDs();
 
-    // Speed in ticks/sec: CRUISE_PWM maps to roughly CRUISE_PWM ticks/s at this motor
-    // PID handles the actual conversion — just use PWM as a proxy target
     const float CRUISE_SPEED = (float)CRUISE_PWM;
     unsigned long startMs = millis();
     unsigned long lastMs  = millis();
 
-    // LED feedback: 2=left motor, 3=right motor
     leds[2] = CRGB(0, 40, 0);
     leds[3] = CRGB(0, 40, 0);
     FastLED.show();
@@ -313,7 +324,6 @@ void moveForwardOneCell() {
         long tR  = rightEnc.getTicks();
         long avg = (tL + tR) / 2;
 
-        // Time-based trapezoidal ramp
         float elapsed = (float)(now - startMs);
         float v_fwd;
         if (elapsed < (float)RAMP_MS) {
@@ -325,7 +335,6 @@ void moveForwardOneCell() {
             v_fwd = CRUISE_SPEED * constrain(rem, 0.15f, 1.0f);
         }
 
-        // Steering
         float nL = irCal[IR_LEFT_45].normalize(ir.raw[IR_LEFT_45]);
         float nR = irCal[IR_RIGHT_45].normalize(ir.raw[IR_RIGHT_45]);
         bool  wL = nL > 0.3f;
@@ -333,16 +342,12 @@ void moveForwardOneCell() {
 
         float correction;
         if (wL && wR) {
-            // Both walls: center between them
             correction = Kp_lat * (nL - nR);
         } else if (wL) {
-            // Only left wall: maintain half-normalized distance
             correction = Kp_lat * (nL - 0.5f);
         } else if (wR) {
-            // Only right wall
             correction = Kp_lat * (0.5f - nR);
         } else {
-            // No walls: gyro heading hold
             correction = Kp_yaw * yawDeg;
         }
 
@@ -355,7 +360,6 @@ void moveForwardOneCell() {
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
-        // Motor activity LEDs (no Serial)
         leds[2] = CRGB(0, (uint8_t)(pwmL / 4), 0);
         leds[3] = CRGB(0, (uint8_t)(pwmR / 4), 0);
 
@@ -387,11 +391,9 @@ void turnRight90() {
 
     while (true) {
         imuUpdate();
-        float a = yawDeg;   // negative = right turn (robot turns clockwise)
-        float absA = fabsf(a);
+        float absA = fabsf(yawDeg);
 
         if (absA >= TURN_SLOW_DEG) {
-            // Slow zone
             leftMotor.drive(TURN_PWM / 2);
             rightMotor.drive(-TURN_PWM / 2);
         }
@@ -402,7 +404,7 @@ void turnRight90() {
         }
         if (millis() - startMs > TURN_TIMEOUT_MS) {
             stopMotors();
-            heading = (AbsDir)((heading + 1) % 4);  // assume completed
+            heading = (AbsDir)((heading + 1) % 4);
             beepError();
             return;
         }
@@ -445,35 +447,26 @@ void turnAround() {
 }
 
 // ── senseWalls() ─────────────────────────────────────────────────────────────
-// Maps sensor readings to absolute wall directions based on current heading.
-// 45° sensors approximate the left/right walls.
 void senseWalls() {
     ir.update();
 
     AbsDir frontDir = heading;
     AbsDir leftDir  = (AbsDir)((heading + 3) % 4);
     AbsDir rightDir = (AbsDir)((heading + 1) % 4);
+    AbsDir backDir  = (AbsDir)((heading + 2) % 4);
 
-    // Front wall
-    maze.setWall(robotRow, robotCol, frontDir,
-                 ir.wallFront(irCal));
-
-    // Left/right walls via 45° sensors
-    maze.setWall(robotRow, robotCol, leftDir,
-                 ir.wallLeft(irCal));
-    maze.setWall(robotRow, robotCol, rightDir,
-                 ir.wallRight(irCal));
-
-    // Behind us we came from — no wall (we just entered from there)
-    AbsDir backDir = (AbsDir)((heading + 2) % 4);
-    maze.setWall(robotRow, robotCol, backDir, false);
+    maze.setWall(robotRow, robotCol, frontDir, ir.wallFront(irCal));
+    maze.setWall(robotRow, robotCol, leftDir,  ir.wallLeft(irCal));
+    maze.setWall(robotRow, robotCol, rightDir, ir.wallRight(irCal));
+    maze.setWall(robotRow, robotCol, backDir,  false);  // came from there
 }
 
 // ── IR calibration ────────────────────────────────────────────────────────────
 void runIrCalibration() {
-    // STEP 1: open air — hold robot away from all walls
     leds[7] = CRGB::Yellow;
     FastLED.show();
+
+    // STEP 1: open air
     bleSend("[CAL] Step 1: hold robot in OPEN AIR (no walls nearby)\n");
     bleSend("[CAL] Press button when ready...\n");
     waitButton();
@@ -485,14 +478,14 @@ void runIrCalibration() {
     bleSend("[CAL] noWall: LF=%d L45=%d R45=%d RF=%d\n",
             irCal[0].noWall, irCal[1].noWall, irCal[2].noWall, irCal[3].noWall);
 
-    // STEP 2: dead-end — robot centered, front+both sides walled
+    // STEP 2: dead-end
     bleSend("[CAL] Step 2: place robot CENTERED in dead-end (3 walls)\n");
     bleSend("[CAL] Press button when ready...\n");
     waitButton();
     beep(60);
 
     for (int s = 0; s < IR_COUNT; s++) {
-        irCal[s].wall = ir.sampleAvg(s, 64);
+        irCal[s].wall      = ir.sampleAvg(s, 64);
         irCal[s].threshold = (irCal[s].noWall + irCal[s].wall) / 2;
     }
     bleSend("[CAL] wall:   LF=%d L45=%d R45=%d RF=%d\n",
@@ -502,14 +495,15 @@ void runIrCalibration() {
             irCal[2].threshold, irCal[3].threshold);
 
     beepDone();
-    bleSend("[CAL] done — entering READY\n");
+    bleSend("[CAL] done — entering STANDBY\n");
 }
 
 // ── FSM ───────────────────────────────────────────────────────────────────────
 enum State {
     STATE_IDLE,
     STATE_CALIBRATE,
-    STATE_READY,
+    STATE_STANDBY,
+    STATE_ARMED,
     STATE_EXPLORE,
     STATE_GOAL_REACHED,
     STATE_STOP
@@ -522,47 +516,36 @@ void setup() {
     delay(1500);
     Serial.println("[INIT] Micromouse26 boot");
 
-    // Buzzer first — confirms MCU alive
     ledcSetup(BUZZER_LEDC_CH, BUZZER_FREQ, BUZZER_RES);
     ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
     ledcWrite(BUZZER_LEDC_CH, 0);
     beep(80);
 
-    // Button
     pinMode(BUTTON_1, INPUT_PULLUP);
 
-    // DRV8833 wake
     pinMode(DRV_SLEEP_PIN, OUTPUT);
     digitalWrite(DRV_SLEEP_PIN, HIGH);
 
-    // Motors + encoders
     leftMotor.begin();
     rightMotor.begin();
     leftEnc.begin(leftISR);
     rightEnc.begin(rightISR);
 
-    // IR
     ir.begin();
 
-    // LEDs
     FastLED.addLeds<WS2812B, WS2812_DATA, GRB>(leds, NUM_LEDS);
     FastLED.setBrightness(LED_BRIGHT);
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
 
-    // IMU — calibrate before BLE so Serial is the output
     Serial.println("[INIT] IMU calibrating — keep still...");
     imuCalibrate();
 
-    // BLE
     bleSetup();
 
-    // Maze — 3x6 draft, goal top-right
+    // Maze init only — no floodFill until ARMED (position not set yet)
     maze.reset();
     maze.setGoalSingle(5, 2);
-    // Start cell (0,0) facing north: south+west walls already set by reset()
-    // Add east wall of start cell (competition rule: start bounded 3 sides)
-    maze.setWall(0, 0, DIR_EAST, true);
 
     Serial.printf("[INIT] TICKS_PER_CELL=%ld  MM_PER_TICK=%.4f\n",
                   TICKS_PER_CELL, MM_PER_TICK);
@@ -574,7 +557,6 @@ void setup() {
 
 // ── loop ──────────────────────────────────────────────────────────────────────
 void loop() {
-    // Battery reading (used for LED 6)
     int   batRaw = analogRead(BAT_V_SENSE);
     float vBat   = (batRaw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
 
@@ -591,44 +573,67 @@ void loop() {
 
     // ── CALIBRATE ─────────────────────────────────────────────────────────────
     case STATE_CALIBRATE:
-        leds[7] = CRGB::Yellow;
-        FastLED.show();
         runIrCalibration();
-        // Reset robot position and maze for new run
-        robotRow = 0;
-        robotCol = 0;
-        heading  = DIR_NORTH;
-        maze.reset();
-        maze.setGoalSingle(5, 2);
-        maze.setWall(0, 0, DIR_EAST, true);
-        maze.floodFill();
-        state = STATE_READY;
+        // irCal now valid — maze NOT reset here (happens on arm)
+        state = STATE_STANDBY;
         break;
 
-    // ── READY ─────────────────────────────────────────────────────────────────
-    // Wait for finger to block LF sensor → start run
-    case STATE_READY: {
+    // ── STANDBY ───────────────────────────────────────────────────────────────
+    // Robot being placed at (0,0). Press button when physically positioned.
+    case STATE_STANDBY:
         leds[7] = CRGB(0, 200, 200);  // cyan
         ledsUpdate(vBat);
-        bleSend("[READY] wave hand in front of LF sensor to start\n");
-
-        // Poll for finger trigger
-        static int fingerCount = 0;
-        ir.update();
-        float nLF = irCal[IR_LEFT_FRONT].normalize(ir.raw[IR_LEFT_FRONT]);
-        if (nLF > FINGER_THRESH) {
-            fingerCount++;
-        } else {
-            fingerCount = 0;
-        }
-        if (fingerCount >= FINGER_CONFIRM) {
-            fingerCount = 0;
-            bleSend("[READY] start trigger detected — starting in 1s\n");
-            delay(1000);  // let hand move away
+        bleSend("[STANDBY] place robot at start (0,0), press button to arm\n");
+        if (buttonPressed()) {
+            resetRunState();  // maze + position reset, irCal untouched
             beep(80);
-            state = STATE_EXPLORE;
+            bleSend("[ARMED] wave hand 3x past LF sensor to start\n");
+            state = STATE_ARMED;
         }
         delay(50);
+        break;
+
+    // ── ARMED ─────────────────────────────────────────────────────────────────
+    // Waiting for 3 wave events on LF sensor.
+    // Wave = hand enters (nLF > FINGER_THRESH) then leaves (nLF <= FINGER_THRESH).
+    // Button → back to STANDBY to re-place.
+    case STATE_ARMED: {
+        leds[7] = CRGB::White;
+        ledsUpdate(vBat);
+
+        static int  waveCount   = 0;
+        static bool handPresent = false;
+
+        ir.update();
+        float nLF = irCal[IR_LEFT_FRONT].normalize(ir.raw[IR_LEFT_FRONT]);
+
+        if (!handPresent && nLF > FINGER_THRESH) {
+            handPresent = true;                        // hand entered
+        } else if (handPresent && nLF <= FINGER_THRESH) {
+            handPresent = false;                       // hand left = 1 wave done
+            waveCount++;
+            bleSend("[ARMED] wave %d/%d\n", waveCount, WAVES_NEEDED);
+            beep(30);
+        }
+
+        if (waveCount >= WAVES_NEEDED) {
+            waveCount   = 0;
+            handPresent = false;
+            bleSend("[ARMED] 3 waves — starting in 1s\n");
+            delay(1000);
+            beep(80);
+            state = STATE_EXPLORE;
+            break;
+        }
+
+        if (buttonPressed()) {
+            waveCount   = 0;
+            handPresent = false;
+            bleSend("[ARMED] cancelled — back to STANDBY\n");
+            state = STATE_STANDBY;
+        }
+
+        delay(20);
         break;
     }
 
@@ -637,46 +642,36 @@ void loop() {
         leds[7] = CRGB(0, 60, 0);  // dim green
         FastLED.show();
 
-        // 1. Mark current cell visited
         maze.visited[robotRow][robotCol] = true;
 
-        // 2. Check goal
         if (maze.isGoal(robotRow, robotCol)) {
             state = STATE_GOAL_REACHED;
             break;
         }
 
-        // 3. Sense walls and update map
         senseWalls();
-
-        // 4. Re-flood
         maze.floodFill();
 
-        // 5. Choose best direction
         uint8_t bestDist;
         AbsDir  nextDir = maze.bestDirection(robotRow, robotCol, bestDist);
 
         if (bestDist == FLOOD_INFINITY) {
-            // Trapped — no reachable path
             bleSend("[EXPLORE] TRAPPED at (%d,%d) — no path\n", robotRow, robotCol);
             state = STATE_STOP;
             break;
         }
 
-        // 6. Turn to face nextDir
         int turnSteps = ((int)nextDir - (int)heading + 4) % 4;
         switch (turnSteps) {
-            case 1: turnRight90();  break;
-            case 2: turnAround();   break;
-            case 3: turnLeft90();   break;
-            default: break;  // 0 = already facing right
+            case 1: turnRight90(); break;
+            case 2: turnAround();  break;
+            case 3: turnLeft90();  break;
+            default: break;
         }
 
-        // 7. Move forward one cell
         moveForwardOneCell();
-        delay(50);  // brief settle between cells
+        delay(50);
 
-        // 8. Update position
         updatePosition(nextDir);
         break;
     }
@@ -687,7 +682,6 @@ void loop() {
         FastLED.show();
         beepGoal();
         bleSend("[GOAL] reached (%d,%d)!\n", robotRow, robotCol);
-        // Dump flood map over BLE
         for (int r = 5; r >= 0; r--) {
             bleSend("%d: ", r);
             for (int c = 0; c < 3; c++) {
@@ -702,6 +696,7 @@ void loop() {
         break;
 
     // ── STOP ──────────────────────────────────────────────────────────────────
+    // irCal preserved. Button → STANDBY for another run.
     case STATE_STOP:
         stopMotors();
         leds[7] = CRGB::Red;
@@ -709,7 +704,8 @@ void loop() {
         if (buttonPressed()) {
             fill_solid(leds, NUM_LEDS, CRGB::Black);
             FastLED.show();
-            state = STATE_IDLE;
+            bleSend("[STOP] back to STANDBY (irCal kept)\n");
+            state = STATE_STANDBY;
         }
         delay(100);
         break;
