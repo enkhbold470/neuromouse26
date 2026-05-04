@@ -89,7 +89,6 @@ public:
     // brake() — active braking: both pins HIGH → slow decay
     // --------------------------------------------------------------------------
     void brake() {
-        Serial.printf("[MOTOR:%s] brake() — both pins HIGH (slow decay)\n", label);
         ledcWrite(ch1, MAX_PWM);
         ledcWrite(ch2, MAX_PWM);
     }
@@ -98,7 +97,6 @@ public:
     // coast() — free-wheel: both pins LOW → fast decay
     // --------------------------------------------------------------------------
     void coast() {
-        Serial.printf("[MOTOR:%s] coast() — both pins LOW (fast decay)\n", label);
         ledcWrite(ch1, 0);
         ledcWrite(ch2, 0);
     }

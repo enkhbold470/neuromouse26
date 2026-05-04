@@ -1,75 +1,73 @@
 // =============================================================================
-// main.cpp — Micromouse26 full firmware
+// main.cpp — Micromouse26 firmware
+//
+// Architecture:
+//   Motion timer : esp_timer @ 1kHz (ESP_TIMER_TASK)
+//                  → fixed dt=1ms speed PID + encoder balance + g_yawCorr
+//   Centering PID: main loop @ ~200Hz
+//                  → IR L45/R45 + IMU heading → writes g_yawCorr for timer
+//                  error = nR - nL:
+//                    positive (closer to right) → g_yawCorr positive
+//                    → vR increases, vL decreases → steers LEFT ✓
+//                    negative (closer to left)  → g_yawCorr negative
+//                    → vL increases, vR decreases → steers RIGHT ✓
+//   Navigation   : FSM in loop() — maze, turns, BLE logging
 //
 // FSM:
-//   IDLE      → (button)         → CALIBRATE
-//   CALIBRATE → (cal done)       → STANDBY
-//   STANDBY   → (button)         → ARMED        ← place robot at (0,0) first
-//   ARMED     → (3 waves on LF)  → 1s delay → EXPLORE
-//   ARMED     → (button)         → STANDBY       ← cancel / re-place
-//   EXPLORE   → (goal reached)   → GOAL_REACHED → STOP
-//   EXPLORE   → (trapped/timeout)→ STOP
-//   STOP      → (button)         → STANDBY       ← irCal preserved, maze reset
+//   STANDBY → (button) → ARMED → (3 waves) → EXPLORE → GOAL/STOP
+//   STOP    → (button) → STANDBY
 //
-// Motor control: encoder-only speed PID + encoder balance for straight driving.
-// No IMU used for drive — gyro available for future turn accuracy.
-//
-// IR calibration survives across runs. Only re-run explicitly from IDLE.
-//
-// LED map:
-//   0 = LF sensor    (green=open → red=wall)
-//   1 = L45 sensor   (green=open → red=wall)
-//   2 = left motor   (brightness = PWM%)
-//   3 = right motor  (brightness = PWM%)
-//   4 = R45 sensor   (green=open → red=wall)
-//   5 = RF sensor    (green=open → red=wall)
-//   6 = battery      (blue=full → red=low)
-//   7 = state        (IDLE=off CALIBRATE=yellow STANDBY=cyan ARMED=white EXPLORE=green GOAL=white STOP=red)
+// Serial/BLE commands in STANDBY:
+//   'c' = IR calibration   'd' = IR dump   'm' = motor test
 // =============================================================================
 
 #include <Arduino.h>
 #include <FastLED.h>
 #include <NimBLEDevice.h>
 #include <Wire.h>
+#include "esp_timer.h"
 #include "PinConfig.h"
 #include "MicromouseMotor.h"
 #include "MicromouseEncoder.h"
 #include "MicromouseIR.h"
 #include "MicromouseMaze.h"
 
-// ── Motor tuning ──────────────────────────────────────────────────────────────
-#define CRUISE_SPEED   200.0f  // ticks/sec
-#define RAMP_TIME_MS   150.0f  // ms ramp 0 → cruise
-#define Kp_speed       1.5f
-#define Ki_speed       0.5f
-#define Kp_balance     3.0f    // ticks/sec per tick of L-R encoder error
-#define MIN_PWM_OUT    150     // PWM floor during accel (disabled during decel)
-#define TURN_PWM       300     // spin PWM for 90° turns
-
-// ── Turn thresholds ───────────────────────────────────────────────────────────
-#define TURN_SLOW_DEG  75.0f
-#define TURN_STOP_DEG  88.0f
+// ── Tuning ────────────────────────────────────────────────────────────────────
+#define CRUISE_SPEED    130.0f
+#define RAMP_TICKS_MS   150
+#define Kp_speed        1.5f
+#define Ki_speed        0.5f
+#define Kp_balance      3.0f   // encoder L-R balance gain
+#define Kp_ir           25.0f  // IR centering P gain (ticks/sec per normalized error)
+#define Ki_ir           1.0f   // IR centering I gain
+#define Kd_ir           5.0f   // IR centering D gain (damps oscillation)
+#define Kp_heading      2.0f   // IMU heading P gain
+#define IR_LPF_BETA     0.15f
+#define TURN_PWM        220
+#define TURN_SLOW_DEG   75.0f
+#define TURN_STOP_DEG   88.0f
 #define TURN_TIMEOUT_MS 3000
+// Positive MOTOR_R_TRIM slows right motor to offset mechanical dominance.
+// Increase in steps of 5 until robot drives straight.
+#define MOTOR_R_TRIM    0.0f
 
 // ── Physics ───────────────────────────────────────────────────────────────────
-#define CELL_MM        180.0f
-#define MM_PER_TICK    ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)
-#define TICKS_PER_CELL ((long)(CELL_MM / MM_PER_TICK))
+#define CELL_MM         180.0f
+#define MM_PER_TICK     ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)
+#define TICKS_PER_CELL  ((long)(CELL_MM / MM_PER_TICK))
 
 // ── Wave trigger ──────────────────────────────────────────────────────────────
-#define FINGER_THRESH  0.5f
-#define WAVES_NEEDED   3
+#define FINGER_THRESH   0.5f
+#define WAVES_NEEDED    3
 
-// ── Hardware objects ──────────────────────────────────────────────────────────
+// ── Hardware ──────────────────────────────────────────────────────────────────
 MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "L");
 MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, "R");
 MicromouseEncoder leftEnc   (ENC_L_A, ENC_L_B);
 MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B);
 MicromouseIR      ir;
 MicromouseMaze    maze;
-
-// ── IR calibration ────────────────────────────────────────────────────────────
-IrCal irCal[IR_COUNT];  // persists across runs
+IrCal             irCal[IR_COUNT];
 
 // ── IMU ───────────────────────────────────────────────────────────────────────
 #define MPU_ADDR         0x68
@@ -105,6 +103,7 @@ bool imuReadAll(IMURaw& d) {
 void imuUpdate() {
     unsigned long now = micros();
     float dt = (now - lastIMU_us) / 1e6f;
+    if (dt <= 0.0f || dt > 0.1f) { lastIMU_us = now; return; }
     lastIMU_us = now;
     IMURaw d;
     if (!imuReadAll(d)) return;
@@ -113,10 +112,7 @@ void imuUpdate() {
     yawDeg += rate * dt;
 }
 
-void imuResetYaw() {
-    yawDeg     = 0.0f;
-    lastIMU_us = micros();
-}
+void imuResetYaw() { yawDeg = 0.0f; lastIMU_us = micros(); }
 
 void imuCalibrate() {
     Wire.begin(IMU_SDA, IMU_SCL);
@@ -136,68 +132,194 @@ void imuCalibrate() {
     imuResetYaw();
 }
 
-// ── Encoder ISR management ────────────────────────────────────────────────────
+// ── Encoder ISRs ──────────────────────────────────────────────────────────────
 void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
 void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
 
 void encodersEnable() {
-    leftEnc.reset();
-    rightEnc.reset();
+    leftEnc.reset(); rightEnc.reset();
     attachInterrupt(digitalPinToInterrupt(ENC_L_A), leftISR,  RISING);
     attachInterrupt(digitalPinToInterrupt(ENC_R_A), rightISR, RISING);
 }
-
 void encodersDisable() {
     detachInterrupt(digitalPinToInterrupt(ENC_L_A));
     detachInterrupt(digitalPinToInterrupt(ENC_R_A));
 }
 
-// ── Speed PID ─────────────────────────────────────────────────────────────────
+// =============================================================================
+// MOTION TIMER — 1kHz fixed-rate PID in esp_timer task (Core 0).
+// Never call Serial/BLE/delay/analogRead here. dt = exactly 0.001f.
+// =============================================================================
 struct SpeedPID {
     float integral  = 0;
     long  prevTicks = 0;
     float prevSpeed = 0;
 };
-SpeedPID pidL, pidR;
 
-void resetPIDs() {
-    pidL = SpeedPID();
-    pidR = SpeedPID();
+static SpeedPID           pidL, pidR;
+static esp_timer_handle_t motionTimer   = nullptr;
+static volatile float     g_fwdSpeed    = 0.0f;
+static volatile float     g_yawCorr     = 0.0f;  // written by main loop centering PID
+static volatile long      g_tickTarget  = 0;
+static volatile bool      g_motorOn     = false;
+static volatile bool      g_motionDone  = false;
+static volatile long      g_snapL       = 0;
+static volatile long      g_snapR       = 0;
+static volatile int       g_rampTick    = 0;
+
+static int pidCompute(SpeedPID& pid, long ticks, float target) {
+    const float dt = 0.001f;
+    float raw      = (ticks - pid.prevTicks) / dt;
+    pid.prevSpeed  = 0.7f * pid.prevSpeed + 0.3f * raw;
+    pid.prevTicks  = ticks;
+    float error    = target - pid.prevSpeed;
+    pid.integral  += error * dt;
+    pid.integral   = constrain(pid.integral, -800.0f, 800.0f);
+    float out      = Kp_speed * error + Ki_speed * pid.integral;
+    return (int)constrain(out, -1023.0f, 1023.0f);
 }
 
-// applyFloor: true during accel/cruise, false during decel
-int computeSpeedPID(SpeedPID& pid, long ticks, float target, float dt, bool applyFloor) {
-    float rawSpeed  = (ticks - pid.prevTicks) / dt;
-    pid.prevSpeed   = 0.7f * pid.prevSpeed + 0.3f * rawSpeed;
-    pid.prevTicks   = ticks;
-    float error     = target - pid.prevSpeed;
-    pid.integral   += error * dt;
-    pid.integral    = constrain(pid.integral, -800.0f, 800.0f);
-    float output    = Kp_speed * error + Ki_speed * pid.integral;
-    if (applyFloor) {
-        if (target > 0 && output < MIN_PWM_OUT) output = MIN_PWM_OUT;
-        if (target < 0 && output > -MIN_PWM_OUT) output = -MIN_PWM_OUT;
+static void motionTick(void*) {
+    if (!g_motorOn) return;
+
+    long tL  = leftEnc.getTicksRaw();
+    long tR  = rightEnc.getTicksRaw();
+    long avg = (tL + tR) / 2;
+    g_snapL  = tL;
+    g_snapR  = tR;
+
+    g_rampTick++;
+    float vfwd = g_fwdSpeed;
+    if (g_rampTick < RAMP_TICKS_MS)
+        vfwd *= (float)g_rampTick / (float)RAMP_TICKS_MS;
+
+    if (g_tickTarget > 0) {
+        long decelAt = (long)(g_tickTarget * 0.60f);
+        if (avg > decelAt) {
+            float rem = (float)(g_tickTarget - avg) / (float)(g_tickTarget - decelAt);
+            vfwd *= constrain(rem, 0.0f, 1.0f);
+        }
     }
-    return (int)constrain(output, -1023.0f, 1023.0f);
+
+    // g_yawCorr positive → vR increases, vL decreases → steers LEFT ✓
+    float balance = Kp_balance * (float)(tL - tR) + g_yawCorr;
+    int pwmL = pidCompute(pidL, tL, vfwd - balance);
+    int pwmR = pidCompute(pidR, tR, vfwd + balance - MOTOR_R_TRIM);
+
+    leftMotor.drive(pwmL);
+    rightMotor.drive(pwmR);
+
+    if (g_tickTarget > 0 && avg >= g_tickTarget - BRAKE_COMP_TICKS) {
+        leftMotor.brake();
+        rightMotor.brake();
+        g_motorOn    = false;
+        g_motionDone = true;
+    }
 }
 
-// ── LEDs ──────────────────────────────────────────────────────────────────────
+void motionBegin() {
+    esp_timer_create_args_t cfg = {};
+    cfg.callback        = motionTick;
+    cfg.dispatch_method = ESP_TIMER_TASK;
+    cfg.name            = "motionPID";
+    esp_timer_create(&cfg, &motionTimer);
+}
+
+void motionForward(long ticks, float speed) {
+    encodersEnable();
+    pidL = SpeedPID(); pidR = SpeedPID();
+    g_fwdSpeed   = speed;
+    g_tickTarget = ticks;
+    g_yawCorr    = 0.0f;
+    g_rampTick   = 0;
+    g_motionDone = false;
+    g_motorOn    = true;
+    esp_timer_start_periodic(motionTimer, 1000);
+}
+
+void motionStop() {
+    esp_timer_stop(motionTimer);
+    g_motorOn = false;
+    leftMotor.brake(); rightMotor.brake();
+    delay(70);
+    leftMotor.coast(); rightMotor.coast();
+}
+
+void motionCoast() { delay(70); leftMotor.coast(); rightMotor.coast(); }
+bool motionDone()  { return g_motionDone; }
+
+// =============================================================================
+// CENTERING PID — runs in main loop ~200Hz, writes g_yawCorr for motion timer.
+//
+// error = nR - nL
+//   R45 high (close to right wall) → error positive → g_yawCorr positive
+//   → timer: vR += yawCorr, vL -= yawCorr → right faster, left slower → steers LEFT ✓
+//   L45 high (close to left wall)  → error negative → g_yawCorr negative
+//   → timer: vL += |yawCorr|, vR -= |yawCorr| → left faster, right slower → steers RIGHT ✓
+// =============================================================================
+static float irLfilt   = 0.0f;
+static float irRfilt   = 0.0f;
+static float irInteg   = 0.0f;
+static float irPrevErr = 0.0f;
+
+void centeringReset() {
+    irLfilt = irRfilt = irInteg = irPrevErr = 0.0f;
+    imuResetYaw();
+}
+
+void updateCentering() {
+    imuUpdate();
+    float headCorr = constrain(Kp_heading * yawDeg, -25.0f, 25.0f);
+
+    float irCorr = 0.0f;
+    if (irCal[IR_LEFT_45].calibrated || irCal[IR_RIGHT_45].calibrated) {
+        ir.update();
+        float nL = irCal[IR_LEFT_45].normalize(ir.raw[IR_LEFT_45]);
+        float nR = irCal[IR_RIGHT_45].normalize(ir.raw[IR_RIGHT_45]);
+        irLfilt += IR_LPF_BETA * (nL - irLfilt);
+        irRfilt += IR_LPF_BETA * (nR - irRfilt);
+
+        bool wallL = irLfilt > 0.15f;
+        bool wallR = irRfilt > 0.15f;
+
+        float error = 0.0f;
+        if (wallL && wallR)   error =  irRfilt - irLfilt;
+        else if (wallR)        error =  irRfilt - 0.4f;
+        else if (wallL)        error = -(irLfilt - 0.4f);
+
+        if (wallL || wallR) {
+            const float dt = 0.005f;
+            irInteg   += error * dt;
+            irInteg    = constrain(irInteg, -2.0f, 2.0f);
+            float deriv = (error - irPrevErr) / dt;
+            irPrevErr  = error;
+            irCorr = Kp_ir * error + Ki_ir * irInteg + Kd_ir * deriv;
+            irCorr = constrain(irCorr, -40.0f, 40.0f);
+        } else {
+            irInteg = irPrevErr = 0.0f;
+        }
+    }
+
+    g_yawCorr = headCorr + irCorr;
+}
+
+// =============================================================================
+// LEDs
+// =============================================================================
 #define NUM_LEDS   8
 #define LED_BRIGHT 5
 CRGB leds[NUM_LEDS];
 
 CRGB sensorColor(int raw, int threshold) {
     if (threshold <= 0) threshold = 500;
-    uint8_t r = (uint8_t)constrain(map(raw, 0, threshold * 2, 0,   255), 0, 255);
-    uint8_t g = (uint8_t)constrain(map(raw, 0, threshold * 2, 255, 0),   0, 255);
+    uint8_t r = (uint8_t)constrain(map(raw, 0, threshold*2, 0,   255), 0, 255);
+    uint8_t g = (uint8_t)constrain(map(raw, 0, threshold*2, 255, 0),   0, 255);
     return CRGB(r, g, 0);
 }
-
 CRGB battColor(float v) {
     float pct = constrain((v - 6.8f) / 1.6f, 0.0f, 1.0f);
     return CRGB((uint8_t)(255*(1-pct)), 0, (uint8_t)(255*pct));
 }
-
 void ledsUpdate(float vBat) {
     ir.update();
     leds[0] = sensorColor(ir.raw[IR_LEFT_FRONT],  irCal[IR_LEFT_FRONT].threshold);
@@ -208,7 +330,9 @@ void ledsUpdate(float vBat) {
     FastLED.show();
 }
 
-// ── BLE ───────────────────────────────────────────────────────────────────────
+// =============================================================================
+// BLE — main loop only, never from motion timer
+// =============================================================================
 #define NUS_SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NUS_RX_UUID      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NUS_TX_UUID      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -235,10 +359,9 @@ void bleSend(const char* fmt, ...) {
 }
 
 class BLECb : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer*)    override { bleConn = true;  }
+    void onConnect(NimBLEServer*)    override { bleConn = true; }
     void onDisconnect(NimBLEServer*) override { bleConn = false; NimBLEDevice::startAdvertising(); }
 };
-
 class RXCb : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* c) override {
         std::string v = c->getValue();
@@ -253,231 +376,152 @@ void bleSetup() {
     srv->setCallbacks(new BLECb());
     auto* svc = srv->createService(NUS_SERVICE_UUID);
     pTX = svc->createCharacteristic(NUS_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
-    auto* pRX = svc->createCharacteristic(NUS_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    auto* pRX = svc->createCharacteristic(NUS_RX_UUID,
+                    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     pRX->setCallbacks(new RXCb());
     svc->start();
     NimBLEDevice::getAdvertising()->addServiceUUID(NUS_SERVICE_UUID);
     NimBLEDevice::startAdvertising();
 }
 
-// ── Buzzer ────────────────────────────────────────────────────────────────────
-void beep(int ms) {
-    ledcWrite(BUZZER_LEDC_CH, BUZZER_DUTY);
-    delay(ms);
-    ledcWrite(BUZZER_LEDC_CH, 0);
-}
-void beepDone()  { beep(60); delay(80); beep(60); }
-void beepGoal()  { for (int i=0; i<3; i++) { beep(120); delay(100); } }
-void beepError() { beep(500); }
+// =============================================================================
+// Buzzer / Button
+// =============================================================================
+void beep(int ms) { ledcWrite(BUZZER_LEDC_CH, BUZZER_DUTY); delay(ms); ledcWrite(BUZZER_LEDC_CH, 0); }
+void beepDone()   { beep(60); delay(80); beep(60); }
+void beepGoal()   { for (int i=0; i<3; i++) { beep(120); delay(100); } }
+void beepError()  { beep(500); }
 
-// ── Button ────────────────────────────────────────────────────────────────────
 bool buttonPressed() {
     static bool last = HIGH;
-    bool now  = digitalRead(BUTTON_1);
+    bool now = digitalRead(BUTTON_1);
     bool edge = (last == HIGH && now == LOW);
     last = now;
     return edge;
 }
+void waitButton() { while (!buttonPressed()) delay(10); delay(30); }
 
-void waitButton() {
-    while (!buttonPressed()) delay(10);
-    delay(30);
-}
-
-// ── Robot position ────────────────────────────────────────────────────────────
-uint8_t robotRow = 0;
-uint8_t robotCol = 0;
+// =============================================================================
+// Robot position / maze
+// =============================================================================
+uint8_t robotRow = 0, robotCol = 0;
 AbsDir  heading  = DIR_NORTH;
 
-void updatePosition(AbsDir moveDir) {
-    robotRow = (uint8_t)(robotRow + DIR_DR[moveDir]);
-    robotCol = (uint8_t)(robotCol + DIR_DC[moveDir]);
+void updatePosition(AbsDir d) {
+    robotRow = (uint8_t)(robotRow + DIR_DR[d]);
+    robotCol = (uint8_t)(robotCol + DIR_DC[d]);
 }
-
-// ── Stop motors ───────────────────────────────────────────────────────────────
-void stopMotors() {
-    leftMotor.brake();
-    rightMotor.brake();
-    delay(80);
-    leftMotor.coast();
-    rightMotor.coast();
-}
-
-// ── resetRunState() ───────────────────────────────────────────────────────────
 void resetRunState() {
-    robotRow = 0;
-    robotCol = 0;
-    heading  = DIR_NORTH;
+    robotRow = 0; robotCol = 0; heading = DIR_NORTH;
     maze.reset();
     maze.setGoalSingle(5, 2);
     maze.floodFill();
-    bleSend("[RUN] maze reset, pos=(0,0) N\n");
+    bleSend("[RUN] reset pos=(0,0) N\n");
 }
 
-// ── moveForwardOneCell() ──────────────────────────────────────────────────────
+// =============================================================================
+// moveForwardOneCell — starts timer, waits with centering active
+// =============================================================================
 void moveForwardOneCell() {
-    long target = TICKS_PER_CELL;
-
-    encodersEnable();
-    resetPIDs();
-
-    leds[2] = CRGB(0, 40, 0);
-    leds[3] = CRGB(0, 40, 0);
-    FastLED.show();
+    centeringReset();
+    motionForward(TICKS_PER_CELL, CRUISE_SPEED);
 
     unsigned long startMs = millis();
-    unsigned long lastMs  = millis();
+    unsigned long lastLog = 0;
 
-    while (true) {
-        unsigned long now = millis();
-        float dt = (now - lastMs) / 1000.0f;
-        if (dt < 0.001f) dt = 0.001f;
-        lastMs = now;
-
-        long tL  = leftEnc.getTicks();
-        long tR  = rightEnc.getTicks();
-        long avg = (tL + tR) / 2;
-
-        float elapsed = (float)(now - startMs);
-        float v_fwd;
-        bool  inDecel;
-        if (elapsed < RAMP_TIME_MS) {
-            v_fwd   = CRUISE_SPEED * (elapsed / RAMP_TIME_MS);
-            inDecel = false;
-        } else if (avg < (long)(target * 0.55f)) {
-            v_fwd   = CRUISE_SPEED;
-            inDecel = false;
-        } else {
-            float rem = (float)(target - avg) / (target * 0.45f);
-            v_fwd   = CRUISE_SPEED * constrain(rem, 0.0f, 1.0f);
-            inDecel = true;
+    while (!motionDone()) {
+        updateCentering();
+        if (millis() - lastLog >= 400) {
+            lastLog = millis();
+            bleSend("[FWD] L=%ld R=%ld yaw=%.1f yawCorr=%.1f\n",
+                    g_snapL, g_snapR, yawDeg, g_yawCorr);
         }
-
-        float balance = Kp_balance * (float)(tL - tR);
-        float vL_cmd  = v_fwd - balance;
-        float vR_cmd  = v_fwd + balance;
-
-        int pwmL = computeSpeedPID(pidL, tL, vL_cmd, dt, !inDecel);
-        int pwmR = computeSpeedPID(pidR, tR, vR_cmd, dt, !inDecel);
-
-        leftMotor.drive(pwmL);
-        rightMotor.drive(pwmR);
-
-        leds[2] = CRGB(0, (uint8_t)(pwmL / 4), 0);
-        leds[3] = CRGB(0, (uint8_t)(pwmR / 4), 0);
-
-        if (avg >= target - BRAKE_COMP_TICKS) {
-            stopMotors();
-            encodersDisable();
-            leds[2] = CRGB::Black;
-            leds[3] = CRGB::Black;
-            FastLED.show();
-            return;
-        }
-
-        if (millis() - startMs > 12000UL) {
-            stopMotors();
-            encodersDisable();
-            leds[2] = CRGB::Red;
-            leds[3] = CRGB::Red;
-            FastLED.show();
+        if (millis() - startMs > 10000UL) {
+            motionStop();
             beepError();
+            bleSend("[FWD] timeout\n");
             return;
         }
     }
+    motionCoast();
+    encodersDisable();
 }
 
-// ── turnRight90() ─────────────────────────────────────────────────────────────
+// =============================================================================
+// Turns — blocking IMU loop (short, ~300-500ms)
+// =============================================================================
 void turnRight90() {
     imuResetYaw();
-    leftMotor.drive(TURN_PWM);
-    rightMotor.drive(-TURN_PWM);
-    unsigned long startMs = millis();
+    leftMotor.drive(TURN_PWM); rightMotor.drive(-TURN_PWM);
+    unsigned long startMs = millis(), lastDbg = 0;
+    bleSend("[TURN R] start\n");
     while (true) {
         imuUpdate();
         float absA = fabsf(yawDeg);
-        if (absA >= TURN_SLOW_DEG) {
-            leftMotor.drive(TURN_PWM / 2);
-            rightMotor.drive(-TURN_PWM / 2);
-        }
+        if (millis() - lastDbg >= 250) { lastDbg = millis(); bleSend("[TURN R] yaw=%.1f\n", yawDeg); }
+        if (absA >= TURN_SLOW_DEG) { leftMotor.drive(TURN_PWM/2); rightMotor.drive(-TURN_PWM/2); }
         if (absA >= TURN_STOP_DEG) {
-            stopMotors();
+            leftMotor.brake(); rightMotor.brake(); delay(60);
+            leftMotor.coast(); rightMotor.coast();
             heading = (AbsDir)((heading + 1) % 4);
-            return;
+            bleSend("[TURN R] done yaw=%.1f\n", yawDeg); return;
         }
         if (millis() - startMs > TURN_TIMEOUT_MS) {
-            stopMotors();
+            leftMotor.brake(); rightMotor.brake(); delay(60);
+            leftMotor.coast(); rightMotor.coast();
             heading = (AbsDir)((heading + 1) % 4);
-            beepError();
-            return;
+            bleSend("[TURN R] TIMEOUT yaw=%.1f\n", yawDeg); beepError(); return;
         }
     }
 }
 
-// ── turnLeft90() ─────────────────────────────────────────────────────────────
 void turnLeft90() {
     imuResetYaw();
-    leftMotor.drive(-TURN_PWM);
-    rightMotor.drive(TURN_PWM);
-    unsigned long startMs = millis();
+    leftMotor.drive(-TURN_PWM); rightMotor.drive(TURN_PWM);
+    unsigned long startMs = millis(), lastDbg = 0;
+    bleSend("[TURN L] start\n");
     while (true) {
         imuUpdate();
         float absA = fabsf(yawDeg);
-        if (absA >= TURN_SLOW_DEG) {
-            leftMotor.drive(-TURN_PWM / 2);
-            rightMotor.drive(TURN_PWM / 2);
-        }
+        if (millis() - lastDbg >= 250) { lastDbg = millis(); bleSend("[TURN L] yaw=%.1f\n", yawDeg); }
+        if (absA >= TURN_SLOW_DEG) { leftMotor.drive(-TURN_PWM/2); rightMotor.drive(TURN_PWM/2); }
         if (absA >= TURN_STOP_DEG) {
-            stopMotors();
+            leftMotor.brake(); rightMotor.brake(); delay(60);
+            leftMotor.coast(); rightMotor.coast();
             heading = (AbsDir)((heading + 3) % 4);
-            return;
+            bleSend("[TURN L] done yaw=%.1f\n", yawDeg); return;
         }
         if (millis() - startMs > TURN_TIMEOUT_MS) {
-            stopMotors();
+            leftMotor.brake(); rightMotor.brake(); delay(60);
+            leftMotor.coast(); rightMotor.coast();
             heading = (AbsDir)((heading + 3) % 4);
-            beepError();
-            return;
+            bleSend("[TURN L] TIMEOUT yaw=%.1f\n", yawDeg); beepError(); return;
         }
     }
 }
 
-void turnAround() {
-    turnRight90();
-    delay(100);
-    turnRight90();
-}
+void turnAround() { turnRight90(); delay(100); turnRight90(); }
 
-// ── senseWalls() ─────────────────────────────────────────────────────────────
+// =============================================================================
+// Sensing + calibration
+// =============================================================================
 void senseWalls() {
     ir.update();
-    AbsDir frontDir = heading;
-    AbsDir leftDir  = (AbsDir)((heading + 3) % 4);
-    AbsDir rightDir = (AbsDir)((heading + 1) % 4);
-    AbsDir backDir  = (AbsDir)((heading + 2) % 4);
-    maze.setWall(robotRow, robotCol, frontDir, ir.wallFront(irCal));
-    maze.setWall(robotRow, robotCol, leftDir,  ir.wallLeft(irCal));
-    maze.setWall(robotRow, robotCol, rightDir, ir.wallRight(irCal));
-    maze.setWall(robotRow, robotCol, backDir,  false);
+    maze.setWall(robotRow, robotCol, heading,                      ir.wallFront(irCal));
+    maze.setWall(robotRow, robotCol, (AbsDir)((heading+3)%4),      ir.wallLeft(irCal));
+    maze.setWall(robotRow, robotCol, (AbsDir)((heading+1)%4),      ir.wallRight(irCal));
+    maze.setWall(robotRow, robotCol, (AbsDir)((heading+2)%4),      false);
 }
 
-// ── IR calibration ────────────────────────────────────────────────────────────
 void runIrCalibration() {
-    leds[7] = CRGB::Yellow;
-    FastLED.show();
-
-    bleSend("[CAL] Step 1: hold robot in OPEN AIR\n");
-    bleSend("[CAL] Press button when ready...\n");
-    waitButton();
-    beep(60);
-    for (int s = 0; s < IR_COUNT; s++)
-        irCal[s].noWall = ir.sampleAvg(s, 64);
+    leds[7] = CRGB::Yellow; FastLED.show();
+    bleSend("[CAL] Step 1: open air — press button\n");
+    waitButton(); beep(60);
+    for (int s = 0; s < IR_COUNT; s++) irCal[s].noWall = ir.sampleAvg(s, 64);
     bleSend("[CAL] noWall: LF=%d L45=%d R45=%d RF=%d\n",
             irCal[0].noWall, irCal[1].noWall, irCal[2].noWall, irCal[3].noWall);
-
-    bleSend("[CAL] Step 2: place robot in dead-end (3 walls)\n");
-    bleSend("[CAL] Press button when ready...\n");
-    waitButton();
-    beep(60);
+    bleSend("[CAL] Step 2: dead-end (3 walls) — press button\n");
+    waitButton(); beep(60);
     for (int s = 0; s < IR_COUNT; s++) {
         irCal[s].wall      = ir.sampleAvg(s, 64);
         irCal[s].threshold = (irCal[s].noWall + irCal[s].wall) / 2;
@@ -487,166 +531,65 @@ void runIrCalibration() {
     bleSend("[CAL] thresh: LF=%d L45=%d R45=%d RF=%d\n",
             irCal[0].threshold, irCal[1].threshold,
             irCal[2].threshold, irCal[3].threshold);
-
+    for (int s = 0; s < IR_COUNT; s++) irCal[s].calibrated = true;
     beepDone();
     bleSend("[CAL] done\n");
 }
 
-// ── Motor test helpers ────────────────────────────────────────────────────────
-// Move N cells with per-tick logging over BLE (mirrors test/motor-ble-drive.cpp)
+// =============================================================================
+// Motor test helpers
+// =============================================================================
 void moveCells(int n) {
     long target = TICKS_PER_CELL * (long)n;
-
-    encodersEnable();
-    resetPIDs();
-
-    bleSend("[MOVE] %d cell(s) target=%ld ticks (%.0fmm)\n",
-            n, target, target * MM_PER_TICK);
-
-    unsigned long startMs = millis();
-    unsigned long lastMs  = millis();
-    unsigned long lastLog = 0;
-
-    while (true) {
-        if (Serial.available()) rxCmd = Serial.read();
-        if (rxCmd == 's') {
-            rxCmd = 0;
-            stopMotors();
-            encodersDisable();
-            bleSend("[STOP] L=%ld(%.0fmm) R=%ld(%.0fmm)\n",
-                    leftEnc.getTicks(),  leftEnc.getTicks()  * MM_PER_TICK,
-                    rightEnc.getTicks(), rightEnc.getTicks() * MM_PER_TICK);
-            return;
+    bleSend("[MOVE] %d cell(s) target=%ld\n", n, target);
+    motionForward(target, CRUISE_SPEED);
+    unsigned long startMs = millis(), lastLog = 0;
+    while (!motionDone()) {
+        if (millis() - lastLog >= 150) {
+            lastLog = millis();
+            bleSend("L=%ld R=%ld avg=%ld/%ld\n",
+                    g_snapL, g_snapR, (g_snapL+g_snapR)/2, target);
         }
-
-        unsigned long now = millis();
-        float dt = (now - lastMs) / 1000.0f;
-        if (dt < 0.001f) dt = 0.001f;
-        lastMs = now;
-
-        long tL  = leftEnc.getTicks();
-        long tR  = rightEnc.getTicks();
-        long avg = (tL + tR) / 2;
-
-        float elapsed = (float)(now - startMs);
-        float v_fwd;
-        bool  inDecel;
-        if (elapsed < RAMP_TIME_MS) {
-            v_fwd   = CRUISE_SPEED * (elapsed / RAMP_TIME_MS);
-            inDecel = false;
-        } else if (avg < (long)(target * 0.55f)) {
-            v_fwd   = CRUISE_SPEED;
-            inDecel = false;
-        } else {
-            float rem = (float)(target - avg) / (target * 0.45f);
-            v_fwd   = CRUISE_SPEED * constrain(rem, 0.0f, 1.0f);
-            inDecel = true;
-        }
-
-        float balance = Kp_balance * (float)(tL - tR);
-        int pwmL = computeSpeedPID(pidL, tL, CRUISE_SPEED - balance, dt, !inDecel);
-        int pwmR = computeSpeedPID(pidR, tR, CRUISE_SPEED + balance, dt, !inDecel);
-        leftMotor.drive(pwmL);
-        rightMotor.drive(pwmR);
-
-        if (now - lastLog >= 150) {
-            lastLog = now;
-            bleSend("avg=%4ld/%-4ld L=%4ld(%.0f) R=%4ld(%.0f) pwm=%d/%d\n",
-                    avg, target,
-                    tL, tL * MM_PER_TICK,
-                    tR, tR * MM_PER_TICK,
-                    pwmL, pwmR);
-        }
-
-        if (avg >= target - BRAKE_COMP_TICKS) {
-            stopMotors();
-            encodersDisable();
-            tL = leftEnc.getTicks();
-            tR = rightEnc.getTicks();
-            long avgFinal = (tL + tR) / 2;
-            float distMM  = avgFinal * MM_PER_TICK;
-            float errMM   = (tL - tR) * MM_PER_TICK;
-            bleSend("[DONE] avg=%ld(%.0fmm) L=%ld R=%ld diff=%.1fmm t=%lums\n",
-                    avgFinal, distMM, tL, tR, errMM, millis() - startMs);
-            if (fabsf(distMM - (target * MM_PER_TICK)) > 5.0f)
-                bleSend("[WARN] dist err>5mm — tune BRAKE_COMP_TICKS (cur=%d)\n", BRAKE_COMP_TICKS);
-            else
-                bleSend("[PASS] distance OK\n");
-            if (fabsf(errMM) > 5.0f)
-                bleSend("[WARN] L-R diff>5mm — raise Kp_balance\n");
-            return;
-        }
-
-        if (millis() - startMs > (unsigned long)(12000 * n)) {
-            stopMotors();
-            encodersDisable();
-            bleSend("[TIMEOUT] avg=%ld target=%ld — raise MIN_PWM_OUT\n", avg, target);
-            return;
+        if (millis() - startMs > (unsigned long)(12000*n)) {
+            motionStop(); bleSend("[TIMEOUT]\n"); return;
         }
     }
+    motionCoast(); encodersDisable();
+    long avg = (g_snapL + g_snapR) / 2;
+    bleSend("[DONE] avg=%ld(%.0fmm) diff=%.1fmm\n",
+            avg, avg * MM_PER_TICK, (g_snapL - g_snapR) * MM_PER_TICK);
+    if (fabsf((g_snapL - g_snapR) * MM_PER_TICK) > 5.0f)
+        bleSend("[WARN] L-R diff>5mm — tune MOTOR_R_TRIM (cur=%.0f)\n", (float)MOTOR_R_TRIM);
 }
 
 void freeRun() {
-    encodersEnable();
-    resetPIDs();
     bleSend("[FREE] send 's' to stop\n");
-
-    unsigned long lastMs  = millis();
+    motionForward(0, CRUISE_SPEED);
     unsigned long lastLog = 0;
-
     while (true) {
         if (Serial.available()) rxCmd = Serial.read();
-        if (rxCmd == 's') {
-            rxCmd = 0;
-            stopMotors();
-            encodersDisable();
-            long tL = leftEnc.getTicks();
-            long tR = rightEnc.getTicks();
-            bleSend("[FREE] stopped L=%ld(%.0fmm) R=%ld(%.0fmm) diff=%.1fmm\n",
-                    tL, tL * MM_PER_TICK,
-                    tR, tR * MM_PER_TICK,
-                    (tL - tR) * MM_PER_TICK);
-            return;
-        }
-
-        unsigned long now = millis();
-        float dt = (now - lastMs) / 1000.0f;
-        if (dt < 0.001f) dt = 0.001f;
-        lastMs = now;
-
-        long tL = leftEnc.getTicks();
-        long tR = rightEnc.getTicks();
-
-        float balance = Kp_balance * (float)(tL - tR);
-        int pwmL = computeSpeedPID(pidL, tL, CRUISE_SPEED - balance, dt, true);
-        int pwmR = computeSpeedPID(pidR, tR, CRUISE_SPEED + balance, dt, true);
-        leftMotor.drive(pwmL);
-        rightMotor.drive(pwmR);
-
-        if (now - lastLog >= 200) {
-            lastLog = now;
-            bleSend("L=%ld(%.0f) R=%ld(%.0f) diff=%+ld pwm=%d/%d\n",
-                    tL, tL * MM_PER_TICK,
-                    tR, tR * MM_PER_TICK,
-                    tL - tR, pwmL, pwmR);
+        if (rxCmd == 's') { rxCmd = 0; motionStop(); encodersDisable(); break; }
+        if (millis() - lastLog >= 200) {
+            lastLog = millis();
+            bleSend("L=%ld R=%ld diff=%+ld\n", g_snapL, g_snapR, g_snapL - g_snapR);
         }
     }
+    bleSend("[FREE] stopped\n");
 }
 
-// ── FSM ───────────────────────────────────────────────────────────────────────
+// =============================================================================
+// FSM
+// =============================================================================
 enum State {
-    STATE_IDLE,
-    STATE_CALIBRATE,
-    STATE_STANDBY,
-    STATE_ARMED,
-    STATE_EXPLORE,
-    STATE_GOAL_REACHED,
-    STATE_STOP,
+    STATE_STANDBY, STATE_CALIBRATE, STATE_ARMED,
+    STATE_EXPLORE, STATE_GOAL_REACHED, STATE_STOP,
     STATE_MOTOR_TEST
 };
-State state = STATE_IDLE;
+State state = STATE_STANDBY;
 
-// ── setup ─────────────────────────────────────────────────────────────────────
+// =============================================================================
+// setup
+// =============================================================================
 void setup() {
     Serial.begin(115200);
     delay(1500);
@@ -663,8 +606,6 @@ void setup() {
 
     leftMotor.begin();
     rightMotor.begin();
-
-    // Encoder pins ready but ISRs not attached until move starts
     pinMode(ENC_L_A, INPUT_PULLUP); pinMode(ENC_L_B, INPUT_PULLUP);
     pinMode(ENC_R_A, INPUT_PULLUP); pinMode(ENC_R_B, INPUT_PULLUP);
 
@@ -672,38 +613,64 @@ void setup() {
 
     FastLED.addLeds<WS2812B, WS2812_DATA, GRB>(leds, NUM_LEDS);
     FastLED.setBrightness(LED_BRIGHT);
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
-    FastLED.show();
+    fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show();
 
     Serial.println("[INIT] IMU calibrating — keep still...");
     imuCalibrate();
 
+    motionBegin();
     bleSetup();
 
     maze.reset();
     maze.setGoalSingle(5, 2);
+    maze.floodFill();
 
-    Serial.printf("[INIT] TICKS_PER_CELL=%ld  MM_PER_TICK=%.4f\n",
-                  TICKS_PER_CELL, MM_PER_TICK);
-    Serial.printf("[INIT] CRUISE=%.0f t/s  MIN_PWM=%d  BRAKE_COMP=%d\n",
-                  (float)CRUISE_SPEED, MIN_PWM_OUT, BRAKE_COMP_TICKS);
+    Serial.printf("[INIT] TICKS_PER_CELL=%ld  MM/tick=%.4f  CRUISE=%.0f\n",
+                  TICKS_PER_CELL, MM_PER_TICK, (float)CRUISE_SPEED);
+    Serial.println("[INIT] STANDBY — 'c'=cal 'd'=IR dump 'm'=motor test  button=ARM");
 
     beepDone();
-    Serial.println("[INIT] ready — press button to calibrate IR");
-    state = STATE_IDLE;
+    state = STATE_STANDBY;
 }
 
-// ── loop ──────────────────────────────────────────────────────────────────────
+// =============================================================================
+// loop
+// =============================================================================
 void loop() {
     int   batRaw = analogRead(BAT_V_SENSE);
     float vBat   = (batRaw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
 
     switch (state) {
 
-    case STATE_IDLE:
-        leds[7] = CRGB::Black;
+    case STATE_STANDBY:
+        leds[7] = CRGB(0, 200, 200);
         ledsUpdate(vBat);
-        if (buttonPressed()) state = STATE_CALIBRATE;
+        if (Serial.available()) rxCmd = Serial.read();
+        if (rxCmd == 'c') { rxCmd = 0; state = STATE_CALIBRATE; break; }
+        if (rxCmd == 'd') {
+            rxCmd = 0;
+            ir.update();
+            bleSend("[IR] raw: LF=%d L45=%d R45=%d RF=%d\n",
+                    ir.raw[0], ir.raw[1], ir.raw[2], ir.raw[3]);
+            bleSend("[IR] cal: LF(t=%d,ok=%d) L45(t=%d,ok=%d) R45(t=%d,ok=%d) RF(t=%d,ok=%d)\n",
+                    irCal[0].threshold, irCal[0].calibrated, irCal[1].threshold, irCal[1].calibrated,
+                    irCal[2].threshold, irCal[2].calibrated, irCal[3].threshold, irCal[3].calibrated);
+            bleSend("[IR] wallFront=%d wallLeft=%d wallRight=%d\n",
+                    ir.wallFront(irCal), ir.wallLeft(irCal), ir.wallRight(irCal));
+            break;
+        }
+        if (rxCmd == 'm') {
+            rxCmd = 0;
+            bleSend("[MOTOR_TEST] 1-5=cells f=free s=stop ?=status q=exit\n");
+            state = STATE_MOTOR_TEST; break;
+        }
+        rxCmd = 0;
+        if (buttonPressed()) {
+            resetRunState(); beep(80);
+            bleSend("[ARMED] wave 3x past LF sensor\n");
+            state = STATE_ARMED;
+        }
+        delay(50);
         break;
 
     case STATE_CALIBRATE:
@@ -711,87 +678,48 @@ void loop() {
         state = STATE_STANDBY;
         break;
 
-    case STATE_STANDBY:
-        leds[7] = CRGB(0, 200, 200);  // cyan
-        ledsUpdate(vBat);
-        if (Serial.available()) rxCmd = Serial.read();
-        if (rxCmd == 'm') {
-            rxCmd = 0;
-            bleSend("[MOTOR_TEST] cmds: 1-5=cells f=free s=stop r=reset ?=status q=exit\n");
-            state = STATE_MOTOR_TEST;
-            break;
-        }
-        rxCmd = 0;
-        if (buttonPressed()) {
-            resetRunState();
-            beep(80);
-            bleSend("[ARMED] wave 3x past LF sensor to start\n");
-            state = STATE_ARMED;
-        }
-        delay(50);
-        break;
-
     case STATE_ARMED: {
         leds[7] = CRGB::White;
         ledsUpdate(vBat);
-
         static int  waveCount   = 0;
         static bool handPresent = false;
-
         ir.update();
         float nLF = irCal[IR_LEFT_FRONT].normalize(ir.raw[IR_LEFT_FRONT]);
-
-        if (!handPresent && nLF > FINGER_THRESH) {
-            handPresent = true;
-        } else if (handPresent && nLF <= FINGER_THRESH) {
-            handPresent = false;
-            waveCount++;
-            bleSend("[ARMED] wave %d/%d\n", waveCount, WAVES_NEEDED);
-            beep(30);
+        if (!handPresent && nLF > FINGER_THRESH)       handPresent = true;
+        else if (handPresent && nLF <= FINGER_THRESH) {
+            handPresent = false; waveCount++;
+            bleSend("[ARMED] wave %d/%d\n", waveCount, WAVES_NEEDED); beep(30);
         }
-
         if (waveCount >= WAVES_NEEDED) {
-            waveCount   = 0;
-            handPresent = false;
+            waveCount = 0; handPresent = false;
             bleSend("[ARMED] starting in 1s\n");
-            delay(1000);
-            beep(80);
-            state = STATE_EXPLORE;
-            break;
+            delay(1000); beep(80); state = STATE_EXPLORE; break;
         }
-
         if (buttonPressed()) {
-            waveCount   = 0;
-            handPresent = false;
-            bleSend("[ARMED] cancelled\n");
-            state = STATE_STANDBY;
+            waveCount = 0; handPresent = false;
+            bleSend("[ARMED] cancelled\n"); state = STATE_STANDBY;
         }
         delay(20);
         break;
     }
 
     case STATE_EXPLORE: {
-        leds[7] = CRGB(0, 60, 0);
-        FastLED.show();
-
+        leds[7] = CRGB::Green;
         maze.visited[robotRow][robotCol] = true;
-
-        if (maze.isGoal(robotRow, robotCol)) {
-            state = STATE_GOAL_REACHED;
-            break;
-        }
+        if (maze.isGoal(robotRow, robotCol)) { state = STATE_GOAL_REACHED; break; }
 
         senseWalls();
         maze.floodFill();
 
         uint8_t bestDist;
-        AbsDir  nextDir = maze.bestDirection(robotRow, robotCol, bestDist);
-
+        AbsDir nextDir = maze.bestDirectionBiased(robotRow, robotCol, heading, bestDist);
         if (bestDist == FLOOD_INFINITY) {
             bleSend("[EXPLORE] TRAPPED at (%d,%d)\n", robotRow, robotCol);
-            state = STATE_STOP;
-            break;
+            state = STATE_STOP; break;
         }
+
+        bleSend("[EXPLORE] (%d,%d) h=%d → dir=%d dist=%d\n",
+                robotRow, robotCol, heading, nextDir, bestDist);
 
         int turnSteps = ((int)nextDir - (int)heading + 4) % 4;
         switch (turnSteps) {
@@ -800,50 +728,37 @@ void loop() {
             case 3: turnLeft90();  break;
             default: break;
         }
-
         moveForwardOneCell();
-        delay(50);
+        delay(40);
         updatePosition(nextDir);
         break;
     }
 
     case STATE_GOAL_REACHED:
-        fill_solid(leds, NUM_LEDS, CRGB::White);
-        FastLED.show();
+        fill_solid(leds, NUM_LEDS, CRGB::White); FastLED.show();
         beepGoal();
         bleSend("[GOAL] reached (%d,%d)!\n", robotRow, robotCol);
-        for (int r = 5; r >= 0; r--) {
-            bleSend("%d: ", r);
-            for (int c = 0; c < 3; c++) {
-                if (maze.flood[r][c] == FLOOD_INFINITY) bleSend(" ?? ");
-                else bleSend("%3d ", maze.flood[r][c]);
-            }
-            bleSend("\n");
-        }
         state = STATE_STOP;
         break;
 
     case STATE_STOP:
-        stopMotors();
+        motionStop();
         leds[7] = CRGB::Red;
         ledsUpdate(vBat);
         if (buttonPressed()) {
-            fill_solid(leds, NUM_LEDS, CRGB::Black);
-            FastLED.show();
-            bleSend("[STOP] back to STANDBY (irCal kept)\n");
+            fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show();
+            bleSend("[STOP] → STANDBY\n");
             state = STATE_STANDBY;
         }
         delay(100);
         break;
 
     case STATE_MOTOR_TEST:
-        leds[7] = CRGB(0, 0, 200);  // blue = motor test
-        FastLED.show();
+        leds[7] = CRGB(0, 0, 200); FastLED.show();
         if (Serial.available()) rxCmd = Serial.read();
         if (rxCmd == 0) { delay(20); break; }
         {
-            char cmd = rxCmd;
-            rxCmd = 0;
+            char cmd = rxCmd; rxCmd = 0;
             switch (cmd) {
                 case '1': moveCells(1); break;
                 case '2': moveCells(2); break;
@@ -851,31 +766,18 @@ void loop() {
                 case '4': moveCells(4); break;
                 case '5': moveCells(5); break;
                 case 'f': freeRun(); break;
-                case 's':
-                    stopMotors();
-                    encodersDisable();
-                    bleSend("[STOP]\n");
-                    break;
-                case 'r':
-                    encodersDisable();
-                    bleSend("[RESET] encoders detached\n");
-                    break;
+                case 's': motionStop(); encodersDisable(); bleSend("[STOP]\n"); break;
                 case '?':
                     bleSend("[STATUS] L=%ld(%.0fmm) R=%ld(%.0fmm) diff=%+ld\n",
-                            leftEnc.getTicks(),  leftEnc.getTicks()  * MM_PER_TICK,
-                            rightEnc.getTicks(), rightEnc.getTicks() * MM_PER_TICK,
-                            leftEnc.getTicks() - rightEnc.getTicks());
+                            g_snapL, g_snapL*MM_PER_TICK,
+                            g_snapR, g_snapR*MM_PER_TICK,
+                            g_snapL - g_snapR);
                     break;
                 case 'q':
-                    stopMotors();
-                    encodersDisable();
-                    fill_solid(leds, NUM_LEDS, CRGB::Black);
-                    FastLED.show();
-                    bleSend("[MOTOR_TEST] exit → STANDBY\n");
-                    state = STATE_STANDBY;
-                    break;
-                default:
-                    bleSend("[?] '%c' unknown. cmds: 1-5 f s r ? q\n", cmd);
+                    motionStop(); encodersDisable();
+                    fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show();
+                    bleSend("[MOTOR_TEST] exit\n"); state = STATE_STANDBY; break;
+                default: bleSend("[?] '%c' unknown\n", cmd);
             }
         }
         break;

@@ -28,17 +28,22 @@ enum IRSensor : uint8_t {
 
 // ── Calibration struct ────────────────────────────────────────────────────────
 struct IrCal {
-    int noWall    = 0;
-    int wall      = 4095;
-    int threshold = 500;   // safe default before calibration
+    int  noWall    = 0;
+    int  wall      = 4095;
+    int  threshold = 500;
+    bool calibrated = false;  // if false: isWall()→false, normalize()→0 (assume open)
 
     // 0.0 = fully open, 1.0 = at wall distance used during calibration
     float normalize(int raw) const {
+        if (!calibrated) return 0.0f;
         if (wall <= noWall) return 0.0f;
         return constrain((float)(raw - noWall) / (float)(wall - noWall), 0.0f, 2.0f);
     }
 
-    bool isWall(int raw) const { return raw > threshold; }
+    bool isWall(int raw) const {
+        if (!calibrated) return false;
+        return raw > threshold;
+    }
 };
 
 // ── MicromouseIR ─────────────────────────────────────────────────────────────
