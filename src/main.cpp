@@ -1,4 +1,4 @@
-// main.cpp — IR + WS2812B (8 LEDs) + IMU + Battery + BLE
+// main.cpp — IR + WS2812B (8 LEDs) + IMU + Battery + BLE + Motor + Encoder
 //
 // LED map:
 //   0 = LF      1 = L45     2,3 = unused (black)
@@ -6,12 +6,36 @@
 //   6 = battery  blue(full) → red(low)   range 6.8–8.4V
 //   7 = yaw      hue sweeps 0–360° as robot rotates, brightness = |rate|
 //
+// Button: press → move forward one cell (180 mm) using encoder feedback
 // BLE: connect "Micromouse26" in Serial Bluetooth Terminal
 #include <Arduino.h>
 #include <FastLED.h>
 #include <NimBLEDevice.h>
 #include <Wire.h>
 #include "PinConfig.h"
+#include "MicromouseMotor.h"
+#include "MicromouseEncoder.h"
+
+// ── Motor + Encoder ───────────────────────────────────────────────────────────
+// Derived from PinConfig.h constants:
+//   circumference = π × WHEEL_DIAMETER = π × 32 = 100.53 mm
+//   mm per tick   = circumference / TICKS_PER_REV = 100.53 / 210 ≈ 0.4787 mm
+//   ticks per cell = CELL_MM / mm_per_tick = 180 / 0.4787 ≈ 376 ticks
+#define CELL_MM         180.0f
+#define MM_PER_TICK     ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)  // ~0.4787
+#define TICKS_PER_CELL  ((long)(CELL_MM / MM_PER_TICK))                   // ~376
+
+// Open-loop drive PWM for forward motion (tune if robot drifts badly)
+// Start low — raise until it moves reliably without stalling
+#define DRIVE_PWM       400  // range 0–1023; ~40% duty
+
+MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "LEFT");
+MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, "RIGHT");
+MicromouseEncoder leftEnc   (ENC_L_A, ENC_L_B, "LEFT");
+MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B, "RIGHT");
+
+void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt();  }
+void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
 
 // ── WS2812B ──────────────────────────────────────────────────────────────────
 #define NUM_LEDS      8
@@ -208,6 +232,83 @@ void imuUpdate() {
     yawDeg  += rate * dt;
 }
 
+// ── Motion ────────────────────────────────────────────────────────────────────
+// moveForwardOneCell() — drives forward until BOTH encoders reach TICKS_PER_CELL.
+//
+// Open-loop: both motors run at DRIVE_PWM. No PID yet.
+// The encoder is the STOP condition — robot halts exactly at tick target.
+//
+// Ramp-down: at 80% of target, drop to half power to reduce overshoot.
+// Safety timeout: 5 seconds — brakes and reports if target never reached.
+//
+// LEDs 2+3 show progress: black→green as ticks accumulate.
+void moveForwardOneCell() {
+    leftEnc.reset();
+    rightEnc.reset();
+
+    blePrintf("[MOVE] start — target=%ld ticks (%.1f mm)\n",
+              TICKS_PER_CELL, (float)TICKS_PER_CELL * MM_PER_TICK);
+
+    leftMotor.drive(DRIVE_PWM);
+    rightMotor.drive(DRIVE_PWM);
+
+    unsigned long startMs  = millis();
+    bool          ramped   = false;
+    const long    rampAt   = (long)(TICKS_PER_CELL * 0.80f);  // 80% → half power
+
+    while (true) {
+        long tL = leftEnc.getTicks();
+        long tR = rightEnc.getTicks();
+        long avg = (tL + tR) / 2;
+
+        // Ramp down at 80% to reduce overshoot
+        if (!ramped && avg >= rampAt) {
+            ramped = true;
+            leftMotor.drive(DRIVE_PWM / 2);
+            rightMotor.drive(DRIVE_PWM / 2);
+            blePrintf("[MOVE] ramp-down at tick %ld\n", avg);
+        }
+
+        // Progress on LEDs 2+3 (green intensity = fraction of cell done)
+        uint8_t prog = (uint8_t)constrain(avg * 255 / TICKS_PER_CELL, 0, 255);
+        leds[2] = CRGB(0, prog, 0);
+        leds[3] = CRGB(0, prog, 0);
+        FastLED.show();
+
+        // Stop when both encoders hit target
+        if (tL >= TICKS_PER_CELL && tR >= TICKS_PER_CELL) {
+            leftMotor.brake();
+            rightMotor.brake();
+            delay(60);
+            leftMotor.coast();
+            rightMotor.coast();
+            leds[2] = CRGB::Green;
+            leds[3] = CRGB::Green;
+            FastLED.show();
+            float distL = tL * MM_PER_TICK;
+            float distR = tR * MM_PER_TICK;
+            blePrintf("[MOVE] done — L=%ld ticks (%.1fmm)  R=%ld ticks (%.1fmm)  t=%lums\n",
+                      tL, distL, tR, distR, millis() - startMs);
+            return;
+        }
+
+        // Safety timeout — motors off, report error
+        if (millis() - startMs > 5000) {
+            leftMotor.brake();
+            rightMotor.brake();
+            delay(60);
+            leftMotor.coast();
+            rightMotor.coast();
+            leds[2] = CRGB::Red;
+            leds[3] = CRGB::Red;
+            FastLED.show();
+            blePrintf("[MOVE] TIMEOUT — L=%ld  R=%ld  target=%ld — check motors/encoders\n",
+                      leftEnc.getTicks(), rightEnc.getTicks(), TICKS_PER_CELL);
+            return;
+        }
+    }
+}
+
 // ── Buzzer helpers ────────────────────────────────────────────────────────────
 void beep(int ms) {
     ledcWrite(BUZZER_LEDC_CH, BUZZER_DUTY);
@@ -225,6 +326,24 @@ void setup() {
     ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
     ledcWrite(BUZZER_LEDC_CH, 0);
     beep(80);  // short startup beep — hardware alive
+
+    // Button
+    pinMode(BUTTON_1, INPUT_PULLUP);
+
+    // DRV8833 wake — must be HIGH before motor commands
+    pinMode(DRV_SLEEP_PIN, OUTPUT);
+    digitalWrite(DRV_SLEEP_PIN, HIGH);
+
+    // Motors
+    leftMotor.begin();
+    rightMotor.begin();
+
+    // Encoders
+    leftEnc.begin(leftISR);
+    rightEnc.begin(rightISR);
+
+    blePrintf("[INIT] TICKS_PER_CELL=%ld  MM_PER_TICK=%.4f  CELL_MM=%.0f\n",
+              TICKS_PER_CELL, MM_PER_TICK, CELL_MM);
 
     // IR pins
     for (int i = 0; i < N_IR; i++) {
@@ -248,6 +367,17 @@ void setup() {
 
 // ── loop ──────────────────────────────────────────────────────────────────────
 void loop() {
+    // Button: falling edge → move one cell
+    static bool lastBtn = HIGH;
+    bool btn = digitalRead(BUTTON_1);
+    if (lastBtn == HIGH && btn == LOW) {
+        blePrintf("[BTN] pressed → moveForwardOneCell()\n");
+        beep(60);
+        moveForwardOneCell();
+        beep(60);  // done beep
+    }
+    lastBtn = btn;
+
     imuUpdate();
 
     // IR — LEDs 0,1,4,5

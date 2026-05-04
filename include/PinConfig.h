@@ -52,7 +52,7 @@
 // Encoder: 7 pulses/rev (motor shaft), single-channel RISING only
 // Effective ticks/wheel-rev = 7 * 30 = 210
 // If using full quadrature (both edges, both channels) = 7 * 4 * 30 = 840
-#define WHEEL_DIAMETER  32.0   // mm
+#define WHEEL_DIAMETER  33.0   // mm
 #define TICKS_PER_REV   210.0  // Single-channel RISING: 7 PPR * 30 gear ratio
                                // Change to 840.0 if using full quadrature decoding
 #define MOTOR_PWM_FREQ  20000  // 20kHz silent frequency
