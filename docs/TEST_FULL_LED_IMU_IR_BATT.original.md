@@ -1,3 +1,26 @@
+# Full Sensor Visual Test — 8x WS2812B + IR + IMU + Battery + BLE
+
+## LED Map
+
+| LED | Sensor | Color logic |
+|-----|--------|-------------|
+| 0 | LF  (Left-Front)  | green=0 → red=4000 (IR delta) |
+| 1 | L45 (Left-45)     | green=0 → red=4000 |
+| 2 | — unused          | black |
+| 3 | — unused          | black |
+| 4 | R45 (Right-45)    | green=0 → red=4000 |
+| 5 | RF  (Right-Front) | green=0 → red=4000 |
+| 6 | Battery           | blue=full (8.4V) → red=low (6.8V) |
+| 7 | Yaw (IMU Z-axis)  | hue rotates with heading, brightness = rotation rate |
+
+## BLE output (200ms interval)
+```
+LF: 450 near|L45:  12 open|R45:  18 open|RF: 430 near|7.82V|yaw:23.4
+```
+
+## main.cpp
+
+```cpp
 // main.cpp — IR + WS2812B (8 LEDs) + IMU + Battery + BLE
 //
 // LED map:
@@ -15,29 +38,25 @@
 
 // ── WS2812B ──────────────────────────────────────────────────────────────────
 #define NUM_LEDS      8
-#define LED_BRIGHT    5 // always keep it 5 percent or below to avoid blinding and excessive power draw
+#define LED_BRIGHT    60
 CRGB leds[NUM_LEDS];
 
-// IR delta 0–4000 → green→red
 CRGB deltaToColor(int delta) {
     uint8_t r = map(constrain(delta, 0, 4000), 0, 4000, 0,   255);
     uint8_t g = map(constrain(delta, 0, 4000), 0, 4000, 255,   0);
     return CRGB(r, g, 0);
 }
 
-// Battery 6.8–8.4V → blue(full)→red(low)
 CRGB battToColor(float v) {
-    float pct = constrain((v - 6.8f) / (8.4f - 6.8f), 0.0f, 1.0f); // 0=empty 1=full
+    float pct = constrain((v - 6.8f) / (8.4f - 6.8f), 0.0f, 1.0f);
     uint8_t r = map((int)(pct * 100), 0, 100, 255, 0);
     uint8_t b = map((int)(pct * 100), 0, 100, 0,   255);
     return CRGB(r, 0, b);
 }
 
-// Yaw → hue (0–255 wraps full circle), brightness scales with rotation rate.
-// Off when stationary (rate near zero), brightens as robot rotates.
 CRGB yawToColor(float yawDeg, float rateDps) {
     uint8_t hue    = (uint8_t)(fmod(yawDeg + 360.0f, 360.0f) * 255.0f / 360.0f);
-    uint8_t bright = (uint8_t)constrain(fabsf(rateDps) * 2.0f, 0.0f, 255.0f);
+    uint8_t bright = (uint8_t)constrain(fabsf(rateDps) * 2.0f, 20.0f, 255.0f);
     return CHSV(hue, 255, bright);
 }
 
@@ -101,7 +120,7 @@ int readDelta(const IRPair& p) {
     delayMicroseconds(100);
     int lit = analogRead(p.rx);
     digitalWrite(p.emit, LOW);
-    return max(0, lit - ambient);  // clamp: negative = noise, treat as 0
+    return lit - ambient;
 }
 
 const char* classify(int d) {
@@ -112,85 +131,36 @@ const char* classify(int d) {
 }
 
 // ── IMU (MPU-6500) ────────────────────────────────────────────────────────────
-// Register map (abbreviated):
-//   0x3B  ACCEL_XOUT_H  — start of 14-byte burst: AX AY AZ TEMP GX GY GZ
-//   0x6B  PWR_MGMT_1    — write 0x00 to wake
-//   0x75  WHO_AM_I      — should read 0x70
-// Gyro scale at FS_SEL=0: 131 LSB/(°/s)
-#define MPU_ADDR         0x68
-#define REG_PWR_MGMT_1   0x6B
-#define REG_ACCEL_XOUT_H 0x3B
-#define GYRO_SCALE       131.0f
-#define GYRO_NOISE_FLOOR 0.05f   // °/s — rates below this treated as zero
-#define CALIB_SAMPLES    200
+#define MPU_ADDR  0x68
 
-float         gyroBiasZ = 0.0f;
-float         yawDeg    = 0.0f;
-float         gyroRate  = 0.0f;
-unsigned long lastIMU   = 0;
+float gyroBiasZ = 0.0f;
+float yawDeg    = 0.0f;
+float gyroRate  = 0.0f;
+unsigned long lastIMU = 0;
 
-// Write one register; returns true on success
-bool imuWrite(uint8_t reg, uint8_t val) {
+void imuWrite(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(MPU_ADDR);
-    Wire.write(reg);
-    Wire.write(val);
-    return Wire.endTransmission() == 0;
+    Wire.write(reg); Wire.write(val);
+    Wire.endTransmission();
 }
 
-// Burst-read 14 bytes from 0x3B: AX(2) AY(2) AZ(2) TEMP(2) GX(2) GY(2) GZ(2)
-// Returns false if I2C fails. Only GZ used for yaw but full burst is cheaper
-// than a targeted 2-byte read (one transaction vs two).
-struct IMURaw { int16_t ax, ay, az, temp, gx, gy, gz; };
-bool imuReadAll(IMURaw& d) {
+float readGyroZ() {
     Wire.beginTransmission(MPU_ADDR);
-    Wire.write(REG_ACCEL_XOUT_H);
-    if (Wire.endTransmission(false) != 0) return false;
-    Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)14);
-    if (Wire.available() < 14) return false;
-    uint8_t b[14];
-    for (int i = 0; i < 14; i++) b[i] = Wire.read();
-    d.ax   = (int16_t)((b[0]  << 8) | b[1]);
-    d.ay   = (int16_t)((b[2]  << 8) | b[3]);
-    d.az   = (int16_t)((b[4]  << 8) | b[5]);
-    d.temp = (int16_t)((b[6]  << 8) | b[7]);
-    d.gx   = (int16_t)((b[8]  << 8) | b[9]);
-    d.gy   = (int16_t)((b[10] << 8) | b[11]);
-    d.gz   = (int16_t)((b[12] << 8) | b[13]);
-    return true;
+    Wire.write(0x47);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)2);
+    int16_t raw = ((int16_t)Wire.read() << 8) | Wire.read();
+    return raw / 131.0f;
 }
 
 void imuBegin() {
-    // begin() then setClock() — setClock() before begin() has no effect
     Wire.begin(IMU_SDA, IMU_SCL);
-    Wire.setClock(400000);  // 400 kHz fast mode
-
-    if (!imuWrite(REG_PWR_MGMT_1, 0x00)) {
-        blePrintf("[IMU] ERROR: wake write failed — check SDA=GPIO%d SCL=GPIO%d\n",
-                  IMU_SDA, IMU_SCL);
-    }
-    delay(100);  // let gyro stabilise after wake
-
-    // Calibrate Z bias — count only successful reads
-    blePrintf("[IMU] calibrating (%d samples, keep robot still)...\n", CALIB_SAMPLES);
-    float sum = 0.0f;
-    int   good = 0;
-    for (int i = 0; i < CALIB_SAMPLES; i++) {
-        IMURaw d;
-        if (imuReadAll(d)) {
-            sum += d.gz / GYRO_SCALE;
-            good++;
-        }
-        delay(2);
-    }
-    if (good == 0) {
-        blePrintf("[IMU] ERROR: 0 good reads during calibration!\n");
-    } else {
-        gyroBiasZ = sum / good;
-        blePrintf("[IMU] bias=%.4f dps  (from %d/%d good reads)\n",
-                  gyroBiasZ, good, CALIB_SAMPLES);
-        if (fabsf(gyroBiasZ) > 1.0f)
-            blePrintf("[IMU] WARN: bias > 1 dps — was robot moving?\n");
-    }
+    Wire.setClock(400000);
+    imuWrite(0x6B, 0x00);
+    delay(100);
+    float sum = 0;
+    for (int i = 0; i < 200; i++) { sum += readGyroZ(); delay(2); }
+    gyroBiasZ = sum / 200.0f;
     lastIMU = micros();
 }
 
@@ -198,21 +168,10 @@ void imuUpdate() {
     unsigned long now = micros();
     float dt = (now - lastIMU) / 1e6f;
     lastIMU = now;
-
-    IMURaw d;
-    if (!imuReadAll(d)) return;  // skip update on I2C failure
-
-    float rate = d.gz / GYRO_SCALE - gyroBiasZ;
-    if (fabsf(rate) < GYRO_NOISE_FLOOR) rate = 0.0f;
+    float rate = readGyroZ() - gyroBiasZ;
+    if (fabsf(rate) < 0.05f) rate = 0;
     gyroRate = rate;
     yawDeg  += rate * dt;
-}
-
-// ── Buzzer helpers ────────────────────────────────────────────────────────────
-void beep(int ms) {
-    ledcWrite(BUZZER_LEDC_CH, BUZZER_DUTY);
-    delay(ms);
-    ledcWrite(BUZZER_LEDC_CH, 0);
 }
 
 // ── setup ─────────────────────────────────────────────────────────────────────
@@ -220,20 +179,12 @@ void setup() {
     Serial.begin(115200);
     delay(2000);
 
-    // Buzzer — init before anything else so startup beep confirms MCU alive
-    ledcSetup(BUZZER_LEDC_CH, BUZZER_FREQ, BUZZER_RES);
-    ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
-    ledcWrite(BUZZER_LEDC_CH, 0);
-    beep(80);  // short startup beep — hardware alive
-
-    // IR pins
     for (int i = 0; i < N_IR; i++) {
         pinMode(PAIRS[i].emit, OUTPUT);
         digitalWrite(PAIRS[i].emit, LOW);
         pinMode(PAIRS[i].rx, INPUT);
     }
 
-    // LEDs
     FastLED.addLeds<WS2812B, WS2812_DATA, GRB>(leds, NUM_LEDS);
     FastLED.setBrightness(LED_BRIGHT);
     fill_solid(leds, NUM_LEDS, CRGB::Black);
@@ -242,36 +193,30 @@ void setup() {
     bleSetup();
     imuBegin();
 
-    beep(40); delay(60); beep(40);  // double beep = init complete
-    blePrintf("\n[INIT] ready — LED0=LF LED1=L45 LED4=R45 LED5=RF LED6=batt LED7=yaw\n\n");
+    blePrintf("\n[INIT] 8-LED test ready\n");
+    blePrintf("LED0=LF LED1=L45 LED4=R45 LED5=RF LED6=batt LED7=yaw\n\n");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
 void loop() {
     imuUpdate();
 
-    // IR — LEDs 0,1,4,5
     int d[N_IR];
     for (int i = 0; i < N_IR; i++) {
         d[i] = readDelta(PAIRS[i]);
         leds[PAIRS[i].ledIdx] = deltaToColor(d[i]);
     }
 
-    // LEDs 2,3 unused
     leds[2] = CRGB::Black;
     leds[3] = CRGB::Black;
 
-    // LED 6 — battery
     int   batRaw = analogRead(BAT_V_SENSE);
     float vBat   = (batRaw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
     leds[6] = battToColor(vBat);
-
-    // LED 7 — yaw
     leds[7] = yawToColor(yawDeg, gyroRate);
 
     FastLED.show();
 
-    // BLE output every 200ms
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint >= 200) {
         lastPrint = millis();
@@ -283,3 +228,12 @@ void loop() {
                   vBat, yawDeg);
     }
 }
+```
+
+## Notes
+- IMU calibrates on boot — keep robot still for ~400ms after power on
+- LED 7 hue tracks absolute heading (resets on power cycle) — useful for detecting drift
+- LED 7 brightness = rotation speed: dim when still, bright when spinning fast
+- Battery range 6.8–8.4V covers 2S LiPo (cutoff–full)
+- IR thresholds (50/300/800) need calibration at actual maze wall distance
+- BLE chunks at 20-byte MTU — blePrintf handles splitting
