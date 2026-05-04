@@ -52,8 +52,18 @@
 // Encoder: 7 pulses/rev (motor shaft), single-channel RISING only
 // Effective ticks/wheel-rev = 7 * 30 = 210
 // If using full quadrature (both edges, both channels) = 7 * 4 * 30 = 840
-#define WHEEL_DIAMETER  33.0   // mm
-#define TICKS_PER_REV   210.0  // Single-channel RISING: 7 PPR * 30 gear ratio
-                               // Change to 840.0 if using full quadrature decoding
-#define MOTOR_PWM_FREQ  20000  // 20kHz silent frequency
-#define MOTOR_PWM_RES   10     // 10-bit resolution (0–1023)
+#define WHEEL_DIAMETER    33.4f  // mm — measured physically
+#define TICKS_PER_REV     210.0f // Single-channel RISING: 7 PPR * 30 gear ratio
+                                 // Change to 840.0 if using full quadrature decoding
+#define MOTOR_PWM_FREQ    20000  // 20kHz silent frequency
+#define MOTOR_PWM_RES     10     // 10-bit resolution (0–1023)
+
+// Robot geometry (measured)
+#define ROBOT_LENGTH_MM   100.0f // front to back
+#define WHEEL_AXLE_TO_BACK_MM 33.0f // wheel axle to rear of robot
+#define ROBOT_WEIGHT_G    85.0f  // grams with battery
+
+// Brake compensation: stop this many ticks before target to account for
+// mechanical coasting after brake(). Robot at ~85g coasts ~5-8 ticks.
+// Tune: if robot overshoots → increase. undershoots → decrease.
+#define BRAKE_COMP_TICKS  8      // ticks to stop early
