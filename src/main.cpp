@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <FastLED.h>
 #include "PinConfig.h"
 #include "MicromouseMotor.h"
 #include "MicromouseEncoder.h"
@@ -6,11 +7,14 @@
 #include "PID.h"
 
 // ── Globals ──────────────────────────────────────────────────────────────────
-MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1);
-MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3);
+MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, MOTOR_L_INV);
+MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, MOTOR_R_INV);
 MicromouseEncoder encLeft   (ENC_L_A, ENC_L_B);
 MicromouseEncoder encRight  (ENC_R_A, ENC_R_B);
 MicromouseMaze    maze;
+
+#define NUM_LEDS 8
+CRGB leds[NUM_LEDS];
 
 void IRAM_ATTR isrLeft()  { encLeft.handleInterrupt();  }
 void IRAM_ATTR isrRight() { encRight.handleInterrupt(); }
@@ -64,57 +68,61 @@ bool buttonEdge() {
 
 void stopMotors() {
     leftMotor.brake(); rightMotor.brake();
-    delay(100); // Allow physical momentum to dissipate
+    delay(100); 
     leftMotor.coast(); rightMotor.coast();
 }
 
-// ── Movement with Physics (Acceleration/Deceleration) ───────────────────────
+void updateBatteryIndicator() {
+    int raw = analogRead(BAT_V_SENSE);
+    float vBat = (raw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
+    
+    // Physics: 2S LiPo range 6.8V (Dead) to 8.4V (Full)
+    float pct = (vBat - 6.8f) / (8.4f - 6.8f);
+    pct = constrain(pct, 0.0f, 1.0f);
+    
+    // LED 7 (Index 6) Green (Full) -> Red (Low)
+    leds[6] = CRGB(255 * (1.0f - pct), 255 * pct, 0);
+    FastLED.show();
+}
+
+// ── Movement with Physics ────────────────────────────────────────────────────
 void driveWithRamp(int targetPWM, long targetTicks, bool forward) {
-    long startTicks = encLeft.getTicks();
+    long startTicksL = encLeft.getTicks();
     long currentTicks = 0;
-    int currentPWM = 20; // Start just above stall to respect inertia
+    int currentPWM = 30; // Start slightly higher to ensure movement
     
     wallPid.reset();
     encPid.reset();
 
     while (currentTicks < targetTicks) {
-        currentTicks = abs(encLeft.getTicks() - startTicks);
+        currentTicks = abs(encLeft.getTicks() - startTicksL);
         
-        // Physics: Acceleration Ramp
-        if (currentPWM < targetPWM) currentPWM += 5; // ramp up
-        
-        // Physics: Deceleration Ramp (start slowing down in last 25% of movement)
+        if (currentPWM < targetPWM) currentPWM += 2;
         if (currentTicks > (targetTicks * 3 / 4)) {
-            if (currentPWM > 40) currentPWM -= 8; // ramp down
+            if (currentPWM > 40) currentPWM -= 4;
         }
 
-        // Physics: Emergency Front Wall Stop
-        if (forward && (irRead(IR_LF) > LF_THRESH || irRead(IR_RF) > RF_THRESH)) {
-            break; // Stop immediately if we are about to hit a front wall
-        }
+        if (forward && (irRead(IR_LF) > LF_THRESH || irRead(IR_RF) > RF_THRESH)) break;
 
         float wallCorr = 0;
         if (forward) {
             int l45 = irRead(IR_L45);
             int r45 = irRead(IR_R45);
-            
-            // Proportional Centering Physics:
             if (l45 > L45_THRESH && r45 > R45_THRESH) {
-                // Both walls: Center between them
                 wallCorr = wallPid.compute((float)(l45 - L45_CENTER) - (float)(r45 - R45_CENTER));
             } else if (l45 > L45_THRESH) {
-                // Only left wall: Keep distance from it
                 wallCorr = wallPid.compute((float)(l45 - L45_CENTER) * 2.0f);
             } else if (r45 > R45_THRESH) {
-                // Only right wall: Keep distance from it
                 wallCorr = wallPid.compute((float)-(r45 - R45_CENTER) * 2.0f);
             }
         }
 
-        // Forward/Backward multiplier
         int dir = forward ? 1 : -1;
         leftMotor.drive(dir * (currentPWM - (int)wallCorr));
         rightMotor.drive(dir * (currentPWM + (int)wallCorr));
+        
+        static unsigned long lastBatt = 0;
+        if (millis() - lastBatt > 500) { lastBatt = millis(); updateBatteryIndicator(); }
         delay(10);
     }
     stopMotors();
@@ -124,8 +132,11 @@ void turnRight() {
     leftMotor.drive(TURN_PWM);
     rightMotor.drive(-TURN_PWM);
     long startL = encLeft.getTicks();
-    // 90 degree turn is a specific physical distance on the wheel track
-    while (abs(encLeft.getTicks() - startL) < TICKS_PER_90) { delay(1); }
+    unsigned long startMs = millis();
+    while (abs(encLeft.getTicks() - startL) < TICKS_PER_90) { 
+        if (millis() - startMs > 2000) break;
+        delay(1); 
+    }
     stopMotors();
     robotHeading = (AbsDir)(((int)robotHeading + 1) % 4);
 }
@@ -134,7 +145,11 @@ void turnLeft() {
     leftMotor.drive(-TURN_PWM);
     rightMotor.drive(TURN_PWM);
     long startL = encLeft.getTicks();
-    while (abs(encLeft.getTicks() - startL) < TICKS_PER_90) { delay(1); }
+    unsigned long startMs = millis();
+    while (abs(encLeft.getTicks() - startL) < TICKS_PER_90) { 
+        if (millis() - startMs > 2000) break;
+        delay(1); 
+    }
     stopMotors();
     robotHeading = (AbsDir)(((int)robotHeading + 3) % 4);
 }
@@ -166,6 +181,11 @@ void setup() {
     pinMode(DRV_SLEEP_PIN, OUTPUT);
     digitalWrite(DRV_SLEEP_PIN, HIGH);
     
+    FastLED.addLeds<WS2812B, WS2812_DATA, GRB>(leds, NUM_LEDS);
+    FastLED.setBrightness(20);
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show();
+
     leftMotor.begin();
     rightMotor.begin();
     encLeft.begin(isrLeft);
@@ -177,11 +197,21 @@ void setup() {
     }
     
     pinMode(BUTTON_1, INPUT_PULLUP);
+    
+    // Startup Diagnostic: Pulse each motor FORWARD
     beep(100);
+    updateBatteryIndicator();
+    Serial.println("DIAGNOSTIC: Left Motor Forward...");
+    leftMotor.drive(40); delay(200); leftMotor.coast();
+    delay(500);
+    Serial.println("DIAGNOSTIC: Right Motor Forward...");
+    rightMotor.drive(40); delay(200); rightMotor.coast();
+    
     maze.reset();
 }
 
 void loop() {
+    updateBatteryIndicator();
     switch (robotState) {
         case IDLE:
             if (buttonEdge()) {
@@ -197,28 +227,19 @@ void loop() {
                 robotState = GOAL;
                 break;
             }
-            
             senseWalls();
             maze.floodFill();
-            
             uint8_t d;
             AbsDir next = maze.bestDirectionBiased(robotRow, robotCol, robotHeading, d);
-            
             int turn = ((int)next - (int)robotHeading + 4) % 4;
             if (turn == 1) turnRight();
             else if (turn == 2) turnAround();
             else if (turn == 3) turnLeft();
-            
             moveForwardOneCell();
             delay(CELL_PAUSE_MS);
             break;
         }
-            
-        case GOAL:
-            beepGoal();
-            robotState = STOP;
-            break;
-            
+        case GOAL: beepGoal(); robotState = STOP; break;
         case STOP:
             if (buttonEdge()) {
                 robotRow = 0; robotCol = 0;
