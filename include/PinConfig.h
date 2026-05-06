@@ -28,10 +28,18 @@
 #define BUTTON_1        42
 #define BUZZER_PIN      40
 #define BUZZER_FREQ     4000
+#define WS2812_DATA     3
+
+#define BAT_V_SENSE     5      // Battery voltage divider pin
+#define BAT_VDIV_MULT   3.1197f // Calibration multiplier
 
 // ── Physics ───────────────────────────────────────────────────────────────────
 #define WHEEL_DIAMETER  33.4f
 #define TICKS_PER_REV   210.0f
+
+// ── Motor Polarity (Physics: Back-to-back motors require inversion) ───────────
+#define MOTOR_L_INV     false
+#define MOTOR_R_INV     true   // Usually right is inverted
 
 // ── IR thresholds (Calibrated 2026-05-06) ──────────────────────────────────
 #define L45_CENTER      1010

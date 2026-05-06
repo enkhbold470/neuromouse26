@@ -6,9 +6,10 @@
 
 class MicromouseMotor {
     uint8_t pinIN1, pinIN2;
+    bool inverted;
 public:
-    MicromouseMotor(uint8_t in1, uint8_t in2, uint8_t c1, uint8_t c2)
-        : pinIN1(in1), pinIN2(in2) {} // c1/c2 ignored for ultimate portability, kept for signature compatibility
+    MicromouseMotor(uint8_t in1, uint8_t in2, uint8_t c1, uint8_t c2, bool inv = false)
+        : pinIN1(in1), pinIN2(in2), inverted(inv) {}
 
     void begin() {
         pinMode(pinIN1, OUTPUT);
@@ -17,7 +18,8 @@ public:
     }
 
     void drive(int speed) {
-        speed = constrain(speed, -255, 255); // Universal 8-bit Arduino PWM
+        if (inverted) speed = -speed;
+        speed = constrain(speed, -255, 255);
         if (speed == 0) { coast(); return; }
         if (speed > 0) {
             analogWrite(pinIN1, speed);
