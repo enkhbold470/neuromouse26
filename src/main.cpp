@@ -88,12 +88,26 @@ void driveWithRamp(int targetPWM, long targetTicks, bool forward) {
             if (currentPWM > 40) currentPWM -= 8; // ramp down
         }
 
+        // Physics: Emergency Front Wall Stop
+        if (forward && (irRead(IR_LF) > LF_THRESH || irRead(IR_RF) > RF_THRESH)) {
+            break; // Stop immediately if we are about to hit a front wall
+        }
+
         float wallCorr = 0;
         if (forward) {
             int l45 = irRead(IR_L45);
             int r45 = irRead(IR_R45);
+            
+            // Proportional Centering Physics:
             if (l45 > L45_THRESH && r45 > R45_THRESH) {
+                // Both walls: Center between them
                 wallCorr = wallPid.compute((float)(l45 - L45_CENTER) - (float)(r45 - R45_CENTER));
+            } else if (l45 > L45_THRESH) {
+                // Only left wall: Keep distance from it
+                wallCorr = wallPid.compute((float)(l45 - L45_CENTER) * 2.0f);
+            } else if (r45 > R45_THRESH) {
+                // Only right wall: Keep distance from it
+                wallCorr = wallPid.compute((float)-(r45 - R45_CENTER) * 2.0f);
             }
         }
 
