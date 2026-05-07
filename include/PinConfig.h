@@ -41,25 +41,25 @@
 #define MOTOR_L_INV     false
 #define MOTOR_R_INV     true   // Usually right is inverted
 
-// ── IR thresholds (Calibrated 2026-05-06) ──────────────────────────────────
-#define L45_CENTER      1010
-#define R45_CENTER      785
-#define L45_THRESH      500   // Wall detected if > 50% of center
-#define R45_THRESH      400   
-#define LF_THRESH       600   // Front wall detection
-#define RF_THRESH       400   
+// ── IR thresholds (Calibrated 2026-05-07, dead-end centered) ──────────────
+#define L45_CENTER      421   // avg wall reading
+#define R45_CENTER      504   // avg wall reading
+#define L45_THRESH      450    // no-wall <10, wall >397 — huge gap
+#define R45_THRESH      450
+#define LF_THRESH       450    // no-wall <10, wall >512
+#define RF_THRESH       450
 
 // ── Drive tuning (Scaled for Universal 8-bit PWM: 0-255) ──────────────────────
 #define BASE_PWM        60   // Safe starting speed
 
-#define WALL_KP         0.5f  // Much lower gain for smooth proportional steering
-#define WALL_KI         0.01f 
-#define WALL_KD         0.1f
+#define WALL_KP         0.25f // Calibrated for ~100 IR units error = 25 PWM
+#define WALL_KI         0.00f 
+#define WALL_KD         0.02f // Lowered to filter IR noise
 #define WALL_MAX_CORR   50    // Max steering deviation
 
-#define ENC_KP          2.0f
-#define ENC_KI          0.0f
-#define ENC_KD          0.0f
+#define ENC_KP          6.0f  // 1mm error (2 ticks) = 12 PWM
+#define ENC_KI          0.00f
+#define ENC_KD          0.2f
 #define ENC_MAX_CORR    30
 
 // ── Cell math ─────────────────────────────────────────────────────────────────

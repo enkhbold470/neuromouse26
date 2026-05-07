@@ -64,9 +64,10 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **Standalone Tests:** The `test/` directory contains numerous standalone `.cpp` files for validating individual subsystems (e.g., `ir-test.cpp`, `mpu6500.cpp`, `ws2812b.cpp`).
 - **Validation Workflow:** Before running a full maze, it is recommended to validate hardware using the scripts in `test/`.
 
-### Known Issues & Risks (as of 2026-04-27)
+### Known Issues & Risks (as of 2026-05-07)
 - **Blocking Loops:** Motion functions like `moveForwardOneCell()` are blocking.
 - **Baud Rate:** Serial prints at high frequency can affect PID timing; minimize logging during speed runs.
+- **IR thresholds fixed 2026-05-07:** Previous thresholds (LF/RF=1500, L45/R45=650) exceeded maximum possible wall readings (~574) — wall detection was completely non-functional. Fixed to 50. Always validate thresholds against actual `irRead()` output before testing.
 
 ---
 
@@ -200,25 +201,30 @@ struct PID {
 
 ## IR Sensor Patterns
 
+`irRead()` uses **differential (ambient-subtracted)** reads — emitter OFF → read ambient, emitter ON → read lit, return `max(0, lit - amb)`. Result: no-wall ≈ 0–10, wall present ≈ 400–550. Threshold of 50 gives clean separation with no false positives possible.
+
+**Calibrated values (2026-05-07, dead-end centered, all 4 walls present):**
+
+| Sensor | No-wall | Wall avg | Wall min | Wall max | CENTER (PID) |
+|--------|---------|----------|----------|----------|--------------|
+| LF     | <10     | 552      | 512      | 574      | —            |
+| L45    | <10     | 421      | 397      | 491      | 421          |
+| R45    | <10     | 504      | 494      | 508      | 504          |
+| RF     | <10     | 530      | 526      | 534      | —            |
+
 ```cpp
-// Analog reads — use ADC1 only (ADC2 conflicts with Wi-Fi if enabled)
-// Calibrate min/max at startup, store in EEPROM or NVS
+// irRead() = differential (ambient-subtracted), so no-wall ~0, wall ~400-550
+// Single threshold works for all sensors — huge gap between states
+#define WALL_THRESH  50
 
-constexpr uint8_t IR_LF  = 1;   // ADC1 channel numbers
-constexpr uint8_t IR_L45 = 2;
-constexpr uint8_t IR_R45 = 3;
-constexpr uint8_t IR_RF  = 4;
+bool wallFront() { return irRead(IR_LF) > WALL_THRESH || irRead(IR_RF) > WALL_THRESH; }
+bool wallLeft()  { return irRead(IR_L45) > WALL_THRESH; }
+bool wallRight() { return irRead(IR_R45) > WALL_THRESH; }
 
-// Wall threshold (tune per environment)
-constexpr uint16_t WALL_THRESHOLD = 2048;
-
-bool wallLeft()   { return analogRead(IR_LF)  > WALL_THRESHOLD; }
-bool wallRight()  { return analogRead(IR_RF)  > WALL_THRESHOLD; }
-bool wallFront()  { return (analogRead(IR_L45) + analogRead(IR_R45)) / 2 > WALL_THRESHOLD; }
-
-// Centering error: positive = drifted right
+// Wall-follow PID centering error (positive = drifted right)
+// Uses calibrated centers: L45_CENTER=421, R45_CENTER=504
 float centeringError() {
-    return (float)(analogRead(IR_L45) - analogRead(IR_R45));
+    return (float)(irRead(IR_L45) - L45_CENTER) - (float)(irRead(IR_R45) - R45_CENTER);
 }
 ```
 
