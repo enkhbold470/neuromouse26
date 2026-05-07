@@ -87,51 +87,42 @@ void updateBatteryIndicator() {
     FastLED.show();
 }
 
-// ── Movement with Physics ────────────────────────────────────────────────────
-void driveWithRamp(int targetPWM, long targetTicks, bool forward) {
-    long startTicksL = encLeft.getTicks();
-    long startTicksR = encRight.getTicks();
-    long currentTicks = 0;
-    int currentPWM = 30; // Start slightly higher to ensure movement
-    
-    wallPid.reset();
+// ── Encoder Drive ─────────────────────────────────────────────────────────────
+// Resets both encoders, drives until avg abs ticks >= targetTicks or 4s timeout.
+// abs() on ticks works regardless of pinB wiring direction.
+void driveEncoder(long targetTicks, int pwm, bool forward) {
+    encLeft.reset();
+    encRight.reset();
     encPid.reset();
+    unsigned long startMs = millis();
+    unsigned long lastLog = 0;
+    int dir = forward ? 1 : -1;
 
-    while (currentTicks < targetTicks) {
-        currentTicks = abs(encLeft.getTicks() - startTicksL);
-        
-        if (currentPWM < targetPWM) currentPWM += 2;
-        if (currentTicks > (targetTicks * 3 / 4)) {
-            if (currentPWM > 40) currentPWM -= 4;
+    Serial.printf("[ENC] START target=%ld pwm=%d\n", targetTicks, pwm);
+
+    while (true) {
+        long tL     = abs(encLeft.getTicks());
+        long tR     = abs(encRight.getTicks());
+        long traveled = (tL + tR) / 2;
+
+        if (millis() - lastLog > 150) {
+            lastLog = millis();
+            Serial.printf("[ENC] tL=%ld tR=%ld traveled=%ld\n", tL, tR, traveled);
         }
 
-        if (forward && (irRead(IR_LF) > tuning.lfThresh || irRead(IR_RF) > tuning.rfThresh)) break;
+        if (traveled >= targetTicks) { Serial.println("[ENC] DONE"); break; }
 
-        float wallCorr = 0;
-        if (forward) {
-            int l45 = irRead(IR_L45);
-            int r45 = irRead(IR_R45);
-            if (l45 > tuning.l45Thresh && r45 > tuning.r45Thresh) {
-                wallCorr = wallPid.compute((float)(l45 - tuning.l45Center) - (float)(r45 - tuning.r45Center));
-            } else if (l45 > tuning.l45Thresh) {
-                wallCorr = wallPid.compute((float)(l45 - tuning.l45Center) * 2.0f);
-            } else if (r45 > tuning.r45Thresh) {
-                wallCorr = wallPid.compute((float)-(r45 - tuning.r45Center) * 2.0f);
-            } else {
-                // No walls detected, use encoders to stay straight
-                long diffL = encLeft.getTicks() - startTicksL;
-                long diffR = encRight.getTicks() - startTicksR;
-                wallCorr = encPid.compute((float)(diffL - diffR));
-            }
+        if (millis() - startMs > 4000) {
+            Serial.printf("[ENC] TIMEOUT tL=%ld tR=%ld — check encoder wiring / PWM\n", tL, tR);
+            break;
         }
 
-        int dir = forward ? 1 : -1;
-        leftMotor.drive(dir * (currentPWM - (int)wallCorr));
-        rightMotor.drive(dir * (currentPWM + (int)wallCorr));
-        
-        static unsigned long lastBatt = 0;
-        if (millis() - lastBatt > 500) { lastBatt = millis(); updateBatteryIndicator(); }
-        delay(10);
+        float corr   = encPid.compute((float)(tL - tR));
+        int leftPwm  = constrain(pwm - (int)corr, 25, 255);
+        int rightPwm = constrain(pwm + (int)corr, 25, 255);
+        leftMotor.drive(dir * leftPwm);
+        rightMotor.drive(dir * rightPwm);
+        delay(5);
     }
     stopMotors();
 }
@@ -165,7 +156,7 @@ void turnLeft() {
 void turnAround() { turnRight(); delay(100); turnRight(); }
 
 void moveForwardOneCell() {
-    driveWithRamp(tuning.basePwm, tuning.ticksPerCell, true);
+    driveEncoder(tuning.ticksPerCell, tuning.basePwm, true);
     robotRow += DIR_DR[robotHeading];
     robotCol += DIR_DC[robotHeading];
 }
@@ -210,12 +201,18 @@ void setup() {
     beep(100);
     updateBatteryIndicator();
     Serial.println("DIAGNOSTIC: Left Motor Forward...");
-    leftMotor.drive(40); delay(200); leftMotor.coast();
-    delay(500);
+    leftMotor.drive(100); delay(300); leftMotor.coast();
+    delay(400);
     Serial.println("DIAGNOSTIC: Right Motor Forward...");
-    rightMotor.drive(40); delay(200); rightMotor.coast();
+    rightMotor.drive(100); delay(300); rightMotor.coast();
     
     maze.reset();
+    // Apply default 3x6 practice maze boundaries
+    for (int c = 0; c < MAZE_SIZE; c++) maze.setWall(tuning.mazeRows - 1, c, DIR_NORTH, true);
+    for (int r = 0; r < MAZE_SIZE; r++) maze.setWall(r, tuning.mazeCols - 1, DIR_EAST,  true);
+    maze.setGoalSingle(tuning.goalRow, tuning.goalCol);
+    maze.floodFill();
+    wifiDebugSetIRReader(irRead);
     wifiDebugInit(&tuning);
 }
 
