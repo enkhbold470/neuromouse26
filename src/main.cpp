@@ -5,6 +5,7 @@
 #include "MicromouseEncoder.h"
 #include "MicromouseMaze.h"
 #include "PID.h"
+#include "WifiDebug.h"
 
 // ── Globals ──────────────────────────────────────────────────────────────────
 MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, MOTOR_L_INV);
@@ -31,8 +32,9 @@ static const uint8_t RX_PINS[4]   = { RX_LF,   RX_L45,   RX_R45,   RX_RF  };
 #define IR_R45 2
 #define IR_RF  3
 
-PID wallPid(WALL_KP, WALL_KI, WALL_KD, (float)WALL_MAX_CORR);
-PID encPid (ENC_KP,  ENC_KI,  ENC_KD,  (float)ENC_MAX_CORR);
+TuningConfig tuning;
+PID wallPid(tuning.wallKp, tuning.wallKi, tuning.wallKd, (float)tuning.wallMaxCorr);
+PID encPid (tuning.encKp,  tuning.encKi,  tuning.encKd,  (float)tuning.encMaxCorr);
 
 enum State { IDLE, RUN, GOAL, STOP };
 State robotState = IDLE;
@@ -76,8 +78,8 @@ void updateBatteryIndicator() {
     int raw = analogRead(BAT_V_SENSE);
     float vBat = (raw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
     
-    // Physics: 2S LiPo range 6.8V (Dead) to 8.4V (Full)
-    float pct = (vBat - 6.8f) / (8.4f - 6.8f);
+    // Physics: 2S LiPo range 6.8V (Dead) to 8.2V (100%)
+    float pct = (vBat - 6.8f) / (8.2f - 6.8f);
     pct = constrain(pct, 0.0f, 1.0f);
     
     // LED 7 (Index 6) Green (Full) -> Red (Low)
@@ -88,6 +90,7 @@ void updateBatteryIndicator() {
 // ── Movement with Physics ────────────────────────────────────────────────────
 void driveWithRamp(int targetPWM, long targetTicks, bool forward) {
     long startTicksL = encLeft.getTicks();
+    long startTicksR = encRight.getTicks();
     long currentTicks = 0;
     int currentPWM = 30; // Start slightly higher to ensure movement
     
@@ -102,18 +105,23 @@ void driveWithRamp(int targetPWM, long targetTicks, bool forward) {
             if (currentPWM > 40) currentPWM -= 4;
         }
 
-        if (forward && (irRead(IR_LF) > LF_THRESH || irRead(IR_RF) > RF_THRESH)) break;
+        if (forward && (irRead(IR_LF) > tuning.lfThresh || irRead(IR_RF) > tuning.rfThresh)) break;
 
         float wallCorr = 0;
         if (forward) {
             int l45 = irRead(IR_L45);
             int r45 = irRead(IR_R45);
-            if (l45 > L45_THRESH && r45 > R45_THRESH) {
-                wallCorr = wallPid.compute((float)(l45 - L45_CENTER) - (float)(r45 - R45_CENTER));
-            } else if (l45 > L45_THRESH) {
-                wallCorr = wallPid.compute((float)(l45 - L45_CENTER) * 2.0f);
-            } else if (r45 > R45_THRESH) {
-                wallCorr = wallPid.compute((float)-(r45 - R45_CENTER) * 2.0f);
+            if (l45 > tuning.l45Thresh && r45 > tuning.r45Thresh) {
+                wallCorr = wallPid.compute((float)(l45 - tuning.l45Center) - (float)(r45 - tuning.r45Center));
+            } else if (l45 > tuning.l45Thresh) {
+                wallCorr = wallPid.compute((float)(l45 - tuning.l45Center) * 2.0f);
+            } else if (r45 > tuning.r45Thresh) {
+                wallCorr = wallPid.compute((float)-(r45 - tuning.r45Center) * 2.0f);
+            } else {
+                // No walls detected, use encoders to stay straight
+                long diffL = encLeft.getTicks() - startTicksL;
+                long diffR = encRight.getTicks() - startTicksR;
+                wallCorr = encPid.compute((float)(diffL - diffR));
             }
         }
 
@@ -129,8 +137,8 @@ void driveWithRamp(int targetPWM, long targetTicks, bool forward) {
 }
 
 void turnRight() {
-    leftMotor.drive(TURN_PWM);
-    rightMotor.drive(-TURN_PWM);
+    leftMotor.drive(tuning.turnPwm);
+    rightMotor.drive(-tuning.turnPwm);
     long startL = encLeft.getTicks();
     unsigned long startMs = millis();
     while (abs(encLeft.getTicks() - startL) < TICKS_PER_90) { 
@@ -142,8 +150,8 @@ void turnRight() {
 }
 
 void turnLeft() {
-    leftMotor.drive(-TURN_PWM);
-    rightMotor.drive(TURN_PWM);
+    leftMotor.drive(-tuning.turnPwm);
+    rightMotor.drive(tuning.turnPwm);
     long startL = encLeft.getTicks();
     unsigned long startMs = millis();
     while (abs(encLeft.getTicks() - startL) < TICKS_PER_90) { 
@@ -157,22 +165,22 @@ void turnLeft() {
 void turnAround() { turnRight(); delay(100); turnRight(); }
 
 void moveForwardOneCell() {
-    driveWithRamp(BASE_PWM, TICKS_PER_CELL, true);
+    driveWithRamp(tuning.basePwm, tuning.ticksPerCell, true);
     robotRow += DIR_DR[robotHeading];
     robotCol += DIR_DC[robotHeading];
 }
 
 // ── Logic ────────────────────────────────────────────────────────────────────
 void senseWalls() {
-    if (irRead(IR_LF) > LF_THRESH || irRead(IR_RF) > RF_THRESH)
+    if (irRead(IR_LF) > tuning.lfThresh || irRead(IR_RF) > tuning.rfThresh)
         maze.setWall(robotRow, robotCol, robotHeading, true);
-    
+
     AbsDir left = (AbsDir)(((int)robotHeading + 3) % 4);
-    if (irRead(IR_L45) > L45_THRESH)
+    if (irRead(IR_L45) > tuning.l45Thresh)
         maze.setWall(robotRow, robotCol, left, true);
-    
+
     AbsDir right = (AbsDir)(((int)robotHeading + 1) % 4);
-    if (irRead(IR_R45) > R45_THRESH)
+    if (irRead(IR_R45) > tuning.r45Thresh)
         maze.setWall(robotRow, robotCol, right, true);
 }
 
@@ -208,10 +216,63 @@ void setup() {
     rightMotor.drive(40); delay(200); rightMotor.coast();
     
     maze.reset();
+    wifiDebugInit(&tuning);
 }
 
 void loop() {
     updateBatteryIndicator();
+    wifiDebugHandle();
+
+    // push snapshot for WiFi debug page
+    {
+        int raw = analogRead(BAT_V_SENSE);
+        float vb = (raw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
+        DebugSnapshot snap;
+        snap.ir[0]   = irRead(IR_LF);
+        snap.ir[1]   = irRead(IR_L45);
+        snap.ir[2]   = irRead(IR_R45);
+        snap.ir[3]   = irRead(IR_RF);
+        snap.encL    = encLeft.getTicks();
+        snap.encR    = encRight.getTicks();
+        snap.vBat    = vb;
+        snap.state   = (int)robotState;
+        snap.row     = robotRow;
+        snap.col     = robotCol;
+        snap.heading = (int)robotHeading;
+        snap.wallF   = snap.ir[0] > tuning.lfThresh || snap.ir[3] > tuning.rfThresh;
+        snap.wallL   = snap.ir[1] > tuning.l45Thresh;
+        snap.wallR   = snap.ir[2] > tuning.r45Thresh;
+        memcpy(snap.mazeWalls, maze.walls, sizeof(maze.walls));
+        memcpy(snap.mazeFlood, maze.flood, sizeof(maze.flood));
+        for (int r = 0; r < MAZE_SIZE; r++)
+            for (int c = 0; c < MAZE_SIZE; c++)
+                snap.mazeVisited[r][c] = maze.visited[r][c] ? 1 : 0;
+        snap.mazeRows = tuning.mazeRows;
+        snap.mazeCols = tuning.mazeCols;
+        wifiDebugUpdate(snap);
+    }
+
+    if (wifiDebugConfigChanged()) {
+        wallPid.kp = tuning.wallKp; wallPid.ki = tuning.wallKi;
+        wallPid.kd = tuning.wallKd; wallPid.maxOut = (float)tuning.wallMaxCorr;
+        wallPid.reset();
+        encPid.kp  = tuning.encKp;  encPid.ki  = tuning.encKi;
+        encPid.kd  = tuning.encKd;  encPid.maxOut  = (float)tuning.encMaxCorr;
+        encPid.reset();
+        maze.reset();
+        if (tuning.mazeRows < MAZE_SIZE) {
+            for (int c = 0; c < MAZE_SIZE; c++)
+                maze.setWall(tuning.mazeRows - 1, c, DIR_NORTH, true);
+        }
+        if (tuning.mazeCols < MAZE_SIZE) {
+            for (int r = 0; r < MAZE_SIZE; r++)
+                maze.setWall(r, tuning.mazeCols - 1, DIR_EAST, true);
+        }
+        maze.setGoalSingle(tuning.goalRow, tuning.goalCol);
+        maze.floodFill();
+        Serial.printf("[Config] Updated: basePwm=%d wallKp=%.3f mazeRows=%d mazeCols=%d goal=(%d,%d)\n",
+            tuning.basePwm, tuning.wallKp, tuning.mazeRows, tuning.mazeCols, tuning.goalRow, tuning.goalCol);
+    }
     switch (robotState) {
         case IDLE:
             if (buttonEdge()) {
@@ -236,7 +297,7 @@ void loop() {
             else if (turn == 2) turnAround();
             else if (turn == 3) turnLeft();
             moveForwardOneCell();
-            delay(CELL_PAUSE_MS);
+            delay(tuning.cellPauseMs);
             break;
         }
         case GOAL: beepGoal(); robotState = STOP; break;
