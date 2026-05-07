@@ -8,7 +8,7 @@
 
 // ── Tuning Config ─────────────────────────────────────────────────────────────
 struct TuningConfig {
-    int   basePwm     = BASE_PWM,    turnPwm    = TURN_PWM;
+    int   basePwm     = 80,          turnPwm    = TURN_PWM;
     float wallKp      = WALL_KP,     wallKi     = WALL_KI,   wallKd    = WALL_KD;
     int   wallMaxCorr = WALL_MAX_CORR;
     float encKp       = ENC_KP,      encKi      = ENC_KI,    encKd     = ENC_KD;
@@ -17,8 +17,8 @@ struct TuningConfig {
     int   l45Thresh   = L45_THRESH,  r45Thresh  = R45_THRESH;
     int   lfThresh    = LF_THRESH,   rfThresh   = RF_THRESH;
     int   ticksPerCell = TICKS_PER_CELL, cellPauseMs = CELL_PAUSE_MS;
-    int   mazeRows    = MAZE_SIZE,   mazeCols   = MAZE_SIZE;
-    int   goalRow     = 7,           goalCol    = 7;
+    int   mazeRows    = 6,           mazeCols   = 3;
+    int   goalRow     = 5,           goalCol    = 1;
 };
 
 // ── Debug Snapshot ────────────────────────────────────────────────────────────
@@ -40,6 +40,7 @@ static WebServer     _dbgServer(WIFI_DEBUG_PORT);
 static bool          _wifiReady     = false;
 static TuningConfig* _tuning        = nullptr;
 static bool          _configChanged = false;
+static int         (*_irReadFn)(int) = nullptr;  // set via wifiDebugSetIRReader()
 
 // ── HTML Dashboard ────────────────────────────────────────────────────────────
 static const char _DBG_HTML[] PROGMEM = R"rawhtml(
@@ -215,13 +216,113 @@ function loadConfig(){
   }).catch(()=>{});
 }
 
+// ── Calibration ───────────────────────────────────────────────────────────────
+let _calNoWall = null, _calCenter = null, _calFront = null;
+const SNAMES = ['LF','L45','R45','RF'];
+
+function calRead(step, btn) {
+  btn.disabled = true; btn.textContent = 'Reading...';
+  fetch('/calibrate').then(r=>r.json()).then(d=>{
+    btn.disabled = false; btn.textContent = 'Read Again';
+    const avg = d.avg;
+    let ok, msg;
+    if (step === 'nowall') {
+      _calNoWall = d;
+      ok = avg.every(v=>v<30);
+      msg = SNAMES.map((n,i)=>`${n}:${avg[i]}`).join(' &nbsp;');
+      document.getElementById('cal-nowall-res').innerHTML = msg +
+        (ok ? ' &nbsp;<span style="color:#0f0">&#10003; clear</span>'
+             : ' &nbsp;<span style="color:#f44">&#9888; values high &mdash; check ambient light / wiring</span>');
+    } else if (step === 'center') {
+      _calCenter = d;
+      ok = avg[1] > 50 && avg[2] > 50;
+      msg = `L45:${avg[1]} &nbsp; R45:${avg[2]}`;
+      document.getElementById('cal-center-res').innerHTML = msg +
+        (ok ? ' &nbsp;<span style="color:#0f0">&#10003; walls detected</span>'
+             : ' &nbsp;<span style="color:#f44">&#9888; low readings &mdash; position closer to walls</span>');
+    } else if (step === 'front') {
+      _calFront = d;
+      ok = avg[0] > 50 && avg[3] > 50;
+      msg = `LF:${avg[0]} &nbsp; RF:${avg[3]}`;
+      document.getElementById('cal-front-res').innerHTML = msg +
+        (ok ? ' &nbsp;<span style="color:#0f0">&#10003; wall detected</span>'
+             : ' &nbsp;<span style="color:#f44">&#9888; low &mdash; move closer to front wall</span>');
+    }
+    document.getElementById('cal-apply').disabled = !(_calNoWall && _calCenter);
+  }).catch(e=>{
+    btn.disabled=false; btn.textContent='Retry';
+    document.getElementById('cal-'+step+'-res').innerHTML='<span style="color:#f44">Error: '+e+'</span>';
+  });
+}
+
+function applyCalibration() {
+  if (!_calCenter) return;
+  const l45c = _calCenter.avg[1];
+  const r45c = _calCenter.avg[2];
+  // Threshold: midpoint between max no-wall and min wall (with 20 headroom)
+  let thr = 50;
+  if (_calNoWall) {
+    const noWallMax = Math.max(..._calNoWall.max);
+    const wallMin   = Math.min(_calCenter.min[1], _calCenter.min[2]);
+    thr = Math.round((noWallMax + wallMin) / 2);
+    thr = Math.max(20, Math.min(300, thr));
+  }
+  const params = new URLSearchParams({
+    l45Center: l45c, r45Center: r45c,
+    l45Thresh: thr,  r45Thresh: thr,
+    lfThresh:  thr,  rfThresh:  thr
+  });
+  fetch('/config',{method:'POST',body:params}).then(()=>{
+    document.getElementById('cal-status').innerHTML=
+      `<span style="color:#0f0">&#10003; Applied &mdash; L45_CENTER=${l45c} R45_CENTER=${r45c} THRESH=${thr}</span>`;
+    loadConfig();
+  }).catch(e=>{
+    document.getElementById('cal-status').innerHTML='<span style="color:#f44">POST failed: '+e+'</span>';
+  });
+}
+
 setInterval(pollSensors,300);
 setInterval(pollMaze,1000);
 pollSensors(); pollMaze(); loadConfig();
-</script></body></html>
+</script>
+
+<div style='margin-top:24px;border:1px solid #0ff;padding:16px'>
+<h3 style='color:#0ff;margin:0 0 8px'>IR Sensor Calibration</h3>
+<p style='color:#888;margin:0 0 12px;font-size:13px'>Do this before pressing Button 1. Robot must be in IDLE state.</p>
+
+<div style='margin-bottom:14px;padding:10px;border:1px solid #333'>
+<b style='color:#ff0'>Step 1 &mdash; Open Space</b><br>
+<span style='color:#888;font-size:13px'>Place robot in open area. No walls within 15 cm of any sensor.</span><br>
+<button style='margin-top:6px' onclick='calRead("nowall",this)'>Read No-Wall</button>
+<div id='cal-nowall-res' style='margin-top:4px;font-size:13px'></div>
+</div>
+
+<div style='margin-bottom:14px;padding:10px;border:1px solid #333'>
+<b style='color:#ff0'>Step 2 &mdash; Side Wall Centers</b><br>
+<span style='color:#888;font-size:13px'>Place robot centered in a corridor &mdash; walls on LEFT and RIGHT sides, open front.</span><br>
+<button style='margin-top:6px' onclick='calRead("center",this)'>Read Centers</button>
+<div id='cal-center-res' style='margin-top:4px;font-size:13px'></div>
+</div>
+
+<div style='margin-bottom:14px;padding:10px;border:1px solid #333'>
+<b style='color:#ff0'>Step 3 &mdash; Front Wall (optional)</b><br>
+<span style='color:#888;font-size:13px'>Place robot ~5 cm from a front wall. Verifies LF and RF sensors.</span><br>
+<button style='margin-top:6px' onclick='calRead("front",this)'>Read Front</button>
+<div id='cal-front-res' style='margin-top:4px;font-size:13px'></div>
+</div>
+
+<button id='cal-apply' onclick='applyCalibration()' disabled
+  style='background:#003;border-color:#0ff;color:#0ff;padding:8px 24px'>
+&#9654; Apply Calibration &rarr; Updates Centers + Thresholds
+</button>
+<div id='cal-status' style='margin-top:8px;font-size:13px'></div>
+</div>
+
+</body></html>
 )rawhtml";
 
 // ── Public API ────────────────────────────────────────────────────────────────
+inline void wifiDebugSetIRReader(int (*fn)(int)) { _irReadFn = fn; }
 inline void wifiDebugUpdate(const DebugSnapshot& snap) { _dbgSnap = snap; }
 
 inline bool wifiDebugConfigChanged() {
@@ -294,6 +395,31 @@ inline void wifiDebugInit(TuningConfig* t) {
         s += "}";
         _dbgServer.sendHeader("Access-Control-Allow-Origin", "*");
         _dbgServer.send(200, "application/json", s);
+    });
+
+    _dbgServer.on("/calibrate", []() {
+        if (!_irReadFn) { _dbgServer.send(503, "text/plain", "no IR reader set"); return; }
+        const int N = 20;
+        float sum[4] = {};
+        int   mn[4]  = {9999,9999,9999,9999};
+        int   mx[4]  = {};
+        for (int i = 0; i < N; i++) {
+            for (int s = 0; s < 4; s++) {
+                int v = _irReadFn(s);
+                sum[s] += v;
+                if (v < mn[s]) mn[s] = v;
+                if (v > mx[s]) mx[s] = v;
+            }
+            delay(15);
+        }
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "{\"avg\":[%d,%d,%d,%d],\"min\":[%d,%d,%d,%d],\"max\":[%d,%d,%d,%d]}",
+            (int)(sum[0]/N),(int)(sum[1]/N),(int)(sum[2]/N),(int)(sum[3]/N),
+            mn[0],mn[1],mn[2],mn[3],
+            mx[0],mx[1],mx[2],mx[3]);
+        _dbgServer.sendHeader("Access-Control-Allow-Origin","*");
+        _dbgServer.send(200,"application/json",buf);
     });
 
     _dbgServer.on("/config", HTTP_GET, []() {

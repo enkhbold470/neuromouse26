@@ -36,14 +36,15 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 ### Core Modules (in `include/`)
 - **`MicromouseMotor`**: Wrapper for DRV8833 using universal `analogWrite()`. Extremely lean, no mapping math.
 - **`MicromouseEncoder`**: Interrupt-driven tick counter for single-channel encoders. Supports direction detection if B-channel is available.
-- **`MicromouseMaze`**: Implements the 16x16 grid and flood-fill calculation.
-    - **Direction Bias**: The `bestDirectionBiased` method prefers straight movements over turns to improve stability and speed.
+- **`MicromouseMaze`**: Implements up to 16×16 grid and flood-fill. Default practice maze is 3×6 (configurable via web UI). `bestDirectionBiased` prefers straight over turns.
+- **`WifiDebug`** (`include/WifiDebug.h`): WiFi HTTP debug server (port 80). Serves live sensor dashboard, real-time maze canvas, and config form. All tuning constants in `TuningConfig` struct are editable at runtime without reflash. Config POST rebuilds PIDs and maze immediately.
 - **`PID`**: Generic PID controller used for both wall-centering (`wallPid`) and encoder-matching (`encPid`). Uses `micros()` for accurate `dt` calculation and features anti-windup clamping.
 
 ### Movement Logic
-- **Forward Drive:** Uses a PID loop to keep the robot centered between walls (using L45/R45 sensors) and moving straight (using encoders).
-- **Pivot Turns:** 90-degree turns are performed using encoder counts (`TICKS_PER_90`).
-- **Explore Loop:** The robot follows a cycle of: Sense Walls -> Update Maze -> Re-flood -> Decide Direction -> Move.
+- **Forward Drive:** `driveEncoder(targetTicks, pwm, forward)` — resets both encoders, drives until `(abs(tL)+abs(tR))/2 >= targetTicks` or 4s timeout. Uses `encPid` to balance L/R encoder counts. Logs ticks every 150ms to Serial for debugging.
+- **Pivot Turns:** 90-degree turns use encoder counts (`TICKS_PER_90`), 2s timeout.
+- **Explore Loop:** Sense Walls → Update Maze → Re-flood → Decide Direction → Move.
+- **Default maze:** 3×6 practice maze (6 rows, 3 cols). Goal at (5,1). Configurable via web UI.
 
 ### Hardware Constants (Adjust in `include/PinConfig.h`)
 - `WHEEL_DIAMETER`: 33.4mm
@@ -65,9 +66,10 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **Validation Workflow:** Before running a full maze, it is recommended to validate hardware using the scripts in `test/`.
 
 ### Known Issues & Risks (as of 2026-05-07)
-- **Blocking Loops:** Motion functions like `moveForwardOneCell()` are blocking.
-- **Baud Rate:** Serial prints at high frequency can affect PID timing; minimize logging during speed runs.
+- **Blocking Loops:** Motion functions like `moveForwardOneCell()` are blocking. WiFi debug runs on a separate FreeRTOS task (Core 0) to avoid starvation.
+- **Baud Rate:** Serial prints inside `driveEncoder()` every 150ms — disable by removing `Serial.printf` calls during speed runs.
 - **IR thresholds fixed 2026-05-07:** Previous thresholds (LF/RF=1500, L45/R45=650) exceeded maximum possible wall readings (~574) — wall detection was completely non-functional. Fixed to 50. Always validate thresholds against actual `irRead()` output before testing.
+- **Encoder direction:** ISR uses `digitalRead(pinB)` for direction. `driveEncoder()` uses `abs(getTicks())` so it works regardless of pinB wiring — if ticks stay near 0, check pinA interrupt wiring and encoder power.
 
 ---
 
