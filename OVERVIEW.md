@@ -477,3 +477,37 @@ use a power-of-two ring buffer (size 256, mask 0xFF).
 - Turn direction calculation: `(targetDir − heading + 4) % 4`
 - Safety timeouts in all motion functions (3 s turn, 5 s forward)
 - `imu.resetYaw()` called correctly before each turn and each forward move
+
+
+
+
+Bash(~/.platformio/penv/bin/pio run -e main 2>&1 | tail -8)
+  ⎿  Merged 2 ELF sections                                                                            
+     Successfully created esp32s3 image.                                                              
+     ========================= [SUCCESS] Took 2.72 seconds =========================                  
+     … +5 lines (ctrl+o to expand)                                                                    
+                                                                                                      
+⏺ Clean. Web calibration flow (scroll to bottom of page):
+                                                                                                      
+  ┌─────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐   
+  │        Step         │          What to do          │             What it measures             │
+  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤   
+  │ 1 Open Space        │ Robot on table, no walls     │ Ambient no-wall baseline, warns if > 30  │
+  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ 2 Side Wall Centers │ Robot in corridor, walls     │ Sets L45_CENTER + R45_CENTER             │   
+  │                     │ left+right                   │                                          │   
+  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤   
+  │ 3 Front Wall        │ Robot facing wall ~5cm       │ Verifies LF/RF sensors work              │   
+  │ (optional)          │                              │                                          │
+  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤   
+  │ Apply               │ Click button                 │ POSTs centers + auto-computed threshold  │
+  │                     │                              │ to /config                               │   
+  └─────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘   
+   
+  Threshold auto-computed as midpoint between max no-wall reading and min wall reading. "Apply" button
+   stays disabled until steps 1+2 complete.                 
+                                                                                                      
+  Right motor: reflash with new 100 PWM diagnostic — if still dead at 100, it's wiring (check IN3/IN4 
+  continuity to DRV8833, check MOTOR_R_INV polarity).
+                                                                                                      
+✻ Crunched for 2m 53s                                       
