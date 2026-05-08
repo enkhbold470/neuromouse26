@@ -24,18 +24,32 @@ static const float RAMP_TIME_MS = 150.0f;  // ms ramp 0 → cruise
 static const float Kp_speed     = 1.5f;    // speed PID P gain (per motor)
 static const float Ki_speed     = 0.5f;    // speed PID I gain (per motor)
 static const float Kp_balance   = 3.0f;    // ticks/sec correction per tick of L-R error
-static const int   MIN_PWM_OUT  = 150;     // PWM floor — lower = more precise stop
+static const int   MIN_PWM_OUT  = 200;     // PWM floor — raise if motors don't spin
 
 // ── Physics ───────────────────────────────────────────────────────────────────
-#define CELL_MM        180.0f
-#define MM_PER_TICK    ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)
-#define TICKS_PER_CELL ((long)(CELL_MM / MM_PER_TICK))
+#define CELL_MM          180.0f
+#define MM_PER_TICK      ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)
+#undef  TICKS_PER_CELL
+#define TICKS_PER_CELL   ((long)(CELL_MM / MM_PER_TICK))
+#define BRAKE_COMP_TICKS 15   // ticks before target to begin braking (tune up if overshoots)
 
 // ── Motors + Encoders ─────────────────────────────────────────────────────────
-MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, "L");
-MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, "R");
+// pivot-mouse-v1: both inverted to run forward
+MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, true);
+MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, true);
 MicromouseEncoder leftEnc   (ENC_L_A, ENC_L_B);
 MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B);
+
+// Always count up — direction inferred from motor command, not quadrature.
+// Noise filter: ignore pulses < 200µs apart (physically impossible at any N20 RPM).
+void IRAM_ATTR MicromouseEncoder::handleInterrupt() {
+    uint32_t now = micros();
+    static uint32_t lastL = 0, lastR = 0;
+    uint32_t* last = (pinA == ENC_L_A) ? &lastL : &lastR;
+    if (now - *last < 200) return;
+    *last = now;
+    count++;
+}
 
 void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
 void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
@@ -123,19 +137,25 @@ void bleSend(const char* fmt, ...) {
 }
 
 class BLECb : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer*)    override { bleConn = true;  Serial.println("[BLE] connected"); }
-    void onDisconnect(NimBLEServer*) override { bleConn = false; NimBLEDevice::startAdvertising(); }
+    void onConnect(NimBLEServer*, NimBLEConnInfo&) override {
+        bleConn = true; Serial.println("[BLE] connected");
+    }
+    void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
+        bleConn = false;
+        NimBLEDevice::getAdvertising()->start();
+        Serial.println("[BLE] disconnected, re-advertising");
+    }
 };
 class RXCb : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* c) override {
+    void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
         std::string v = c->getValue();
         if (!v.empty()) rxCmd = v[0];
     }
 };
 
 void bleSetup() {
-    NimBLEDevice::init("Micromouse26-Motor");
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::init("pivot-mouse-v1");
+    NimBLEDevice::setPower(9);  // 9 dBm — v2.x takes dBm directly
     auto* srv = NimBLEDevice::createServer();
     srv->setCallbacks(new BLECb());
     auto* svc = srv->createService(NUS_SERVICE_UUID);
@@ -143,9 +163,14 @@ void bleSetup() {
     auto* pRX = svc->createCharacteristic(NUS_RX_UUID,
                     NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     pRX->setCallbacks(new RXCb());
-    svc->start();
-    NimBLEDevice::getAdvertising()->addServiceUUID(NUS_SERVICE_UUID);
-    NimBLEDevice::startAdvertising();
+    srv->start();
+
+    NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+    pAdv->setName("pivot-mouse-v1");
+    pAdv->addServiceUUID(NUS_SERVICE_UUID);
+    pAdv->enableScanResponse(true);
+    pAdv->start();
+    Serial.println("[BLE] advertising as 'pivot-mouse-v1'");
 }
 
 // ── Move N cells ──────────────────────────────────────────────────────────────
@@ -318,8 +343,7 @@ void setup() {
     Serial.printf("[INIT] CRUISE=%.0f t/s  MIN_PWM=%d  Kp_spd=%.1f  Kp_bal=%.1f\n",
                   CRUISE_SPEED, MIN_PWM_OUT, Kp_speed, Kp_balance);
 
-    pinMode(DRV_SLEEP_PIN, OUTPUT);
-    digitalWrite(DRV_SLEEP_PIN, HIGH);
+    // DRV_SLEEP_PIN jumpered to VCC on this board — skip pin setup
 
     leftMotor.begin();
     rightMotor.begin();
@@ -331,6 +355,7 @@ void setup() {
     bleSetup();
 
     Serial.println("[INIT] ready — cmds: 1-5=cells  f=free  s=stop  r=reset  ?=status");
+    Serial.println("[INIT] diag: A=L-fwd  Z=L-back  B=R-fwd  X=R-back  T=enc-spin-test");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
@@ -346,8 +371,31 @@ void loop() {
         case '3': moveCells(3); break;
         case '4': moveCells(4); break;
         case '5': moveCells(5); break;
-        case 'f': freeRun();    break;
+        case 'f': freeRun(); break;
         case 's': stopMotors(); encodersDisable(); bleSend("[STOP]\n"); break;
+
+        // ── Single-motor diagnostics ──────────────────────────────────────────
+        // A/Z: left fwd/back  B/X: right fwd/back  (raw 120 PWM, 600ms)
+        case 'A': bleSend("[DIAG] L fwd\n");  leftMotor.drive( 220); delay(800); leftMotor.coast();  bleSend("[DIAG] done\n"); break;
+        case 'Z': bleSend("[DIAG] L back\n"); leftMotor.drive(-220); delay(800); leftMotor.coast();  bleSend("[DIAG] done\n"); break;
+        case 'B': bleSend("[DIAG] R fwd\n");  rightMotor.drive( 220); delay(800); rightMotor.coast(); bleSend("[DIAG] done\n"); break;
+        case 'X': bleSend("[DIAG] R back\n"); rightMotor.drive(-220); delay(800); rightMotor.coast(); bleSend("[DIAG] done\n"); break;
+
+        // T: spin both fwd 1s, report encoder ticks — tells direction + if counting
+        case 'T': {
+            encodersEnable();
+            bleSend("[ENC-TEST] spinning fwd 1s...\n");
+            leftMotor.drive(220); rightMotor.drive(220);
+            delay(1000);
+            stopMotors();
+            long tL = leftEnc.getTicks(), tR = rightEnc.getTicks();
+            encodersDisable();
+            bleSend("[ENC-TEST] L=%ld  R=%ld\n", tL, tR);
+            bleSend("  L %s  R %s\n",
+                tL > 10 ? "FWD-OK" : tL < -10 ? "BACKWARD" : "DEAD(0)",
+                tR > 10 ? "FWD-OK" : tR < -10 ? "BACKWARD" : "DEAD(0)");
+            break;
+        }
         case 'r':
             encodersDisable();
             bleSend("[RESET] encoders detached\n");
