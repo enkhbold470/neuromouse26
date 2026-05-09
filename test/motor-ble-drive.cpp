@@ -17,8 +17,9 @@
 #include "MicromouseEncoder.h"
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-static const int DRIVE_PWM    = 600;   // 10-bit (~59%) — raise if stalls, lower if overshoots
-static const int TURN_PWM     = 380;   // slower turn for cleaner 90° — tune if over/undershoots
+static const int DRIVE_PWM    = 450;   // 10-bit (~59%) — raise if stalls, lower if overshoots
+#undef  TURN_PWM
+#define TURN_PWM               380     // slower turn for cleaner 90° — tune if over/undershoots
 static const int TIMEOUT_MS   = 5000; // ms per cell before abort
 static const int BALANCE_KP   = 3;    // PWM correction per tick of L-R error (always stays positive)
 
@@ -27,7 +28,13 @@ static const int BALANCE_KP   = 3;    // PWM correction per tick of L-R error (a
 #define MM_PER_TICK      ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)
 #undef  TICKS_PER_CELL
 #define TICKS_PER_CELL   ((long)(CELL_MM / MM_PER_TICK))
-#define BRAKE_COMP_TICKS 15   // ticks before target to begin braking (tune up if overshoots)
+#define DECEL_TICKS      200   // ramp PWM down over last N ticks (~100mm) — needs 6+ motor τ to settle
+#define DRIVE_PWM_MIN    100   // floor PWM during ramp — tune down toward 80 if motor still runs
+#define COAST_COMP_TICKS 100   // encoder stops N ticks early; coast carries robot to center (60mm / 0.5mm/tick)
+
+// Right encoder reads ~1.13% more ticks than left over same distance.
+// Calibrated: 5-cell run L=3439 R=3478 → scale = 3439/3478.
+#define RIGHT_ENC_SCALE  (3439.0f / 3478.0f)
 
 // ── Motors + Encoders ─────────────────────────────────────────────────────────
 // pivot-mouse-v1: both inverted to run forward
@@ -50,6 +57,12 @@ void IRAM_ATTR MicromouseEncoder::handleInterrupt() {
 void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
 void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
 
+// Scaled right encoder: compensates hardware tick-count difference.
+static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
+
+static void bleSend(const char* fmt, ...);
+static void moveCells(int n);
+
 void encodersEnable() {
     leftEnc.reset();
     rightEnc.reset();
@@ -63,9 +76,6 @@ void encodersDisable() {
 }
 
 void stopMotors() {
-    leftMotor.brake();
-    rightMotor.brake();
-    delay(80);
     leftMotor.coast();
     rightMotor.coast();
 }
@@ -90,12 +100,12 @@ void turnLeft() {
     leftMotor.drive(-TURN_PWM);
     rightMotor.drive(TURN_PWM);
     unsigned long startMs = millis();
-    while (abs(rightEnc.getTicks()) < TICKS_PER_90) {
+    while (abs(rTicks()) < TICKS_PER_90) {
         if (millis() - startMs > 2000) break;
     }
     stopMotors();
     encodersDisable();
-    bleSend("[TURN] done R=%ld\n", rightEnc.getTicks());
+    bleSend("[TURN] done R=%ld\n", rTicks());
 }
 
 // Button 1 sequence: 5f → R → 1f → R → 5f → L → 1f → L → 5f
@@ -122,7 +132,7 @@ NimBLECharacteristic* pTX     = nullptr;
 bool                  bleConn = false;
 char                  rxCmd   = 0;
 
-void bleSend(const char* fmt, ...) {
+static void bleSend(const char* fmt, ...) {
     char buf[128];
     va_list args; va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
@@ -179,8 +189,8 @@ void bleSetup() {
 // ── Move N cells ──────────────────────────────────────────────────────────────
 // Open-loop: both motors at DRIVE_PWM, stop when avg ticks >= target.
 // No balance PID — encoder 2x mismatch causes spinning when PID is active.
-void moveCells(int n) {
-    long target = TICKS_PER_CELL * (long)n;
+static void moveCells(int n) {
+    long target = TICKS_PER_CELL * (long)n - COAST_COMP_TICKS;
     encodersEnable();
     bleSend("[MOVE] %d cell(s) target=%ld ticks (%.0fmm)\n",
             n, target, target * MM_PER_TICK);
@@ -198,14 +208,39 @@ void moveCells(int n) {
             return;
         }
 
-        long tL  = leftEnc.getTicks();
-        long tR  = rightEnc.getTicks();
-        long avg = (tL + tR) / 2;
+        long tL   = leftEnc.getTicks();
+        long tR   = rTicks();
+        long avg  = (tL + tR) / 2;
+        long remL = target - tL;
+        long remR = target - tR;
+        bool lDone = (remL <= 0);
+        bool rDone = (remR <= 0);
 
-        // Simple P balance: if L ahead slow L, speed R — clamped positive (no spinning)
-        int err   = (int)(tL - tR);
-        int pwmL  = constrain(DRIVE_PWM - err * BALANCE_KP, 200, MOTOR_PWM_MAX);
-        int pwmR  = constrain(DRIVE_PWM + err * BALANCE_KP, 200, MOTOR_PWM_MAX);
+        if (lDone && rDone) {
+            stopMotors();
+            encodersDisable();
+            tL = leftEnc.getTicks(); tR = rTicks();
+            long avgF = (tL + tR) / 2;
+            bleSend("[DONE] avg=%ld(%.0fmm) L=%ld R=%ld t=%lums\n",
+                    avgF, avgF * MM_PER_TICK, tL, tR, millis() - startMs);
+            return;
+        }
+
+        // Per-motor decel ramp: full speed → DRIVE_PWM_MIN over last DECEL_TICKS, then coast.
+        // Balance P correction only while both motors still running.
+        int err  = (int)(tL - tR);
+        int baseL = lDone ? 0 : (remL > DECEL_TICKS ? DRIVE_PWM
+                        : (int)map(remL, 0, DECEL_TICKS, DRIVE_PWM_MIN, DRIVE_PWM));
+        int baseR = rDone ? 0 : (remR > DECEL_TICKS ? DRIVE_PWM
+                        : (int)map(remR, 0, DECEL_TICKS, DRIVE_PWM_MIN, DRIVE_PWM));
+        int pwmL, pwmR;
+        if (!lDone && !rDone && remL > DECEL_TICKS && remR > DECEL_TICKS) {
+            pwmL = constrain(baseL - err * BALANCE_KP, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+            pwmR = constrain(baseR + err * BALANCE_KP, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+        } else {
+            pwmL = baseL;
+            pwmR = baseR;
+        }
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
@@ -213,16 +248,6 @@ void moveCells(int n) {
             lastLog = millis();
             bleSend("avg=%4ld/%-4ld L=%4ld R=%4ld err=%+d pwm=%d/%d\n",
                     avg, target, tL, tR, err, pwmL, pwmR);
-        }
-
-        if (avg >= target) {
-            stopMotors();
-            encodersDisable();
-            tL = leftEnc.getTicks(); tR = rightEnc.getTicks();
-            long avgF = (tL + tR) / 2;
-            bleSend("[DONE] avg=%ld(%.0fmm) L=%ld R=%ld t=%lums\n",
-                    avgF, avgF * MM_PER_TICK, tL, tR, millis() - startMs);
-            return;
         }
 
         if (millis() - startMs > (unsigned long)(TIMEOUT_MS * n)) {
@@ -247,12 +272,12 @@ void freeRun() {
             rxCmd = 0;
             stopMotors();
             encodersDisable();
-            long tL = leftEnc.getTicks(), tR = rightEnc.getTicks();
+            long tL = leftEnc.getTicks(), tR = rTicks();
             bleSend("[FREE] stopped L=%ld(%.0fmm) R=%ld(%.0fmm)\n",
                     tL, tL * MM_PER_TICK, tR, tR * MM_PER_TICK);
             return;
         }
-        long tL = leftEnc.getTicks(), tR = rightEnc.getTicks();
+        long tL = leftEnc.getTicks(), tR = rTicks();
         int  err = (int)(tL - tR);
         leftMotor.drive( constrain(DRIVE_PWM - err * BALANCE_KP, 200, MOTOR_PWM_MAX));
         rightMotor.drive(constrain(DRIVE_PWM + err * BALANCE_KP, 200, MOTOR_PWM_MAX));
@@ -333,7 +358,7 @@ void loop() {
             leftMotor.drive(220); rightMotor.drive(220);
             delay(1000);
             stopMotors();
-            long tL = leftEnc.getTicks(), tR = rightEnc.getTicks();
+            long tL = leftEnc.getTicks(), tR = rTicks();
             encodersDisable();
             bleSend("[ENC-TEST] L=%ld  R=%ld\n", tL, tR);
             bleSend("  L %s  R %s\n",
@@ -348,8 +373,8 @@ void loop() {
         case '?':
             bleSend("[STATUS] L=%ld(%.0fmm) R=%ld(%.0fmm) diff=%+ld\n",
                     leftEnc.getTicks(),  leftEnc.getTicks()  * MM_PER_TICK,
-                    rightEnc.getTicks(), rightEnc.getTicks() * MM_PER_TICK,
-                    leftEnc.getTicks() - rightEnc.getTicks());
+                    rTicks(), rTicks() * MM_PER_TICK,
+                    leftEnc.getTicks() - rTicks());
             break;
         default:
             bleSend("[?] '%c' unknown\n", cmd);
