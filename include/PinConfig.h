@@ -66,16 +66,19 @@ constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.
 // counts differently → robot turned 135° with formula value. Calibrated to 77 (=116×90/135).
 // Tune: each ~8 ticks ≈ 10°. Too far → lower; too short → raise.
 // Left/right differ due to mechanical asymmetry — calibrate independently.
-constexpr long    TURN_TICKS_90_L  = 51;   // calibrated at TURN_PWM=270/500Hz (77×90/135)
-constexpr long    TURN_TICKS_90_R  = 57;   // calibrated at TURN_PWM=270/500Hz (85×90/135)
+// With brake stop, no coast compensation — these are the actual target tick counts for 90°.
+// Tune: each ~5 ticks ≈ 10°. Too far → lower; too short → raise.
+constexpr long    TURN_TICKS_90_L  = 100;   // starting point for brake stop at TURN_PWM=150/500Hz
+constexpr long    TURN_TICKS_90_R  = 100;   // starting point for brake stop at TURN_PWM=150/500Hz
 
 // ── Drive tuning — ONE knob: change DRIVE_PWM, rest scale automatically ───────
-// Ratios validated at DRIVE_PWM=250 / 500Hz. Recalibrate TURN_TICKS_90 if TURN_PWM changes.
+// Uses BRAKE stop (both INs HIGH). Coast comp near-zero — brake stops in <5mm.
+// Recalibrate TURN_TICKS_90 if TURN_PWM changes (empirical, not derived).
 constexpr int     MOTOR_PWM_MAX    = 1023;
 constexpr int     DRIVE_PWM        = 250;                        // ← master cruise speed (0–1023)
-constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.60f);  // 60% of cruise for pivots
+constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.70f);  // 60% of cruise for pivots
 constexpr int     DRIVE_PWM_MIN    = (int)(DRIVE_PWM * 0.32f);  // decel floor (~32%); below 70 risks stall
-constexpr int     COAST_COMP_TICKS = (int)(DRIVE_PWM * 0.40f);  // stop N ticks early; coast ~50mm at 250
+constexpr int     COAST_COMP_TICKS = (int)(DRIVE_PWM * 0.25f);  // brake carries ~62 ticks at 250; 2.5cm overshoot calibrated
 constexpr int     DECEL_TICKS      = 200;                        // fixed distance ramp (~100mm)
 constexpr int     BALANCE_KP       = 3;                          // PWM per tick of L-R encoder error
 constexpr int     TIMEOUT_MS       = 5000;                       // per-cell abort timeout ms

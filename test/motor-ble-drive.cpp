@@ -58,8 +58,8 @@ void encodersDisable() {
 }
 
 void stopMotors() {
-    leftMotor.coast();
-    rightMotor.coast();
+    leftMotor.brake();
+    rightMotor.brake();
 }
 
 void turnRight() {
@@ -208,7 +208,7 @@ static void moveCells(int n) {
             return;
         }
 
-        // Per-motor decel ramp: full speed → DRIVE_PWM_MIN over last DECEL_TICKS, then coast.
+        // Per-motor decel ramp: full speed → DRIVE_PWM_MIN over last DECEL_TICKS, then brake.
         // Balance P correction only while both motors still running.
         int err  = (int)(tL - tR);
         int baseL = lDone ? 0 : (remL > DECEL_TICKS ? DRIVE_PWM
