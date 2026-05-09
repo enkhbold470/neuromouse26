@@ -18,6 +18,7 @@
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 static const int DRIVE_PWM    = 600;   // 10-bit (~59%) — raise if stalls, lower if overshoots
+static const int TURN_PWM     = 380;   // slower turn for cleaner 90° — tune if over/undershoots
 static const int TIMEOUT_MS   = 5000; // ms per cell before abort
 static const int BALANCE_KP   = 3;    // PWM correction per tick of L-R error (always stays positive)
 
@@ -67,6 +68,49 @@ void stopMotors() {
     delay(80);
     leftMotor.coast();
     rightMotor.coast();
+}
+
+void turnRight() {
+    encodersEnable();
+    bleSend("[TURN] right target=%ld ticks\n", TICKS_PER_90);
+    leftMotor.drive(TURN_PWM);
+    rightMotor.drive(-TURN_PWM);
+    unsigned long startMs = millis();
+    while (abs(leftEnc.getTicks()) < TICKS_PER_90) {
+        if (millis() - startMs > 2000) break;
+    }
+    stopMotors();
+    encodersDisable();
+    bleSend("[TURN] done L=%ld\n", leftEnc.getTicks());
+}
+
+void turnLeft() {
+    encodersEnable();
+    bleSend("[TURN] left target=%ld ticks\n", TICKS_PER_90);
+    leftMotor.drive(-TURN_PWM);
+    rightMotor.drive(TURN_PWM);
+    unsigned long startMs = millis();
+    while (abs(rightEnc.getTicks()) < TICKS_PER_90) {
+        if (millis() - startMs > 2000) break;
+    }
+    stopMotors();
+    encodersDisable();
+    bleSend("[TURN] done R=%ld\n", rightEnc.getTicks());
+}
+
+// Button 1 sequence: 5f → R → 1f → R → 5f → L → 1f → L → 5f
+void runSequence() {
+    bleSend("[SEQ] start  5-R-1-R-5-L-1-L-5\n");
+    moveCells(5); delay(250);
+    turnRight();  delay(250);
+    moveCells(1); delay(250);
+    turnRight();  delay(250);
+    moveCells(5); delay(250);
+    turnLeft();   delay(250);
+    moveCells(1); delay(250);
+    turnLeft();   delay(250);
+    moveCells(5);
+    bleSend("[SEQ] complete\n");
 }
 
 // ── BLE ───────────────────────────────────────────────────────────────────────
@@ -232,6 +276,7 @@ void setup() {
                   DRIVE_PWM, TICKS_PER_CELL, MM_PER_TICK);
 
     // DRV_SLEEP_PIN jumpered to VCC on this board — skip pin setup
+    pinMode(BUTTON_1, INPUT_PULLUP);
 
     leftMotor.begin();
     rightMotor.begin();
@@ -242,12 +287,23 @@ void setup() {
 
     bleSetup();
 
-    Serial.println("[INIT] ready — cmds: 1-5=cells  f=free  s=stop  r=reset  ?=status");
+    Serial.println("[INIT] ready — cmds: 1-5=cells  f=free  b=sequence  s=stop  r=reset  ?=status");
     Serial.println("[INIT] diag: A=L-fwd  Z=L-back  B=R-fwd  X=R-back  T=enc-spin-test");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
 void loop() {
+    // Button 1 edge → run sequence
+    {
+        static bool lastBtn = HIGH;
+        bool curBtn = digitalRead(BUTTON_1);
+        if (lastBtn == HIGH && curBtn == LOW) {
+            bleSend("[BTN] sequence triggered\n");
+            runSequence();
+        }
+        lastBtn = curBtn;
+    }
+
     if (Serial.available()) rxCmd = Serial.read();
     if (rxCmd == 0) return;
     char cmd = rxCmd;
@@ -260,6 +316,7 @@ void loop() {
         case '4': moveCells(4); break;
         case '5': moveCells(5); break;
         case 'f': freeRun(); break;
+        case 'b': runSequence(); break;
         case 's': stopMotors(); encodersDisable(); bleSend("[STOP]\n"); break;
 
         // ── Single-motor diagnostics ──────────────────────────────────────────
