@@ -4,9 +4,9 @@
 #include <Arduino.h>
 #include "PinConfig.h"
 
-// N20 6V + DRV8833: 20 kHz keeps motor silent, reduces switching losses.
-// 8-bit resolution (0-255) matches existing PWM scale throughout codebase.
-#define MOTOR_PWM_FREQ_HZ  20000
+// N20 6V + DRV8833: 4 kHz balances smooth control and audible noise.
+// 20 kHz is silent but reduces low-speed torque; 500 Hz has audible whine.
+#define MOTOR_PWM_FREQ_HZ  4000
 #define MOTOR_PWM_BITS     10
 #define MOTOR_PWM_MAX      1023
 
