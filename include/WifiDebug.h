@@ -8,7 +8,7 @@
 
 // ── Tuning Config ─────────────────────────────────────────────────────────────
 struct TuningConfig {
-    int   basePwm     = 80,          turnPwm    = TURN_PWM;
+    int   basePwm     = 320,         turnPwm    = TURN_PWM;
     float wallKp      = WALL_KP,     wallKi     = WALL_KI,   wallKd    = WALL_KD;
     int   wallMaxCorr = WALL_MAX_CORR;
     float encKp       = ENC_KP,      encKi      = ENC_KI,    encKd     = ENC_KD;

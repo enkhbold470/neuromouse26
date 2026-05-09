@@ -1,9 +1,7 @@
 // test/motor-ble-drive.cpp
 //
-// Encoder-only straight drive test. No IMU.
-// Each motor has its own speed PID targeting CRUISE_SPEED ticks/sec.
-// Differential correction: if L faster than R, slow L / speed R and vice versa.
-// Reports exact ticks + mm traveled over BLE so you can measure real distance.
+// Simple open-loop encoder drive. No PID, no balance — both motors same PWM.
+// Stops when average tick count hits target. Drift fixed by maze walls.
 //
 // BLE / Serial commands:
 //   1-5  → move N cells (180mm each)
@@ -19,12 +17,9 @@
 #include "MicromouseEncoder.h"
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-static const float CRUISE_SPEED = 200.0f;  // ticks/sec — slow enough to stop accurately
-static const float RAMP_TIME_MS = 150.0f;  // ms ramp 0 → cruise
-static const float Kp_speed     = 1.5f;    // speed PID P gain (per motor)
-static const float Ki_speed     = 0.5f;    // speed PID I gain (per motor)
-static const float Kp_balance   = 3.0f;    // ticks/sec correction per tick of L-R error
-static const int   MIN_PWM_OUT  = 200;     // PWM floor — raise if motors don't spin
+static const int DRIVE_PWM    = 600;   // 10-bit (~59%) — raise if stalls, lower if overshoots
+static const int TIMEOUT_MS   = 5000; // ms per cell before abort
+static const int BALANCE_KP   = 3;    // PWM correction per tick of L-R error (always stays positive)
 
 // ── Physics ───────────────────────────────────────────────────────────────────
 #define CELL_MM          180.0f
@@ -64,42 +59,6 @@ void encodersEnable() {
 void encodersDisable() {
     detachInterrupt(digitalPinToInterrupt(ENC_L_A));
     detachInterrupt(digitalPinToInterrupt(ENC_R_A));
-}
-
-// ── Speed PID ─────────────────────────────────────────────────────────────────
-struct SpeedPID {
-    float integral  = 0;
-    long  prevTicks = 0;
-    float prevSpeed = 0;
-};
-SpeedPID pidL, pidR;
-
-// Returns PWM for motor.drive().
-// applyFloor: true during ramp-up/cruise to overcome stiction.
-//             false during ramp-down so PID can actually decelerate to zero.
-int computeSpeedPID(SpeedPID& pid, long ticks, float target, float dt, bool applyFloor) {
-    float rawSpeed   = (ticks - pid.prevTicks) / dt;
-    pid.prevSpeed    = 0.7f * pid.prevSpeed + 0.3f * rawSpeed;
-    pid.prevTicks    = ticks;
-
-    float error      = target - pid.prevSpeed;
-    pid.integral    += error * dt;
-    pid.integral     = constrain(pid.integral, -800.0f, 800.0f);
-
-    float output = Kp_speed * error + Ki_speed * pid.integral;
-
-    // Floor only during acceleration phase — NOT during ramp-down
-    if (applyFloor) {
-        if (target > 0 && output < MIN_PWM_OUT) output = MIN_PWM_OUT;
-        if (target < 0 && output > -MIN_PWM_OUT) output = -MIN_PWM_OUT;
-    }
-
-    return (int)constrain(output, -1023.0f, 1023.0f);
-}
-
-void resetPID(long tL, long tR) {
-    pidL = SpeedPID(); pidL.prevTicks = tL;
-    pidR = SpeedPID(); pidR.prevTicks = tR;
 }
 
 void stopMotors() {
@@ -174,28 +133,15 @@ void bleSetup() {
 }
 
 // ── Move N cells ──────────────────────────────────────────────────────────────
-//
-// Velocity profile — TIME based (not encoder based):
-//   0 → RAMP_TIME_MS         : ramp 0 → CRUISE_SPEED
-//   until distance 80% done  : cruise
-//   last 20% distance        : ramp down to 0
-//
-// Straight correction — encoder balance:
-//   balance = Kp_balance * (tL - tR)
-//   v_left  = v_fwd - balance
-//   v_right = v_fwd + balance
-
+// Open-loop: both motors at DRIVE_PWM, stop when avg ticks >= target.
+// No balance PID — encoder 2x mismatch causes spinning when PID is active.
 void moveCells(int n) {
     long target = TICKS_PER_CELL * (long)n;
-
     encodersEnable();
-    resetPID(0, 0);
-
     bleSend("[MOVE] %d cell(s) target=%ld ticks (%.0fmm)\n",
             n, target, target * MM_PER_TICK);
 
     unsigned long startMs = millis();
-    unsigned long lastMs  = millis();
     unsigned long lastLog = 0;
 
     while (true) {
@@ -204,81 +150,41 @@ void moveCells(int n) {
             rxCmd = 0;
             stopMotors();
             encodersDisable();
-            bleSend("[STOP] L=%ld(%.0fmm) R=%ld(%.0fmm)\n",
-                    leftEnc.getTicks(),  leftEnc.getTicks()  * MM_PER_TICK,
-                    rightEnc.getTicks(), rightEnc.getTicks() * MM_PER_TICK);
+            bleSend("[STOP]\n");
             return;
         }
-
-        unsigned long now = millis();
-        float dt = (now - lastMs) / 1000.0f;
-        if (dt < 0.001f) dt = 0.001f;
-        lastMs = now;
 
         long tL  = leftEnc.getTicks();
         long tR  = rightEnc.getTicks();
         long avg = (tL + tR) / 2;
 
-        // Time-based ramp up, encoder-based ramp down
-        float elapsed = (float)(now - startMs);
-        float v_fwd;
-        bool  inDecel;
-        if (elapsed < RAMP_TIME_MS) {
-            v_fwd   = CRUISE_SPEED * (elapsed / RAMP_TIME_MS);
-            inDecel = false;
-        } else if (avg < (long)(target * 0.55f)) {
-            v_fwd   = CRUISE_SPEED;
-            inDecel = false;
-        } else {
-            // Ramp down over last 45% — floor disabled so PID can reach zero
-            float rem = (float)(target - avg) / (target * 0.45f);
-            v_fwd   = CRUISE_SPEED * constrain(rem, 0.0f, 1.0f);
-            inDecel = true;
-        }
-
-        // Encoder balance: correct for L-R tick difference
-        float balance = Kp_balance * (float)(tL - tR);
-        float vL_cmd  = v_fwd - balance;
-        float vR_cmd  = v_fwd + balance;
-
-        int pwmL = computeSpeedPID(pidL, tL, vL_cmd, dt, !inDecel);
-        int pwmR = computeSpeedPID(pidR, tR, vR_cmd, dt, !inDecel);
-
+        // Simple P balance: if L ahead slow L, speed R — clamped positive (no spinning)
+        int err   = (int)(tL - tR);
+        int pwmL  = constrain(DRIVE_PWM - err * BALANCE_KP, 200, MOTOR_PWM_MAX);
+        int pwmR  = constrain(DRIVE_PWM + err * BALANCE_KP, 200, MOTOR_PWM_MAX);
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
-        if (now - lastLog >= 150) {
-            lastLog = now;
-            bleSend("avg=%4ld/%-4ld L=%4ld(%.0f) R=%4ld(%.0f) pwm=%d/%d\n",
-                    avg, target,
-                    tL, tL * MM_PER_TICK,
-                    tR, tR * MM_PER_TICK,
-                    pwmL, pwmR);
+        if (millis() - lastLog >= 150) {
+            lastLog = millis();
+            bleSend("avg=%4ld/%-4ld L=%4ld R=%4ld err=%+d pwm=%d/%d\n",
+                    avg, target, tL, tR, err, pwmL, pwmR);
         }
 
-        if (avg >= target - BRAKE_COMP_TICKS) {
+        if (avg >= target) {
             stopMotors();
             encodersDisable();
-            tL = leftEnc.getTicks();
-            tR = rightEnc.getTicks();
-            long avgFinal = (tL + tR) / 2;
-            float distMM  = avgFinal * MM_PER_TICK;
-            float errMM   = (tL - tR) * MM_PER_TICK;
-            bleSend("[DONE] avg=%ld(%.0fmm) L=%ld R=%ld diff=%.1fmm t=%lums\n",
-                    avgFinal, distMM, tL, tR, errMM, millis() - startMs);
-            if (fabsf(distMM - (target * MM_PER_TICK)) > 5.0f)
-                bleSend("[WARN] dist err>5mm — tune BRAKE_COMP_TICKS (cur=%d)\n", BRAKE_COMP_TICKS);
-            else
-                bleSend("[PASS] distance OK\n");
-            if (fabsf(errMM) > 5.0f)
-                bleSend("[WARN] L-R diff>5mm — raise Kp_balance\n");
+            tL = leftEnc.getTicks(); tR = rightEnc.getTicks();
+            long avgF = (tL + tR) / 2;
+            bleSend("[DONE] avg=%ld(%.0fmm) L=%ld R=%ld t=%lums\n",
+                    avgF, avgF * MM_PER_TICK, tL, tR, millis() - startMs);
             return;
         }
 
-        if (millis() - startMs > (unsigned long)(12000 * n)) {
+        if (millis() - startMs > (unsigned long)(TIMEOUT_MS * n)) {
             stopMotors();
             encodersDisable();
-            bleSend("[TIMEOUT] avg=%ld target=%ld — raise MIN_PWM_OUT\n", avg, target);
+            bleSend("[TIMEOUT] avg=%ld target=%ld — raise DRIVE_PWM\n", avg, target);
             return;
         }
     }
@@ -287,10 +193,8 @@ void moveCells(int n) {
 // ── Free-run ──────────────────────────────────────────────────────────────────
 void freeRun() {
     encodersEnable();
-    resetPID(0, 0);
-    bleSend("[FREE] send 's' to stop\n");
+    bleSend("[FREE] DRIVE_PWM=%d BALANCE_KP=%d — send 's' to stop\n", DRIVE_PWM, BALANCE_KP);
 
-    unsigned long lastMs  = millis();
     unsigned long lastLog = 0;
 
     while (true) {
@@ -299,35 +203,19 @@ void freeRun() {
             rxCmd = 0;
             stopMotors();
             encodersDisable();
-            long tL = leftEnc.getTicks();
-            long tR = rightEnc.getTicks();
-            bleSend("[FREE] stopped L=%ld(%.0fmm) R=%ld(%.0fmm) diff=%.1fmm\n",
-                    tL, tL * MM_PER_TICK,
-                    tR, tR * MM_PER_TICK,
-                    (tL - tR) * MM_PER_TICK);
+            long tL = leftEnc.getTicks(), tR = rightEnc.getTicks();
+            bleSend("[FREE] stopped L=%ld(%.0fmm) R=%ld(%.0fmm)\n",
+                    tL, tL * MM_PER_TICK, tR, tR * MM_PER_TICK);
             return;
         }
+        long tL = leftEnc.getTicks(), tR = rightEnc.getTicks();
+        int  err = (int)(tL - tR);
+        leftMotor.drive( constrain(DRIVE_PWM - err * BALANCE_KP, 200, MOTOR_PWM_MAX));
+        rightMotor.drive(constrain(DRIVE_PWM + err * BALANCE_KP, 200, MOTOR_PWM_MAX));
 
-        unsigned long now = millis();
-        float dt = (now - lastMs) / 1000.0f;
-        if (dt < 0.001f) dt = 0.001f;
-        lastMs = now;
-
-        long tL = leftEnc.getTicks();
-        long tR = rightEnc.getTicks();
-
-        float balance = Kp_balance * (float)(tL - tR);
-        int pwmL = computeSpeedPID(pidL, tL, CRUISE_SPEED - balance, dt, true);
-        int pwmR = computeSpeedPID(pidR, tR, CRUISE_SPEED + balance, dt, true);
-        leftMotor.drive(pwmL);
-        rightMotor.drive(pwmR);
-
-        if (now - lastLog >= 200) {
-            lastLog = now;
-            bleSend("L=%ld(%.0f) R=%ld(%.0f) diff=%+ld pwm=%d/%d\n",
-                    tL, tL * MM_PER_TICK,
-                    tR, tR * MM_PER_TICK,
-                    tL - tR, pwmL, pwmR);
+        if (millis() - lastLog >= 200) {
+            lastLog = millis();
+            bleSend("L=%ld R=%ld err=%+d\n", tL, tR, err);
         }
     }
 }
@@ -340,8 +228,8 @@ void setup() {
     Serial.println("\n[INIT] motor-ble-drive — encoder-only");
     Serial.printf("[INIT] TICKS_PER_CELL=%ld  MM_PER_TICK=%.4f\n",
                   TICKS_PER_CELL, MM_PER_TICK);
-    Serial.printf("[INIT] CRUISE=%.0f t/s  MIN_PWM=%d  Kp_spd=%.1f  Kp_bal=%.1f\n",
-                  CRUISE_SPEED, MIN_PWM_OUT, Kp_speed, Kp_balance);
+    Serial.printf("[INIT] DRIVE_PWM=%d  TICKS_PER_CELL=%ld  MM_PER_TICK=%.4f\n",
+                  DRIVE_PWM, TICKS_PER_CELL, MM_PER_TICK);
 
     // DRV_SLEEP_PIN jumpered to VCC on this board — skip pin setup
 
@@ -376,10 +264,10 @@ void loop() {
 
         // ── Single-motor diagnostics ──────────────────────────────────────────
         // A/Z: left fwd/back  B/X: right fwd/back  (raw 120 PWM, 600ms)
-        case 'A': bleSend("[DIAG] L fwd\n");  leftMotor.drive( 220); delay(800); leftMotor.coast();  bleSend("[DIAG] done\n"); break;
-        case 'Z': bleSend("[DIAG] L back\n"); leftMotor.drive(-220); delay(800); leftMotor.coast();  bleSend("[DIAG] done\n"); break;
-        case 'B': bleSend("[DIAG] R fwd\n");  rightMotor.drive( 220); delay(800); rightMotor.coast(); bleSend("[DIAG] done\n"); break;
-        case 'X': bleSend("[DIAG] R back\n"); rightMotor.drive(-220); delay(800); rightMotor.coast(); bleSend("[DIAG] done\n"); break;
+        case 'A': bleSend("[DIAG] L fwd\n");  leftMotor.drive( 500); delay(800); leftMotor.coast();  bleSend("[DIAG] done\n"); break;
+        case 'Z': bleSend("[DIAG] L back\n"); leftMotor.drive(-500); delay(800); leftMotor.coast();  bleSend("[DIAG] done\n"); break;
+        case 'B': bleSend("[DIAG] R fwd\n");  rightMotor.drive( 500); delay(800); rightMotor.coast(); bleSend("[DIAG] done\n"); break;
+        case 'X': bleSend("[DIAG] R back\n"); rightMotor.drive(-500); delay(800); rightMotor.coast(); bleSend("[DIAG] done\n"); break;
 
         // T: spin both fwd 1s, report encoder ticks — tells direction + if counting
         case 'T': {

@@ -17,12 +17,22 @@ MicromouseMaze    maze;
 #define NUM_LEDS 8
 CRGB leds[NUM_LEDS];
 
-void IRAM_ATTR isrLeft()  { encLeft.handleInterrupt();  }
-void IRAM_ATTR isrRight() { encRight.handleInterrupt(); }
-
-void IRAM_ATTR MicromouseEncoder::handleInterrupt() {
-    if (digitalRead(pinB)) count++; else count--;
+void IRAM_ATTR isrLeft() {
+    static uint32_t last = 0;
+    uint32_t now = micros();
+    if (now - last < 200) return;
+    last = now;
+    encLeft.handleInterrupt();
 }
+void IRAM_ATTR isrRight() {
+    static uint32_t last = 0;
+    uint32_t now = micros();
+    if (now - last < 200) return;
+    last = now;
+    encRight.handleInterrupt();
+}
+
+void IRAM_ATTR MicromouseEncoder::handleInterrupt() { count++; }
 
 static const uint8_t EMIT_PINS[4] = { EMIT_LF, EMIT_L45, EMIT_R45, EMIT_RF };
 static const uint8_t RX_PINS[4]   = { RX_LF,   RX_L45,   RX_R45,   RX_RF  };
@@ -118,8 +128,8 @@ void driveEncoder(long targetTicks, int pwm, bool forward) {
         }
 
         float corr   = encPid.compute((float)(tL - tR));
-        int leftPwm  = constrain(pwm - (int)corr, 25, 255);
-        int rightPwm = constrain(pwm + (int)corr, 25, 255);
+        int leftPwm  = constrain(pwm - (int)corr, 50, MOTOR_PWM_MAX);
+        int rightPwm = constrain(pwm + (int)corr, 50, MOTOR_PWM_MAX);
         leftMotor.drive(dir * leftPwm);
         rightMotor.drive(dir * rightPwm);
         delay(5);
@@ -201,10 +211,10 @@ void setup() {
     beep(100);
     updateBatteryIndicator();
     Serial.println("DIAGNOSTIC: Left Motor Forward...");
-    leftMotor.drive(100); delay(300); leftMotor.coast();
+    leftMotor.drive(400); delay(300); leftMotor.coast();
     delay(400);
     Serial.println("DIAGNOSTIC: Right Motor Forward...");
-    rightMotor.drive(100); delay(300); rightMotor.coast();
+    rightMotor.drive(400); delay(300); rightMotor.coast();
     
     maze.reset();
     // Apply default 3x6 practice maze boundaries
@@ -281,18 +291,21 @@ void loop() {
             
         case RUN: {
             maze.visited[robotRow][robotCol] = true;
-            if (maze.isGoal(robotRow, robotCol)) {
+            if (robotRow == (uint8_t)tuning.goalRow && robotCol == (uint8_t)tuning.goalCol) {
                 robotState = GOAL;
                 break;
             }
-            senseWalls();
-            maze.floodFill();
-            uint8_t d;
-            AbsDir next = maze.bestDirectionBiased(robotRow, robotCol, robotHeading, d);
-            int turn = ((int)next - (int)robotHeading + 4) % 4;
-            if (turn == 1) turnRight();
-            else if (turn == 2) turnAround();
-            else if (turn == 3) turnLeft();
+            senseWalls(); // keep for web display
+
+            bool wallF = irRead(IR_LF) > tuning.lfThresh || irRead(IR_RF) > tuning.rfThresh;
+            bool wallL = irRead(IR_L45) > tuning.l45Thresh;
+            bool wallR = irRead(IR_R45) > tuning.r45Thresh;
+
+            // Right-hand rule: prefer right, then forward, then left, then reverse
+            if      (!wallR)          turnRight();
+            else if (wallF && !wallL) turnLeft();
+            else if (wallF && wallL)  turnAround();
+
             moveForwardOneCell();
             delay(tuning.cellPauseMs);
             break;
