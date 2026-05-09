@@ -14,27 +14,15 @@
 MicromouseEncoder leftEnc (ENC_L_A, ENC_L_B);
 MicromouseEncoder rightEnc(ENC_R_A, ENC_R_B);
 
-void IRAM_ATTR MicromouseEncoder::handleInterrupt() {
-    count++;
-}
-
-void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
-void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
-
 void setup() {
     Serial.begin(115200);
     delay(1500);
 
-    pinMode(ENC_L_A, INPUT_PULLUP);
-    pinMode(ENC_L_B, INPUT_PULLUP);
-    pinMode(ENC_R_A, INPUT_PULLUP);
-    pinMode(ENC_R_B, INPUT_PULLUP);
+    leftEnc.begin();
+    rightEnc.begin();
 
-    attachInterrupt(digitalPinToInterrupt(ENC_L_A), leftISR,  CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ENC_R_A), rightISR, CHANGE);
-
-    Serial.println("[ENC] ready — spin wheels by hand, watch counts");
-    Serial.printf("[ENC] L=GPIO%d  R=GPIO%d\n", ENC_L_A, ENC_R_A);
+    Serial.println("[ENC] ready — spin wheels by hand, watch counts (PCNT quadrature)");
+    Serial.printf("[ENC] L=GPIO%d/%d  R=GPIO%d/%d\n", ENC_L_A, ENC_L_B, ENC_R_A, ENC_R_B);
 }
 
 void loop() {
