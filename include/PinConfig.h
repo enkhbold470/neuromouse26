@@ -69,17 +69,18 @@ constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.
 constexpr long    TURN_TICKS_90_L  = 51;   // calibrated at TURN_PWM=270/500Hz (77×90/135)
 constexpr long    TURN_TICKS_90_R  = 57;   // calibrated at TURN_PWM=270/500Hz (85×90/135)
 
-// ── Drive tuning (10-bit PWM 0–1023) ─────────────────────────────────────────
+// ── Drive tuning — ONE knob: change DRIVE_PWM, rest scale automatically ───────
+// Ratios validated at DRIVE_PWM=250 / 500Hz. Recalibrate TURN_TICKS_90 if TURN_PWM changes.
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 250;  // cruise — lowered from 450 after 500Hz freq change
-constexpr int     DRIVE_PWM_MIN    = 80;   // ramp floor — lowered proportionally; below ~70 risks stall
-constexpr int     TURN_PWM         = 150;  // 90° pivot — lowered from 380 after 500Hz freq change
-constexpr int     DECEL_TICKS      = 200;  // ramp over last ~100mm (~6 motor τ at 50ms)
-constexpr int     COAST_COMP_TICKS = 100;  // stop N ticks early; coast carries to cell center (~50mm)
-constexpr int     BALANCE_KP       = 3;    // PWM per tick of L-R encoder error
-constexpr int     TIMEOUT_MS       = 5000; // per-cell abort timeout ms
+constexpr int     DRIVE_PWM        = 250;                        // ← master cruise speed (0–1023)
+constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.60f);  // 60% of cruise for pivots
+constexpr int     DRIVE_PWM_MIN    = (int)(DRIVE_PWM * 0.32f);  // decel floor (~32%); below 70 risks stall
+constexpr int     COAST_COMP_TICKS = (int)(DRIVE_PWM * 0.40f);  // stop N ticks early; coast ~50mm at 250
+constexpr int     DECEL_TICKS      = 200;                        // fixed distance ramp (~100mm)
+constexpr int     BALANCE_KP       = 3;                          // PWM per tick of L-R encoder error
+constexpr int     TIMEOUT_MS       = 5000;                       // per-cell abort timeout ms
 constexpr int     CELL_PAUSE_MS    = 40;
-constexpr int     BASE_PWM         = 250;
+constexpr int     BASE_PWM         = DRIVE_PWM;
 
 // ── IR thresholds (calibrated 2026-05-07, dead-end centered, all 4 walls) ─────
 // irRead() is ambient-subtracted: no-wall ~0, wall ~400–550. Threshold=50 is safe.
