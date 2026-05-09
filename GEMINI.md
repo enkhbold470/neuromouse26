@@ -6,8 +6,8 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 ### Key Technologies
 - **MCU:** Universal Portability (Currently ESP32-S3 but written in standard Arduino C++)
 - **Framework:** Arduino / PlatformIO
-- **Motor Control:** Standard `analogWrite()` for 8-bit PWM (0-255 scale) driving DRV8833
-- **Feedback:** Single-channel quadrature encoders
+- **Motor Control:** LEDC 10-bit PWM (0-1023 scale) driving DRV8833
+- **Feedback:** Single-channel encoders (rising edge only, direction from motor command)
 - **Sensing:** 4-sensor IR array (LF, L45, R45, RF) for wall detection and centering
 - **Navigation:** 16x16 Flood-fill BFS algorithm
 - **UI:** Standard `tone()` buzzer, basic button
@@ -41,17 +41,19 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **`PID`**: Generic PID controller used for both wall-centering (`wallPid`) and encoder-matching (`encPid`). Uses `micros()` for accurate `dt` calculation and features anti-windup clamping.
 
 ### Movement Logic
-- **Forward Drive:** `driveEncoder(targetTicks, pwm, forward)` — resets both encoders, drives until `(abs(tL)+abs(tR))/2 >= targetTicks` or 4s timeout. Uses `encPid` to balance L/R encoder counts. Logs ticks every 150ms to Serial for debugging.
-- **Pivot Turns:** 90-degree turns use encoder counts (`TICKS_PER_90`), 2s timeout.
+- **Forward Drive (`moveCells`):** per-motor independent stop — each motor coasts when its own tick count hits target. PWM decel ramp over last `DECEL_TICKS=200` ticks (100mm) from `DRIVE_PWM` → `DRIVE_PWM_MIN=100`. Balance P correction (`BALANCE_KP=3`) only while both motors still running. No brake — pure coast stop.
+- **Stop accuracy:** at DRIVE_PWM=450, exit speed ~112mm/s → coast ~23mm residual. Tune `DRIVE_PWM_MIN` toward 80 to reduce further.
+- **Right encoder scaling:** `rTicks() = rightEnc.getTicks() * (410.0/413.0)` — compensates hardware tick-count difference (calibrated: 1-rev test L=410, R=413).
+- **Pivot Turns:** 90-degree turns use encoder counts (`TICKS_PER_90`), 2s timeout. `TURN_PWM=380`.
 - **Explore Loop:** Sense Walls → Update Maze → Re-flood → Decide Direction → Move.
 - **Default maze:** 3×6 practice maze (6 rows, 3 cols). Goal at (5,1). Configurable via web UI.
 
 ### Hardware Constants (Adjust in `include/PinConfig.h`)
 - `WHEEL_DIAMETER`: 33.4mm
-- `TICKS_PER_REV`: 210.0f
-- `TICKS_PER_CELL`: 360 (for 180mm cells)
+- `TICKS_PER_REV`: 210.0f — empirically calibrated for single-channel rising-edge ISR at running speed (motor shaft encoder ~14 PPR × 1:30 gear = ~420 raw, but 200µs noise filter and ISR behavior yield effective 210 at speed)
+- `TICKS_PER_CELL`: 360 (calculated: 180mm / (π×33.4/210) — validated matches physical 1-cell travel)
 - `WHEEL_TRACK_MM`: 74.0mm
-- PWM is strictly 0-255 scale.
+- PWM is 10-bit (0-1023). `MOTOR_PWM_MAX` = 1023.
 
 ---
 
@@ -65,11 +67,14 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **Standalone Tests:** The `test/` directory contains numerous standalone `.cpp` files for validating individual subsystems (e.g., `ir-test.cpp`, `mpu6500.cpp`, `ws2812b.cpp`).
 - **Validation Workflow:** Before running a full maze, it is recommended to validate hardware using the scripts in `test/`.
 
-### Known Issues & Risks (as of 2026-05-07)
-- **Blocking Loops:** Motion functions like `moveForwardOneCell()` are blocking. WiFi debug runs on a separate FreeRTOS task (Core 0) to avoid starvation.
-- **Baud Rate:** Serial prints inside `driveEncoder()` every 150ms — disable by removing `Serial.printf` calls during speed runs.
+### Known Issues & Risks (as of 2026-05-09)
+- **Blocking Loops:** Motion functions like `moveCells()` are blocking. WiFi debug runs on a separate FreeRTOS task (Core 0) to avoid starvation.
+- **Baud Rate:** Serial prints inside move loop every 150ms — disable `bleSend` log lines during speed runs.
 - **IR thresholds fixed 2026-05-07:** Previous thresholds (LF/RF=1500, L45/R45=650) exceeded maximum possible wall readings (~574) — wall detection was completely non-functional. Fixed to 50. Always validate thresholds against actual `irRead()` output before testing.
-- **Encoder direction:** ISR uses `digitalRead(pinB)` for direction. `driveEncoder()` uses `abs(getTicks())` so it works regardless of pinB wiring — if ticks stay near 0, check pinA interrupt wiring and encoder power.
+- **Encoder effective TICKS_PER_REV:** Physical encoder is ~14 PPR × 30 gear = ~420 raw ticks/rev. ISR with 200µs noise filter yields effective 210 at running speed. Do NOT change `TICKS_PER_REV` to 420 — breaks distance calculation. Value 210 is empirically validated.
+- **Coast overshoot:** Without brake, residual overshoot ~20-35mm at `DRIVE_PWM=450`, `DRIVE_PWM_MIN=100`. Physics limit: N20 1:30 at 7.4V, 140g robot, μ≈0.028. Tune `DRIVE_PWM_MIN` toward 80 if motor still runs; below ~70 risks stall mid-ramp.
+- **Right encoder offset:** Right encoder reads ~0.7% more ticks than left over same distance. Compensated by `RIGHT_ENC_SCALE = 410.0/413.0` applied via `rTicks()` wrapper. Recalibrate by spinning each wheel one full revolution and measuring counts.
+- **Encoder direction:** `driveEncoder()` / `moveCells()` uses `abs(getTicks())` so works regardless of pinB wiring — if ticks stay near 0, check pinA interrupt wiring and encoder power.
 
 ---
 
@@ -98,8 +103,8 @@ You are working on a **16×16 micromouse robot**. Assume this hardware unless to
 | **MCU** | ESP32-S3 (Xtensa LX7 dual-core, 240 MHz) |
 | **Framework** | Arduino on PlatformIO (`pioarduino` fork for ESP-IDF 5.x support) |
 | **Motor Driver** | DRV8833 dual H-bridge — one driver per motor (IN1/IN2 per channel, PWM on both pins for speed + brake) |
-| **Motors** | N20 brushed DC gear motors |
-| **Encoders** | Single-channel quadrature encoders (one channel per motor, software direction inferred from motor command) |
+| **Motors** | N20 brushed DC gear motors — **1:30 gear ratio, 500 RPM @ 6V**, running on 2S LiPo (7.4V nominal) |
+| **Encoders** | Single-channel magnetic encoders on motor shaft (~14 PPR at motor shaft × 30 = ~420 raw ticks/output-rev). ISR counts rising edge only. Effective `TICKS_PER_REV=210` at running speed. Right encoder scaled by `410/413` to equalize L/R. |
 | **IR Sensors** | 4-sensor array: LF, L45, R45, RF — analog reads for wall detection and cell centering |
 | **Navigation** | 16×16 flood-fill BFS algorithm |
 | **LEDs** | WS2812B RGB via FastLED |
