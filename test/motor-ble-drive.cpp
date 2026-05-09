@@ -16,25 +16,7 @@
 #include "MicromouseMotor.h"
 #include "MicromouseEncoder.h"
 
-// ── Tuning ────────────────────────────────────────────────────────────────────
-static const int DRIVE_PWM    = 450;   // 10-bit (~59%) — raise if stalls, lower if overshoots
-#undef  TURN_PWM
-#define TURN_PWM               380     // slower turn for cleaner 90° — tune if over/undershoots
-static const int TIMEOUT_MS   = 5000; // ms per cell before abort
-static const int BALANCE_KP   = 3;    // PWM correction per tick of L-R error (always stays positive)
-
-// ── Physics ───────────────────────────────────────────────────────────────────
-#define CELL_MM          180.0f
-#define MM_PER_TICK      ((float)(M_PI * WHEEL_DIAMETER) / TICKS_PER_REV)
-#undef  TICKS_PER_CELL
-#define TICKS_PER_CELL   ((long)(CELL_MM / MM_PER_TICK))
-#define DECEL_TICKS      200   // ramp PWM down over last N ticks (~100mm) — needs 6+ motor τ to settle
-#define DRIVE_PWM_MIN    100   // floor PWM during ramp — tune down toward 80 if motor still runs
-#define COAST_COMP_TICKS 100   // encoder stops N ticks early; coast carries robot to center (60mm / 0.5mm/tick)
-
-// Right encoder reads ~1.13% more ticks than left over same distance.
-// Calibrated: 5-cell run L=3439 R=3478 → scale = 3439/3478.
-#define RIGHT_ENC_SCALE  (3439.0f / 3478.0f)
+// All tuning constants in PinConfig.h — no local overrides needed.
 
 // ── Motors + Encoders ─────────────────────────────────────────────────────────
 // pivot-mouse-v1: both inverted to run forward

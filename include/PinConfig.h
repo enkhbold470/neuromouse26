@@ -3,83 +3,105 @@
 
 #include <Arduino.h>
 
-// ── Pin Config ────────────────────────────────────────────────────────────────
-#define MOTOR_L_IN1     15
-#define MOTOR_L_IN2     16
-#define MOTOR_R_IN3     18
-#define MOTOR_R_IN4     17
-#define DRV_SLEEP_PIN   41
+// ── Pins ──────────────────────────────────────────────────────────────────────
+constexpr uint8_t MOTOR_L_IN1      = 15;
+constexpr uint8_t MOTOR_L_IN2      = 16;
+constexpr uint8_t MOTOR_R_IN3      = 18;
+constexpr uint8_t MOTOR_R_IN4      = 17;
+constexpr uint8_t DRV_SLEEP_PIN    = 41;
 
-#define ENC_L_A         38
-#define ENC_L_B         39
-#define ENC_R_A         21
-#define ENC_R_B         14
+constexpr uint8_t ENC_L_A          = 38;
+constexpr uint8_t ENC_L_B          = 39;
+constexpr uint8_t ENC_R_A          = 21;
+constexpr uint8_t ENC_R_B          = 14;
 
-#define RX_LF           4
-#define RX_L45          6
-#define RX_R45          2
-#define RX_RF           1
+constexpr uint8_t RX_LF            = 4;
+constexpr uint8_t RX_L45           = 6;
+constexpr uint8_t RX_R45           = 2;
+constexpr uint8_t RX_RF            = 1;
 
-#define EMIT_LF         13
-#define EMIT_L45        45
-#define EMIT_R45        12
-#define EMIT_RF         11
+constexpr uint8_t EMIT_LF          = 13;
+constexpr uint8_t EMIT_L45         = 45;
+constexpr uint8_t EMIT_R45         = 12;
+constexpr uint8_t EMIT_RF          = 11;
 
-#define BUTTON_1        42
-#define BUZZER_PIN      40
-#define BUZZER_FREQ     4000
-#define WS2812_DATA     3
+constexpr uint8_t BUTTON_1         = 42;
+constexpr uint8_t BUZZER_PIN       = 40;
+constexpr uint8_t WS2812_DATA      = 3;
+constexpr uint8_t BAT_V_SENSE      = 5;
 
-#define BAT_V_SENSE     5      // Battery voltage divider pin
-#define BAT_VDIV_MULT   3.1197f // Calibration multiplier
+constexpr int     BUZZER_FREQ      = 4000;
 
-// ── Physics ───────────────────────────────────────────────────────────────────
-#define WHEEL_DIAMETER  33.4f
-#define TICKS_PER_REV   210.0f
+// ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
+// 4 kHz balances smooth DRV8833 control and audible noise.
+// 20 kHz is silent but reduces low-speed torque; 500 Hz has audible whine.
+constexpr int     MOTOR_PWM_FREQ_HZ = 4000;
+constexpr int     MOTOR_PWM_BITS    = 10;
 
-// ── Motor Polarity (Physics: Back-to-back motors require inversion) ───────────
-#define MOTOR_L_INV     false
-#define MOTOR_R_INV     true   // Usually right is inverted
+// ── Motor polarity ────────────────────────────────────────────────────────────
+constexpr bool    MOTOR_L_INV      = false;
+constexpr bool    MOTOR_R_INV      = true;   // back-to-back mount requires inversion
 
-// ── IR thresholds (Calibrated 2026-05-07, dead-end centered) ──────────────
-#define L45_CENTER      421   // avg wall reading
-#define R45_CENTER      504   // avg wall reading
-#define L45_THRESH      450    // no-wall <10, wall >397 — huge gap
-#define R45_THRESH      450
-#define LF_THRESH       450    // no-wall <10, wall >512
-#define RF_THRESH       450
+// ── Wheel / encoder physics ───────────────────────────────────────────────────
+// N20 1:30 500RPM @ 6V, running on 2S LiPo (7.4V).
+// Encoder: ~14 PPR motor shaft × 30 = ~420 raw ticks/rev.
+// ISR rising-edge only + 200µs noise filter → effective 210 ticks/rev at speed.
+// Do NOT change to 420 — empirically validated at running speed.
+constexpr float   WHEEL_DIAMETER   = 33.4f;   // mm, measured
+constexpr float   TICKS_PER_REV    = 210.0f;  // empirical at running speed
+constexpr float   WHEEL_TRACK_MM   = 74.0f;   // mm center-to-center, measured
+constexpr float   BAT_VDIV_MULT    = 3.1197f;
 
-// ── Drive tuning (Scaled for Universal 8-bit PWM: 0-255) ──────────────────────
-#define BASE_PWM        250  // ~24% of 1023 (10-bit)
+// Right encoder reads more ticks than left over same distance.
+// Calibrated 5-cell run: L=3439, R=3478. Scale brings R down to match L.
+constexpr float   RIGHT_ENC_SCALE  = 3439.0f / 3478.0f;
 
-#define WALL_KP         0.25f // Calibrated for ~100 IR units error = 25 PWM
-#define WALL_KI         0.00f 
-#define WALL_KD         0.02f // Lowered to filter IR noise
-#define WALL_MAX_CORR   200   // Max steering deviation (10-bit)
+// ── Cell / turn geometry (derived) ───────────────────────────────────────────
+constexpr float   CELL_MM          = 180.0f;  // standard half-size micromouse cell
+constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV; // ~0.4997 mm
+constexpr long    TICKS_PER_CELL   = (long)(CELL_MM / MM_PER_TICK);  // ≈ 360
+constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER)); // ≈ 116
 
-#define ENC_KP          6.0f  // 1mm error (2 ticks) = 12 PWM
-#define ENC_KI          0.00f
-#define ENC_KD          0.2f
-#define ENC_MAX_CORR    120
+// ── Drive tuning (10-bit PWM 0–1023) ─────────────────────────────────────────
+constexpr int     MOTOR_PWM_MAX    = 1023;
+constexpr int     DRIVE_PWM        = 450;  // cruise ~59% — raise if stalls, lower if overshoots
+constexpr int     DRIVE_PWM_MIN    = 100;  // ramp floor — below ~70 risks N20 stall
+constexpr int     TURN_PWM         = 380;  // 90° pivot — calibrated for clean stop
+constexpr int     DECEL_TICKS      = 200;  // ramp over last ~100mm (~6 motor τ at 50ms)
+constexpr int     COAST_COMP_TICKS = 100;  // stop N ticks early; coast carries to cell center (~50mm)
+constexpr int     BALANCE_KP       = 3;    // PWM per tick of L-R encoder error
+constexpr int     TIMEOUT_MS       = 5000; // per-cell abort timeout ms
+constexpr int     CELL_PAUSE_MS    = 40;
+constexpr int     BASE_PWM         = 250;
 
-// ── Cell math ─────────────────────────────────────────────────────────────────
-#define TICKS_PER_CELL  360L
-#define CELL_PAUSE_MS   40
+// ── IR thresholds (calibrated 2026-05-07, dead-end centered, all 4 walls) ─────
+// irRead() is ambient-subtracted: no-wall ~0, wall ~400–550. Threshold=50 is safe.
+constexpr int     L45_CENTER       = 421;
+constexpr int     R45_CENTER       = 504;
+constexpr int     L45_THRESH       = 450;
+constexpr int     R45_THRESH       = 450;
+constexpr int     LF_THRESH        = 450;
+constexpr int     RF_THRESH        = 450;
 
-// ── 90° pivot turn ────────────────────────────────────────────────────────────
-#define WHEEL_TRACK_MM  74.0f
-#define TICKS_PER_90    (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER))
-#define TURN_PWM        200
+// ── Wall-centering PID ────────────────────────────────────────────────────────
+constexpr float   WALL_KP          = 0.25f;
+constexpr float   WALL_KI          = 0.00f;
+constexpr float   WALL_KD          = 0.02f;
+constexpr int     WALL_MAX_CORR    = 200;
+
+// ── Encoder-balance PID ───────────────────────────────────────────────────────
+constexpr float   ENC_KP           = 6.0f;
+constexpr float   ENC_KI           = 0.00f;
+constexpr float   ENC_KD           = 0.2f;
+constexpr int     ENC_MAX_CORR     = 120;
 
 // ── Maze constants ────────────────────────────────────────────────────────────
-#define MAZE_SIZE       16
-#define MAZE_CELLS      (MAZE_SIZE * MAZE_SIZE)
-
-#define WALL_NORTH      0x01
-#define WALL_EAST       0x02
-#define WALL_SOUTH      0x04
-#define WALL_WEST       0x08
-
-#define FLOOD_INFINITY  255
+constexpr uint8_t MAZE_SIZE        = 16;
+constexpr uint16_t MAZE_CELLS      = MAZE_SIZE * MAZE_SIZE;
+constexpr uint8_t WALL_NORTH       = 0x01;
+constexpr uint8_t WALL_EAST        = 0x02;
+constexpr uint8_t WALL_SOUTH       = 0x04;
+constexpr uint8_t WALL_WEST        = 0x08;
+constexpr uint8_t FLOOD_INFINITY   = 255;
 
 #endif
