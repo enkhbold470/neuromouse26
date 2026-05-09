@@ -33,9 +33,10 @@ constexpr uint8_t BAT_V_SENSE      = 5;
 constexpr int     BUZZER_FREQ      = 4000;
 
 // ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
-// 4 kHz balances smooth DRV8833 control and audible noise.
-// 20 kHz is silent but reduces low-speed torque; 500 Hz has audible whine.
-constexpr int     MOTOR_PWM_FREQ_HZ = 4000;
+// 500 Hz: audible whine but maximum torque — DRV8833 slower switching = more avg current.
+// 4 kHz: silent, smoother but weaker at same duty cycle.
+// 20 kHz: silent but lowest torque at low duty. Recalibrate DRIVE_PWM/TURN_PWM after changing.
+constexpr int     MOTOR_PWM_FREQ_HZ = 500;
 constexpr int     MOTOR_PWM_BITS    = 10;
 
 // ── Motor polarity ────────────────────────────────────────────────────────────
@@ -60,7 +61,13 @@ constexpr float   RIGHT_ENC_SCALE  = 3439.0f / 3478.0f;
 constexpr float   CELL_MM          = 180.0f;  // standard half-size micromouse cell
 constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV; // ~0.4997 mm
 constexpr long    TICKS_PER_CELL   = (long)(CELL_MM / MM_PER_TICK);  // ≈ 360
-constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER)); // ≈ 116
+constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER)); // ≈ 116 (formula, based on TICKS_PER_REV at drive speed)
+// TICKS_PER_REV=210 is calibrated at DRIVE_PWM speed. At TURN_PWM the encoder
+// counts differently → robot turned 135° with formula value. Calibrated to 77 (=116×90/135).
+// Tune: each ~8 ticks ≈ 10°. Too far → lower; too short → raise.
+// Left/right differ due to mechanical asymmetry — calibrate independently.
+constexpr long    TURN_TICKS_90_L  = 77;   // left turn — confirmed good
+constexpr long    TURN_TICKS_90_R  = 85;   // right turn — +8 ticks for extra 10°
 
 // ── Drive tuning (10-bit PWM 0–1023) ─────────────────────────────────────────
 constexpr int     MOTOR_PWM_MAX    = 1023;

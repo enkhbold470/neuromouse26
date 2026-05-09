@@ -6,7 +6,7 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 ### Key Technologies
 - **MCU:** Universal Portability (Currently ESP32-S3 but written in standard Arduino C++)
 - **Framework:** Arduino / PlatformIO
-- **Motor Control:** LEDC 10-bit PWM (0-1023 scale) driving DRV8833
+- **Motor Control:** LEDC 10-bit PWM (0-1023 scale) driving DRV8833 @ **500 Hz** (max torque; audible whine)
 - **Feedback:** Single-channel encoders (rising edge only, direction from motor command)
 - **Sensing:** 4-sensor IR array (LF, L45, R45, RF) for wall detection and centering
 - **Navigation:** 16x16 Flood-fill BFS algorithm
@@ -118,7 +118,7 @@ You are working on a **16×16 micromouse robot**. Assume this hardware unless to
 
 1. **No blocking delays** — use `millis()` or hardware timers for timing. `delay()` is forbidden except in setup/debug one-liners.
 2. **ISR discipline** — encoder ISRs are `IRAM_ATTR`. Shared variables between ISR and main loop are `volatile`. No Serial or heap allocation inside ISRs.
-3. **PWM via LEDC** — ESP32-S3 has no analogWrite(); use `ledcAttach()` / `ledcWrite()` (ESP-IDF 5.x Arduino API). Default: 20 kHz, 10-bit resolution.
+3. **PWM via LEDC** — ESP32-S3 has no analogWrite(); use `ledcAttach()` / `ledcWrite()` (ESP-IDF 5.x Arduino API). This project: **500 Hz, 10-bit** (`MOTOR_PWM_FREQ_HZ=500`, `MOTOR_PWM_BITS=10`). Higher freq = quieter but weaker; recalibrate DRIVE_PWM after changing.
 4. **PlatformIO `platformio.ini` first** — always include the relevant config block when introducing a new library or build flag.
 5. **Motor control** — DRV8833 fast decay = both INs driven (one HIGH, one PWM). Slow decay = one IN HIGH, one PWM. State this when writing motor code.
 6. **No magic numbers** — every pin, threshold, and constant must be a `#define` or `constexpr` at the top of the file.
