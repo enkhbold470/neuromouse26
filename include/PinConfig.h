@@ -10,10 +10,10 @@
 #define MOTOR_R_IN4     17
 #define DRV_SLEEP_PIN   41
 
-#define ENC_L_A         21
-#define ENC_L_B         14
-#define ENC_R_A         38
-#define ENC_R_B         39
+#define ENC_L_A         38
+#define ENC_L_B         39
+#define ENC_R_A         21
+#define ENC_R_B         14
 
 #define RX_LF           4
 #define RX_L45          6
