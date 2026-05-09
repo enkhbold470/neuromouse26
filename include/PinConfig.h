@@ -50,17 +50,17 @@
 #define RF_THRESH       450
 
 // ── Drive tuning (Scaled for Universal 8-bit PWM: 0-255) ──────────────────────
-#define BASE_PWM        60   // Safe starting speed
+#define BASE_PWM        250  // ~24% of 1023 (10-bit)
 
 #define WALL_KP         0.25f // Calibrated for ~100 IR units error = 25 PWM
 #define WALL_KI         0.00f 
 #define WALL_KD         0.02f // Lowered to filter IR noise
-#define WALL_MAX_CORR   50    // Max steering deviation
+#define WALL_MAX_CORR   200   // Max steering deviation (10-bit)
 
 #define ENC_KP          6.0f  // 1mm error (2 ticks) = 12 PWM
 #define ENC_KI          0.00f
 #define ENC_KD          0.2f
-#define ENC_MAX_CORR    30
+#define ENC_MAX_CORR    120
 
 // ── Cell math ─────────────────────────────────────────────────────────────────
 #define TICKS_PER_CELL  360L
@@ -69,7 +69,7 @@
 // ── 90° pivot turn ────────────────────────────────────────────────────────────
 #define WHEEL_TRACK_MM  74.0f
 #define TICKS_PER_90    (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER))
-#define TURN_PWM        50
+#define TURN_PWM        200
 
 // ── Maze constants ────────────────────────────────────────────────────────────
 #define MAZE_SIZE       16

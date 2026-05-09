@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pivot-mouse BLE debug</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d0d; color: #e0e0e0; font-family: monospace; font-size: 14px; padding: 16px; }
+  h1 { color: #4fc3f7; font-size: 16px; margin-bottom: 12px; }
+
+  #status { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 12px;
+            background: #333; color: #aaa; margin-bottom: 12px; }
+  #status.connected { background: #1b4332; color: #4ade80; }
+  #status.error { background: #3b0000; color: #f87171; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+
+  button { background: #1e1e2e; border: 1px solid #444; color: #e0e0e0; padding: 7px 14px;
+           border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 13px; }
+  button:hover { background: #2a2a3e; border-color: #666; }
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+  button.primary { background: #1a3a5c; border-color: #4fc3f7; color: #4fc3f7; }
+  button.primary:hover { background: #1e4a73; }
+  button.danger  { background: #3b1212; border-color: #f87171; color: #f87171; }
+  button.danger:hover  { background: #4f1a1a; }
+  button.warn    { background: #3b2a00; border-color: #fbbf24; color: #fbbf24; }
+  button.warn:hover    { background: #4f3800; }
+  button.ok      { background: #0f2e1b; border-color: #4ade80; color: #4ade80; }
+  button.ok:hover      { background: #163d25; }
+
+  .section-label { font-size: 11px; color: #666; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
+
+  #terminal { background: #0a0a0a; border: 1px solid #333; border-radius: 4px;
+              padding: 10px; height: 380px; overflow-y: auto; font-size: 12px;
+              line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+  .t-rx   { color: #4ade80; }
+  .t-tx   { color: #4fc3f7; }
+  .t-sys  { color: #888; font-style: italic; }
+  .t-err  { color: #f87171; }
+
+  .cmd-row { display: flex; gap: 6px; margin-top: 8px; }
+  #custom { flex: 1; background: #1a1a1a; border: 1px solid #444; color: #e0e0e0;
+            padding: 6px 10px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+  #custom:focus { outline: none; border-color: #4fc3f7; }
+
+  .sep { border: none; border-top: 1px solid #222; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h1>pivot-mouse-v1 — BLE debug</h1>
+<div id="status">disconnected</div>
+
+<div class="row" style="margin-top:10px">
+  <button class="primary" id="btnConnect">Connect BLE</button>
+  <button id="btnDisconnect" disabled>Disconnect</button>
+  <button id="btnClear" style="margin-left:auto">Clear log</button>
+</div>
+
+<hr class="sep">
+
+<div class="section-label">Move cells</div>
+<div class="row">
+  <button class="cmd ok" data-cmd="1">1 cell</button>
+  <button class="cmd ok" data-cmd="2">2 cells</button>
+  <button class="cmd ok" data-cmd="3">3 cells</button>
+  <button class="cmd ok" data-cmd="4">4 cells</button>
+  <button class="cmd ok" data-cmd="5">5 cells</button>
+</div>
+
+<div class="section-label">Control</div>
+<div class="row">
+  <button class="cmd primary" data-cmd="f">Free-run (f)</button>
+  <button class="cmd danger"  data-cmd="s">STOP (s)</button>
+  <button class="cmd"         data-cmd="r">Reset enc (r)</button>
+  <button class="cmd"         data-cmd="?">Status (?)</button>
+</div>
+
+<div class="section-label">Motor diagnostics</div>
+<div class="row">
+  <button class="cmd warn" data-cmd="A">L fwd (A)</button>
+  <button class="cmd warn" data-cmd="Z">L back (Z)</button>
+  <button class="cmd warn" data-cmd="B">R fwd (B)</button>
+  <button class="cmd warn" data-cmd="X">R back (X)</button>
+  <button class="cmd"      data-cmd="T">Enc test (T)</button>
+</div>
+
+<hr class="sep">
+
+<div id="terminal"><span class="t-sys">waiting for connection...</span>
+</div>
+
+<div class="cmd-row">
+  <input id="custom" placeholder="custom cmd (single char or text)" maxlength="64">
+  <button id="btnSend" disabled>Send</button>
+</div>
+
+<script>
+  const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_RX      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+  let device = null, rxChar = null;
+  const terminal = document.getElementById('terminal');
+  const statusEl = document.getElementById('status');
+
+  function log(text, cls = 't-sys') {
+    const ts = new Date().toLocaleTimeString('en', {hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = `[${ts}] ${text}\n`;
+    terminal.appendChild(span);
+    terminal.scrollTop = terminal.scrollHeight;
+  }
+
+  function setConnected(ok) {
+    statusEl.textContent = ok ? 'connected — pivot-mouse-v1' : 'disconnected';
+    statusEl.className = ok ? 'connected' : '';
+    document.getElementById('btnConnect').disabled = ok;
+    document.getElementById('btnDisconnect').disabled = !ok;
+    document.getElementById('btnSend').disabled = !ok;
+    document.querySelectorAll('button.cmd').forEach(b => b.disabled = !ok);
+  }
+
+  async function connect() {
+    try {
+      log('scanning for pivot-mouse-v1…');
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'pivot-mouse-v1' }],
+        optionalServices: [NUS_SERVICE]
+      });
+      device.addEventListener('gattserverdisconnected', () => {
+        log('disconnected', 't-err');
+        setConnected(false);
+        rxChar = null;
+      });
+      const server  = await device.gatt.connect();
+      const service = await server.getPrimaryService(NUS_SERVICE);
+      rxChar        = await service.getCharacteristic(NUS_RX);
+      const txChar  = await service.getCharacteristic(NUS_TX);
+      await txChar.startNotifications();
+      txChar.addEventListener('characteristicvaluechanged', e => {
+        const text = new TextDecoder().decode(e.target.value);
+        log(text.trimEnd(), 't-rx');
+      });
+      setConnected(true);
+      log('connected', 't-sys');
+    } catch(e) {
+      log(`error: ${e.message}`, 't-err');
+      statusEl.className = 'error';
+    }
+  }
+
+  async function send(cmd) {
+    if (!rxChar) return;
+    try {
+      const data = new TextEncoder().encode(cmd);
+      await rxChar.writeValueWithoutResponse(data);
+      log(`→ ${cmd}`, 't-tx');
+    } catch(e) {
+      log(`send error: ${e.message}`, 't-err');
+    }
+  }
+
+  document.getElementById('btnConnect').addEventListener('click', connect);
+  document.getElementById('btnDisconnect').addEventListener('click', () => {
+    if (device && device.gatt.connected) device.gatt.disconnect();
+  });
+  document.getElementById('btnClear').addEventListener('click', () => { terminal.innerHTML = ''; });
+
+  document.querySelectorAll('button.cmd').forEach(b => {
+    b.disabled = true;
+    b.addEventListener('click', () => send(b.dataset.cmd));
+  });
+
+  const customInput = document.getElementById('custom');
+  document.getElementById('btnSend').addEventListener('click', () => {
+    const v = customInput.value.trim();
+    if (v) { send(v); customInput.value = ''; }
+  });
+  customInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btnSend').click();
+  });
+</script>
+</body>
+</html>

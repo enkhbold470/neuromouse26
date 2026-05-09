@@ -7,7 +7,8 @@
 // N20 6V + DRV8833: 20 kHz keeps motor silent, reduces switching losses.
 // 8-bit resolution (0-255) matches existing PWM scale throughout codebase.
 #define MOTOR_PWM_FREQ_HZ  20000
-#define MOTOR_PWM_BITS     8
+#define MOTOR_PWM_BITS     10
+#define MOTOR_PWM_MAX      1023
 
 class MicromouseMotor {
     uint8_t pinIN1, pinIN2;
@@ -15,7 +16,7 @@ class MicromouseMotor {
     bool    inverted;
 
     void ledcSet(uint8_t ch, int duty) {
-        ledcWrite(ch, (uint32_t)constrain(duty, 0, 255));
+        ledcWrite(ch, (uint32_t)constrain(duty, 0, MOTOR_PWM_MAX));
     }
 
 public:
@@ -32,14 +33,14 @@ public:
 
     void drive(int speed) {
         if (inverted) speed = -speed;
-        speed = constrain(speed, -255, 255);
+        speed = constrain(speed, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
         if (speed == 0) { coast(); return; }
         if (speed > 0) { ledcSet(ch1, speed); ledcSet(ch2, 0);      }
         else           { ledcSet(ch1, 0);     ledcSet(ch2, -speed); }
     }
 
-    void brake() { ledcSet(ch1, 255); ledcSet(ch2, 255); }
-    void coast() { ledcSet(ch1, 0);   ledcSet(ch2, 0);   }
+    void brake() { ledcSet(ch1, MOTOR_PWM_MAX); ledcSet(ch2, MOTOR_PWM_MAX); }
+    void coast() { ledcSet(ch1, 0);            ledcSet(ch2, 0);            }
 };
 
 #endif
