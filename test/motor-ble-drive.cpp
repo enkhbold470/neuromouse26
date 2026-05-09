@@ -25,20 +25,6 @@ MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, true);
 MicromouseEncoder leftEnc   (ENC_L_A, ENC_L_B);
 MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B);
 
-// Always count up — direction inferred from motor command, not quadrature.
-// Noise filter: ignore pulses < 200µs apart (physically impossible at any N20 RPM).
-void IRAM_ATTR MicromouseEncoder::handleInterrupt() {
-    uint32_t now = micros();
-    static uint32_t lastL = 0, lastR = 0;
-    uint32_t* last = (pinA == ENC_L_A) ? &lastL : &lastR;
-    if (now - *last < 200) return;
-    *last = now;
-    count++;
-}
-
-void IRAM_ATTR leftISR()  { leftEnc.handleInterrupt(); }
-void IRAM_ATTR rightISR() { rightEnc.handleInterrupt(); }
-
 // Scaled right encoder: compensates hardware tick-count difference.
 static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
 
@@ -48,14 +34,9 @@ static void moveCells(int n);
 void encodersEnable() {
     leftEnc.reset();
     rightEnc.reset();
-    attachInterrupt(digitalPinToInterrupt(ENC_L_A), leftISR,  RISING);
-    attachInterrupt(digitalPinToInterrupt(ENC_R_A), rightISR, RISING);
 }
 
-void encodersDisable() {
-    detachInterrupt(digitalPinToInterrupt(ENC_L_A));
-    detachInterrupt(digitalPinToInterrupt(ENC_R_A));
-}
+void encodersDisable() {} // PCNT always running; reset on next encodersEnable()
 
 void stopMotors() {
     leftMotor.brake();
@@ -288,9 +269,9 @@ void setup() {
     leftMotor.begin();
     rightMotor.begin();
 
-    // Set encoder pins but DO NOT attach ISRs yet — prevents noise counts at idle
-    pinMode(ENC_L_A, INPUT_PULLUP); pinMode(ENC_L_B, INPUT_PULLUP);
-    pinMode(ENC_R_A, INPUT_PULLUP); pinMode(ENC_R_B, INPUT_PULLUP);
+    // PCNT quadrature encoders — begin() configures hardware, pins, and glitch filter
+    leftEnc.begin();
+    rightEnc.begin();
 
     bleSetup();
 

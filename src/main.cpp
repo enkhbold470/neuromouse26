@@ -17,22 +17,6 @@ MicromouseMaze    maze;
 #define NUM_LEDS 8
 CRGB leds[NUM_LEDS];
 
-void IRAM_ATTR isrLeft() {
-    static uint32_t last = 0;
-    uint32_t now = micros();
-    if (now - last < 200) return;
-    last = now;
-    encLeft.handleInterrupt();
-}
-void IRAM_ATTR isrRight() {
-    static uint32_t last = 0;
-    uint32_t now = micros();
-    if (now - last < 200) return;
-    last = now;
-    encRight.handleInterrupt();
-}
-
-void IRAM_ATTR MicromouseEncoder::handleInterrupt() { count++; }
 
 static const uint8_t EMIT_PINS[4] = { EMIT_LF, EMIT_L45, EMIT_R45, EMIT_RF };
 static const uint8_t RX_PINS[4]   = { RX_LF,   RX_L45,   RX_R45,   RX_RF  };
@@ -197,8 +181,8 @@ void setup() {
 
     leftMotor.begin();
     rightMotor.begin();
-    encLeft.begin(isrLeft);
-    encRight.begin(isrRight);
+    encLeft.begin();
+    encRight.begin();
     
     for (int i=0; i<4; i++) {
         pinMode(EMIT_PINS[i], OUTPUT);
