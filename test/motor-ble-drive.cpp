@@ -64,11 +64,11 @@ void stopMotors() {
 
 void turnRight() {
     encodersEnable();
-    bleSend("[TURN] right target=%ld ticks\n", TICKS_PER_90);
+    bleSend("[TURN] right target=%ld ticks\n", TURN_TICKS_90_R);
     leftMotor.drive(TURN_PWM);
     rightMotor.drive(-TURN_PWM);
     unsigned long startMs = millis();
-    while (abs(leftEnc.getTicks()) < TICKS_PER_90) {
+    while (leftEnc.getTicks() < TURN_TICKS_90_R) {
         if (millis() - startMs > 2000) break;
     }
     stopMotors();
@@ -78,11 +78,11 @@ void turnRight() {
 
 void turnLeft() {
     encodersEnable();
-    bleSend("[TURN] left target=%ld ticks\n", TICKS_PER_90);
+    bleSend("[TURN] left target=%ld ticks\n", TURN_TICKS_90_L);
     leftMotor.drive(-TURN_PWM);
     rightMotor.drive(TURN_PWM);
     unsigned long startMs = millis();
-    while (abs(rTicks()) < TICKS_PER_90) {
+    while (rTicks() < TURN_TICKS_90_L) {
         if (millis() - startMs > 2000) break;
     }
     stopMotors();
@@ -295,7 +295,8 @@ void setup() {
     bleSetup();
 
     Serial.println("[INIT] ready — cmds: 1-5=cells  f=free  b=sequence  s=stop  r=reset  ?=status");
-    Serial.println("[INIT] diag: A=L-fwd  Z=L-back  B=R-fwd  X=R-back  T=enc-spin-test");
+    Serial.println("[INIT] turns: R=right90  L=left90");
+    Serial.println("[INIT] diag:  A=L-fwd  Z=L-back  B=R-fwd  X=R-back  T=enc-spin-test");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
@@ -348,6 +349,9 @@ void loop() {
                 tR > 10 ? "FWD-OK" : tR < -10 ? "BACKWARD" : "DEAD(0)");
             break;
         }
+        case 'R': turnRight(); break;
+        case 'L': turnLeft();  break;
+
         case 'r':
             encodersDisable();
             bleSend("[RESET] encoders detached\n");
