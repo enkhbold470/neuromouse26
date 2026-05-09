@@ -66,14 +66,14 @@ constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.
 // counts differently → robot turned 135° with formula value. Calibrated to 77 (=116×90/135).
 // Tune: each ~8 ticks ≈ 10°. Too far → lower; too short → raise.
 // Left/right differ due to mechanical asymmetry — calibrate independently.
-constexpr long    TURN_TICKS_90_L  = 77;   // left turn — confirmed good
-constexpr long    TURN_TICKS_90_R  = 85;   // right turn — +8 ticks for extra 10°
+constexpr long    TURN_TICKS_90_L  = 51;   // calibrated at TURN_PWM=270/500Hz (77×90/135)
+constexpr long    TURN_TICKS_90_R  = 57;   // calibrated at TURN_PWM=270/500Hz (85×90/135)
 
 // ── Drive tuning (10-bit PWM 0–1023) ─────────────────────────────────────────
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 450;  // cruise ~59% — raise if stalls, lower if overshoots
-constexpr int     DRIVE_PWM_MIN    = 100;  // ramp floor — below ~70 risks N20 stall
-constexpr int     TURN_PWM         = 380;  // 90° pivot — calibrated for clean stop
+constexpr int     DRIVE_PWM        = 250;  // cruise — lowered from 450 after 500Hz freq change
+constexpr int     DRIVE_PWM_MIN    = 80;   // ramp floor — lowered proportionally; below ~70 risks stall
+constexpr int     TURN_PWM         = 150;  // 90° pivot — lowered from 380 after 500Hz freq change
 constexpr int     DECEL_TICKS      = 200;  // ramp over last ~100mm (~6 motor τ at 50ms)
 constexpr int     COAST_COMP_TICKS = 100;  // stop N ticks early; coast carries to cell center (~50mm)
 constexpr int     BALANCE_KP       = 3;    // PWM per tick of L-R encoder error
