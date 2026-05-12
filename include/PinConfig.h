@@ -8,7 +8,7 @@ constexpr uint8_t MOTOR_L_IN1      = 15;
 constexpr uint8_t MOTOR_L_IN2      = 16;
 constexpr uint8_t MOTOR_R_IN3      = 18;
 constexpr uint8_t MOTOR_R_IN4      = 17;
-constexpr uint8_t DRV_SLEEP_PIN    = 41;
+// DRV8833 nSLEEP tied to VCC permanently — no pin needed.
 
 constexpr uint8_t ENC_L_A          = 38;
 constexpr uint8_t ENC_L_B          = 39;
@@ -30,6 +30,11 @@ constexpr uint8_t BUZZER_PIN       = 40;
 constexpr uint8_t WS2812_DATA      = 3;
 constexpr uint8_t BAT_V_SENSE      = 5;
 
+// ── I2C OLED (SSD1306 0.96" 128x64, addr 0x78 8-bit = 0x3C 7-bit) ────────────
+constexpr uint8_t OLED_SDA         = 8;
+constexpr uint8_t OLED_SCL         = 9;
+constexpr uint8_t OLED_ADDR        = 0x3C;
+
 constexpr int     BUZZER_FREQ      = 4000;
 
 // ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
@@ -40,8 +45,11 @@ constexpr int     MOTOR_PWM_FREQ_HZ = 500;
 constexpr int     MOTOR_PWM_BITS    = 10;
 
 // ── Motor polarity ────────────────────────────────────────────────────────────
-constexpr bool    MOTOR_L_INV      = false;
-constexpr bool    MOTOR_R_INV      = true;   // back-to-back mount requires inversion
+// Both motors mounted back-to-back / wired reversed → invert PWM polarity.
+// Encoders must also be inverted to keep getTicks() positive for forward motion
+// (see MicromouseEncoder constructor in main.cpp).
+constexpr bool    MOTOR_L_INV      = true;
+constexpr bool    MOTOR_R_INV      = true;
 
 // ── Wheel / encoder physics ───────────────────────────────────────────────────
 // N20 1:30 500RPM @ 6V, running on 2S LiPo (7.4V).
