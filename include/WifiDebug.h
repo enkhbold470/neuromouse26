@@ -13,8 +13,8 @@ struct TuningConfig {
     int   wallMaxCorr = WALL_MAX_CORR;
     float encKp       = ENC_KP,      encKi      = ENC_KI,    encKd     = ENC_KD;
     int   encMaxCorr  = ENC_MAX_CORR;
-    int   l45Center   = L45_CENTER,  r45Center  = R45_CENTER;
-    int   l45Thresh   = L45_THRESH,  r45Thresh  = R45_THRESH;
+    int   l45Center   = L_CENTER,  r45Center  = R_CENTER;
+    int   l45Thresh   = L_THRESH,  r45Thresh  = R_THRESH;
     int   lfThresh    = LF_THRESH,   rfThresh   = RF_THRESH;
     int   ticksPerCell = TICKS_PER_CELL, cellPauseMs = CELL_PAUSE_MS;
     int   mazeRows    = 6,           mazeCols   = 3;
@@ -274,7 +274,7 @@ function applyCalibration() {
   });
   fetch('/config',{method:'POST',body:params}).then(()=>{
     document.getElementById('cal-status').innerHTML=
-      `<span style="color:#0f0">&#10003; Applied &mdash; L45_CENTER=${l45c} R45_CENTER=${r45c} THRESH=${thr}</span>`;
+      `<span style="color:#0f0">&#10003; Applied &mdash; L_CENTER=${l45c} R_CENTER=${r45c} THRESH=${thr}</span>`;
     loadConfig();
   }).catch(e=>{
     document.getElementById('cal-status').innerHTML='<span style="color:#f44">POST failed: '+e+'</span>';
