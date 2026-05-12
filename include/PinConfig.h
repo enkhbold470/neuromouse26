@@ -57,15 +57,15 @@ constexpr bool    MOTOR_R_INV      = true;
 
 // ── Wheel / encoder physics ───────────────────────────────────────────────────
 // N20 1:30 500RPM @ 6V, running on 2S LiPo (7.4V).
-// PCNT quadrature: 14 PPR motor shaft × 4 edges × 30 gear = 1680 ticks/output-rev.
-// Verify: spin output shaft exactly one full revolution → should read ~1680.
+// ISR rising-edge on channel A: 14 PPR motor shaft × 30 gear = 420 ticks/output-rev.
+// Verify on hardware: TEST_ENC menu, spin output shaft one full revolution → ~420.
 constexpr float   WHEEL_DIAMETER   = 33.4f;   // mm, measured
-constexpr float   TICKS_PER_REV    = 1680.0f; // PCNT 4× quadrature: 14 PPR × 4 × 30
+constexpr float   TICKS_PER_REV    = 420.0f;  // single-channel ISR rising edge
 constexpr float   WHEEL_TRACK_MM   = 74.0f;   // mm center-to-center, measured
 constexpr float   BAT_VDIV_MULT    = 3.1197f;
 
-// Recalibrate after PCNT switch: spin each wheel one full rev, record counts L and R.
-constexpr float   RIGHT_ENC_SCALE  = 3439.0f / 3478.0f;  // TODO: recalibrate
+// Recalibrate empirically: spin each wheel one full rev, record L and R counts.
+constexpr float   RIGHT_ENC_SCALE  = 1.0f;    // start at 1.0 until calibrated
 
 // ── Cell / turn geometry (derived) ───────────────────────────────────────────
 constexpr float   CELL_MM          = 180.0f;  // standard half-size micromouse cell
@@ -88,7 +88,11 @@ constexpr int     DRIVE_PWM_MIN    = 100;                        // dynamic stal
 // Re-run moveCells(1): stops short → decrease COAST_COMP_MM; overshoots → increase.
 constexpr float   COAST_COMP_MM    = 100.0f;                     // measured: 3.5cm overshoot at 80mm → +35mm; tune empirically
 constexpr int     COAST_COMP_TICKS = (int)(COAST_COMP_MM / MM_PER_TICK); // ~1842 ticks
-constexpr float   DECEL_MM         = 60.0f;                      // trimmed: COAST(115)+DECEL(60)=175mm < 180mm cell
+// Bumped 60 → 130: needed to actually slow heavy robot from cruise to
+// DRIVE_PWM_MIN before brake. Otherwise multi-cell runs overshoot more with N.
+// Side effect: for N=1 the decel zone exceeds target, so the robot
+// runs the first cell entirely at the decel ramp (≈ slower).
+constexpr float   DECEL_MM         = 130.0f;
 constexpr int     DECEL_TICKS      = (int)(DECEL_MM / MM_PER_TICK); // ~961 ticks
 constexpr float   BALANCE_KP       = 0.4f;                      // PWM per tick L-R error (scaled for PCNT 8× resolution)
 constexpr int     TIMEOUT_MS       = 5000;                       // per-cell abort timeout ms
