@@ -87,12 +87,19 @@ struct PID {
 
 void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
 
+// Mechanical keyswitch, no debounce cap. BUTTON_HOLD_MS in PinConfig.h.
 bool buttonEdge() {
-    static bool last = HIGH;
-    bool cur = digitalRead(BUTTON_1);
-    bool edge = (last == HIGH && cur == LOW);
-    last = cur;
-    return edge;
+    static unsigned long pressStart = 0;
+    static bool armed = true;
+    bool low = (digitalRead(BUTTON_1) == LOW);
+    unsigned long now = millis();
+    if (!low) { pressStart = 0; armed = true; return false; }
+    if (pressStart == 0) pressStart = now;
+    if (armed && (now - pressStart >= BUTTON_HOLD_MS)) {
+        armed = false;
+        return true;
+    }
+    return false;
 }
 
 // ── State / menu ─────────────────────────────────────────────────────────────
@@ -165,6 +172,18 @@ void oledRun(int err, int corr, int pwmL, int pwmR) {
     oled.sendBuffer();
 }
 
+void oledCountdown(int n) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(0, 10, "Wall-follow RUN");
+    oled.drawHLine(0, 12, 128);
+    oled.setFont(u8g2_font_logisoso42_tn);  // big digit font
+    char buf[4]; snprintf(buf, sizeof(buf), "%d", n);
+    int w = oled.getStrWidth(buf);
+    oled.drawStr((128 - w) / 2, 60, buf);
+    oled.sendBuffer();
+}
+
 void oledBars() {
     static const uint8_t order[4] = { 1, 0, 3, 2 };  // L LF RF R
     static const char*   lbl  [4] = { "L", "LF", "RF", "R" };
@@ -226,7 +245,8 @@ void loop() {
             if (buttonEdge()) {
                 switch (menuSel) {
                     case M_CAL:  sampleIR(); oledCal();  state = CAL;  break;
-                    case M_RUN:  pid.reset();
+                    case M_RUN:  for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(1000); }
+                                 pid.reset();
                                  leftEnc.reset(); rightEnc.reset();
                                  state = RUN;  break;
                     case M_LIVE: sampleIR(); oledBars(); state = LIVE; break;
