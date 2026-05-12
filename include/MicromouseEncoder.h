@@ -3,27 +3,27 @@
 
 #include <Arduino.h>
 
-// Single-channel ISR-based encoder counter.
-// Counts rising edges of pinA. pinB is accepted for API compat but unused —
-// we deliberately do NOT do quadrature. Direction comes only from `inverted`.
+// Half-quadrature ISR encoder. On rising edge of A, sample B level → ±1 tick.
+// CW vs CCW (hand-rolled or motor-driven) give opposite signs. `inverted`
+// flips final sign if wiring polarity is backward.
 //
-// Up to 4 encoder instances. ISRs are flat IRAM functions that increment a
-// fixed counter slot — no `this` indirection (avoids Xtensa l32r literal
-// placement issues).
+// Up to 4 instances. Flat ISRs (no `this` ptr) — avoids Xtensa l32r literal
+// issues. ISRs live in flash (no IRAM_ATTR): safe because firmware never
+// writes flash at runtime.
 
 namespace _mmenc {
     static volatile long c0 = 0, c1 = 0, c2 = 0, c3 = 0;
-    // No IRAM_ATTR: ISRs live in flash. Acceptable here because the firmware
-    // never writes flash at runtime. Flat ISRs avoid Xtensa l32r literal issues.
-    inline void isr0() { c0++; }
-    inline void isr1() { c1++; }
-    inline void isr2() { c2++; }
-    inline void isr3() { c3++; }
+    static uint8_t pinB0 = 0xFF, pinB1 = 0xFF, pinB2 = 0xFF, pinB3 = 0xFF;
+
+    inline void isr0() { c0 += (pinB0 != 0xFF && digitalRead(pinB0)) ? -1 : 1; }
+    inline void isr1() { c1 += (pinB1 != 0xFF && digitalRead(pinB1)) ? -1 : 1; }
+    inline void isr2() { c2 += (pinB2 != 0xFF && digitalRead(pinB2)) ? -1 : 1; }
+    inline void isr3() { c3 += (pinB3 != 0xFF && digitalRead(pinB3)) ? -1 : 1; }
 }
 
 class MicromouseEncoder {
     uint8_t pinA;
-    uint8_t pinB;        // accepted but unused
+    uint8_t pinB;
     bool    inv;
     int     id;
     static int nextId;
@@ -34,7 +34,14 @@ public:
 
     void begin() {
         pinMode(pinA, INPUT);
+        if (pinB != 0xFF) pinMode(pinB, INPUT);
         void (*table[4])() = { _mmenc::isr0, _mmenc::isr1, _mmenc::isr2, _mmenc::isr3 };
+        switch (id) {
+            case 0: _mmenc::pinB0 = pinB; break;
+            case 1: _mmenc::pinB1 = pinB; break;
+            case 2: _mmenc::pinB2 = pinB; break;
+            case 3: _mmenc::pinB3 = pinB; break;
+        }
         if (id >= 0 && id < 4) {
             attachInterrupt(digitalPinToInterrupt(pinA), table[id], RISING);
         }
