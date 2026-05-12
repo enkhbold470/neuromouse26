@@ -31,7 +31,7 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 constexpr uint8_t MAZE_ROWS = 6; // south to north 
 constexpr uint8_t MAZE_COLS = 3; // west to east
 constexpr uint8_t GOAL_ROW  = 5; 
-constexpr uint8_t GOAL_COL  = 2
+constexpr uint8_t GOAL_COL  = 2;
 
 // ── IR thresholds (calibrated: no-wall ~0, wall ~400–550) ────────────────────
 // Sensors: L/R perpendicular to side walls, LF/RF angled forward to catch
