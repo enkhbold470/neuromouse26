@@ -41,6 +41,14 @@ constexpr int     BUZZER_FREQ      = 4000;
 // to register one event. 50 ms = snappy but bounce-safe.
 constexpr unsigned long BUTTON_HOLD_MS = 50;
 
+
+// some importnat physical information,
+// robot weight is 161gramms with batteries,
+// we have 2s battery
+// 500rpm 1:30 n20 motor
+// we have side wall detecting sensors 50mm from axle wheel 
+// we have 40mm from wheel axle to rear bumper,
+
 // ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
 // 500 Hz: audible whine but maximum torque — DRV8833 slower switching = more avg current.
 // 4 kHz: silent, smoother but weaker at same duty cycle.
@@ -70,7 +78,7 @@ constexpr float   RIGHT_ENC_SCALE  = 1.0f;    // empirical: L=R=360 per cell
 // ── Cell / turn geometry (derived) ───────────────────────────────────────────
 constexpr float   CELL_MM          = 180.0f;  // standard half-size micromouse cell
 constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV; // ~0.512 mm
-constexpr long    TICKS_PER_CELL   = 350;  // ≈ 2886
+constexpr long    TICKS_PER_CELL   = 300;  // ≈ 2886
 constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER)); // ≈ 931
 // PCNT 4× resolution: starting point ≈ 8× old ISR values (old 100 → ~800).
 // Tune: each ~40 ticks ≈ 10°. Left/right calibrate independently.

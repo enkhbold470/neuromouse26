@@ -117,24 +117,11 @@ static void updateYaw() {
 static void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
 static void encodersReset() { leftEnc.reset(); rightEnc.reset(); }
 
-// PID for centering during forward drive.
-struct PID {
-    float integral = 0, prevError = 0;
-    unsigned long prevUs = 0;
-    float compute(float err) {
-        unsigned long now = micros();
-        float dt = (prevUs == 0) ? 0.001f
-                                 : constrain((now - prevUs) / 1e6f, 0.0001f, 0.05f);
-        prevUs = now;
-        integral += err * dt;
-        integral = constrain(integral, -2000.0f, 2000.0f);
-        float deriv = (err - prevError) / dt;
-        prevError = err;
-        float out = 0.12f * err + 0.03f * deriv;
-        return constrain(out, -250.0f, 250.0f);
-    }
-    void reset() { integral = 0; prevError = 0; prevUs = 0; }
-} pid;
+// Straightness control: hold yaw at 0 using gyro. P-only is enough for short
+// 180mm cell. No side-IR feedback during drive — that's what caused drift
+// when one wall disappears.
+constexpr float STRAIGHT_KP = 3.0f;     // PWM per degree of yaw error
+constexpr int   STRAIGHT_MAX_CORR = 150;
 
 void doTurn90(int dir) {
     yaw = 0; lastImuUs = micros();
@@ -154,44 +141,43 @@ void doTurn90(int dir) {
     while (millis() - s < 200) updateYaw();
 }
 
-// Drive one cell with centering. Returns side that opened mid-cell (0=none, -1=L, +1=R).
-// Brake at TICKS_PER_CELL − COAST_COMP_TICKS.
+// Drive one cell. Straightness from gyro (yaw → 0). IR sampled at intervals
+// only to latch side-wall opening (no PID on IR).
+// Returns: 0=no opening, -1=L opened, +1=R opened.
 int driveOneCellTrackOpening() {
     encodersReset();
-    pid.reset();
+    yaw = 0;
+    lastImuUs = micros();
+
     long target = (long)TICKS_PER_CELL - COAST_COMP_TICKS;
     sampleIR();
     bool startedWithL = wallL();
     bool startedWithR = wallR();
     int  openSide = 0;
     unsigned long t0 = millis();
+    unsigned long lastIR = 0;
 
     while (true) {
+        updateYaw();
         long avg = (leftEnc.getTicks() + rTicks()) / 2;
         if (avg >= target) { stopMotors(); return openSide; }
 
-        sampleIR();
-        bool cur_wL = wallL();
-        bool cur_wR = wallR();
-        // Latch first opening seen this cell.
-        if (openSide == 0 && avg > TICKS_PER_CELL / 4) {
-            if (startedWithL && !cur_wL) openSide = -1;
-            else if (startedWithR && !cur_wR) openSide = +1;
+        // Periodic IR sample for opening detection only — not for PID.
+        if (millis() - lastIR > 25) {
+            sampleIR();
+            lastIR = millis();
+            if (openSide == 0 && avg > TICKS_PER_CELL / 4) {
+                if (startedWithL && !wallL()) openSide = -1;
+                else if (startedWithR && !wallR()) openSide = +1;
+            }
         }
 
-        // Centering PID (only if a wall is currently present on either side).
-        int errR = cur_wR ? (irVal[2] - calR) : 0;
-        int errL = cur_wL ? (irVal[1] - calL) : 0;
-        int err = errR - errL;
-        float corr = (cur_wL || cur_wR) ? pid.compute((float)err) : 0;
-
-        int pwmL = constrain(DRIVE_PWM - (int)corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        int pwmR = constrain(DRIVE_PWM + (int)corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        if (!cur_wL && !cur_wR) {
-            int encErr = (int)(leftEnc.getTicks() - rTicks());
-            pwmL = constrain(DRIVE_PWM - (int)(encErr * BALANCE_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-            pwmR = constrain(DRIVE_PWM + (int)(encErr * BALANCE_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        }
+        // Gyro yaw-hold (target 0°). yaw>0 = drifted CCW (left) → speed L,
+        // slow R to rotate CW.
+        int corr = (int)(yaw * STRAIGHT_KP);
+        corr = constrain(corr, -STRAIGHT_MAX_CORR, STRAIGHT_MAX_CORR);
+        int pwmL = constrain(DRIVE_PWM + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+        int pwmR = constrain(DRIVE_PWM - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
