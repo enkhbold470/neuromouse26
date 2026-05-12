@@ -1,15 +1,15 @@
-// test/wall-follow-simple.cpp — wall-follow PID test
+// test/wall-follow-simple.cpp — wall-follow PID test w/ on-board calibration
 //
-// Uses same proven scaffolding as src/main.cpp:
-//   inline IR sample (amb - lit, 80µs settle, threshold 1500)
-//   motor inv flags from PinConfig
-//   OLED feedback, BUTTON_1 = start/stop
-//   no FreeRTOS task, no tone, no Serial cmds
+// Menu (right encoder = scroll, BUTTON_1 = select):
+//   Calibrate    — capture L/R sensor readings at centered position
+//   Run          — drive forward, wall-follow PID
+//   Live IR      — 4-bar graph
 //
-// Behavior:
-//   button → toggle run/stop
-//   running → drive forward at BASE_PWM, PID centering when L or R wall seen,
-//             encoder balance when no walls
+// Sign convention:
+//   err = (irR - calR) - (irL - calL)
+//   drifted right → irR > calR → err positive → corr positive
+//   pwmL = BASE - corr (slower L) ; pwmR = BASE + corr (faster R)
+//   → robot turns LEFT, away from right wall.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -29,8 +29,8 @@ MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B);
 
 static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
 
-// ── IR (same pattern as main.cpp) ────────────────────────────────────────────
-// PAIRS index: 0=LF, 1=L, 2=R, 3=RF
+// ── IR ───────────────────────────────────────────────────────────────────────
+// PAIRS: 0=LF, 1=L, 2=R, 3=RF
 struct IRPair { uint8_t emit, rx; };
 static IRPair PAIRS[4] = {
     { EMIT_LF, RX_LF },
@@ -40,8 +40,8 @@ static IRPair PAIRS[4] = {
 };
 static int irVal[4] = {0,0,0,0};
 
-constexpr int WALL_SIDE  = 1500;
-constexpr int WALL_FRONT = 1500;
+constexpr int WALL_SIDE_PRESENT = 400;   // sensor must see at least this much to count as "wall here"
+constexpr int WALL_FRONT_STOP   = 1500;
 
 static int readIR(const IRPair& p) {
     digitalWrite(p.emit, LOW);
@@ -54,25 +54,21 @@ static int readIR(const IRPair& p) {
     int d = amb - lit;
     return d < 0 ? 0 : d;
 }
+static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
 
-static void sampleIR() {
-    for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]);
-}
-
-// ── Tuning ───────────────────────────────────────────────────────────────────
-// PID gains for centering. Inputs are raw IR deltas (0..~3900).
-// error = irL - irR  (positive = closer to L wall = drifted left → steer right)
-constexpr float CENTER_KP   = 0.10f;
-constexpr float CENTER_KI   = 0.0f;
-constexpr float CENTER_KD   = 0.02f;
-constexpr int   MAX_CORR    = 200;
-constexpr int   BASE_PWM_WF = DRIVE_PWM;
-constexpr float ENC_BAL_KP  = (float)BALANCE_KP;  // when no walls
+// ── Calibration (persists for session) ───────────────────────────────────────
+static int calL = 800;  // sensible defaults, overwritten by Calibrate
+static int calR = 800;
 
 // ── PID ──────────────────────────────────────────────────────────────────────
+constexpr float CENTER_KP = 0.12f;
+constexpr float CENTER_KI = 0.0f;
+constexpr float CENTER_KD = 0.03f;
+constexpr int   MAX_CORR  = 250;
+constexpr int   BASE_PWM_WF = DRIVE_PWM;
+
 struct PID {
-    float integral  = 0;
-    float prevError = 0;
+    float integral = 0, prevError = 0;
     unsigned long prevUs = 0;
     float compute(float err) {
         unsigned long now = micros();
@@ -89,7 +85,8 @@ struct PID {
     void reset() { integral = 0; prevError = 0; prevUs = 0; }
 } pid;
 
-// ── Button ───────────────────────────────────────────────────────────────────
+void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
+
 bool buttonEdge() {
     static bool last = HIGH;
     bool cur = digitalRead(BUTTON_1);
@@ -98,35 +95,97 @@ bool buttonEdge() {
     return edge;
 }
 
-// ── Motors ───────────────────────────────────────────────────────────────────
-void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
+// ── State / menu ─────────────────────────────────────────────────────────────
+enum State { IDLE, CAL, RUN, LIVE };
+State state = IDLE;
 
-// ── OLED screen ──────────────────────────────────────────────────────────────
-static bool running = false;
-static int  lastErr  = 0;
-static int  lastCorr = 0;
+enum MenuItem { M_CAL = 0, M_RUN, M_LIVE, M_COUNT };
+static const char* MENU_LABELS[M_COUNT] = { "Calibrate", "Run", "Live IR" };
+static int  menuSel    = M_RUN;
+static long menuEncRef = 0;
+constexpr long ENC_PER_STEP = 80;
 
-void oledShow() {
+// ── OLED screens ─────────────────────────────────────────────────────────────
+void oledMenu() {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x12_tf);
-    oled.drawStr(0, 10, running ? "wall-follow RUN" : "wall-follow STOP");
+    oled.drawStr(0, 10, "Wall-follow");
     oled.drawHLine(0, 12, 128);
+    const int Y0 = 26, LH = 12;
+    for (int i = 0; i < M_COUNT; i++) {
+        int y = Y0 + i * LH;
+        if (i == menuSel) {
+            oled.drawBox(0, y - 10, 128, LH);
+            oled.setDrawColor(0);
+            oled.drawStr(4, y, MENU_LABELS[i]);
+            oled.setDrawColor(1);
+        } else {
+            oled.drawStr(4, y, MENU_LABELS[i]);
+        }
+    }
+    oled.setFont(u8g2_font_5x7_tf);
+    char buf[28];
+    snprintf(buf, sizeof(buf), "cal L%d R%d", calL, calR);
+    oled.drawStr(0, 63, buf);
+    oled.sendBuffer();
+}
+
+void oledCal() {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(0, 10, "CALIBRATE");
+    oled.drawHLine(0, 12, 128);
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 24, "Center robot in cell");
+    char buf[24];
+    snprintf(buf, sizeof(buf), "L now %4d (cal %d)", irVal[1], calL);
+    oled.drawStr(0, 36, buf);
+    snprintf(buf, sizeof(buf), "R now %4d (cal %d)", irVal[2], calR);
+    oled.drawStr(0, 48, buf);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 63, "btn = save & exit");
+    oled.sendBuffer();
+}
+
+void oledRun(int err, int corr, int pwmL, int pwmR) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(0, 10, "RUN  btn=stop");
+    oled.drawHLine(0, 12, 128);
+    oled.setFont(u8g2_font_6x10_tf);
     char buf[24];
     snprintf(buf, sizeof(buf), "L%4d R%4d", irVal[1], irVal[2]);
-    oled.drawStr(0, 26, buf);
+    oled.drawStr(0, 24, buf);
     snprintf(buf, sizeof(buf), "LF%4d RF%4d", irVal[0], irVal[3]);
-    oled.drawStr(0, 40, buf);
-    snprintf(buf, sizeof(buf), "err%+d corr%+d", lastErr, lastCorr);
-    oled.drawStr(0, 54, buf);
+    oled.drawStr(0, 36, buf);
+    snprintf(buf, sizeof(buf), "err%+d c%+d", err, corr);
+    oled.drawStr(0, 48, buf);
+    snprintf(buf, sizeof(buf), "pwm L%d R%d", pwmL, pwmR);
+    oled.drawStr(0, 60, buf);
+    oled.sendBuffer();
+}
+
+void oledBars() {
+    static const uint8_t order[4] = { 1, 0, 3, 2 };  // L LF RF R
+    static const char*   lbl  [4] = { "L", "LF", "RF", "R" };
+    const int H = 52, Y0 = 62, W = 26, GAP = 6, X0 = 4;
+    oled.clearBuffer();
     oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(0, 63, "btn = toggle");
+    for (int i = 0; i < 4; i++) {
+        int v = irVal[order[i]];
+        if (v < 0) v = 0; if (v > 4095) v = 4095;
+        int h = (v * H) / 4095;
+        int x = X0 + i * (W + GAP);
+        oled.drawFrame(x, Y0 - H, W, H);
+        if (h > 0) oled.drawBox(x, Y0 - h, W, h);
+        oled.drawStr(x + (W - (int)oled.getStrWidth(lbl[i])) / 2, Y0 - H - 2, lbl[i]);
+    }
     oled.sendBuffer();
 }
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-
     pinMode(BUTTON_1, INPUT_PULLUP);
 
     leftMotor.begin();
@@ -145,71 +204,113 @@ void setup() {
     oled.setI2CAddress(OLED_ADDR << 1);
     oled.begin();
 
-    sampleIR();
-    oledShow();
+    menuEncRef = rightEnc.getTicks();
+    oledMenu();
 }
 
 // ── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-    if (buttonEdge()) {
-        running = !running;
-        if (running) {
-            pid.reset();
-            leftEnc.reset();
-            rightEnc.reset();
-        } else {
-            stopMotors();
+    switch (state) {
+
+        case IDLE: {
+            long delta = rightEnc.getTicks() - menuEncRef;
+            if (delta >= ENC_PER_STEP) {
+                menuSel = (menuSel + 1) % M_COUNT;
+                menuEncRef += ENC_PER_STEP;
+                oledMenu();
+            } else if (delta <= -ENC_PER_STEP) {
+                menuSel = (menuSel - 1 + M_COUNT) % M_COUNT;
+                menuEncRef -= ENC_PER_STEP;
+                oledMenu();
+            }
+            if (buttonEdge()) {
+                switch (menuSel) {
+                    case M_CAL:  sampleIR(); oledCal();  state = CAL;  break;
+                    case M_RUN:  pid.reset();
+                                 leftEnc.reset(); rightEnc.reset();
+                                 state = RUN;  break;
+                    case M_LIVE: sampleIR(); oledBars(); state = LIVE; break;
+                }
+            }
+            break;
         }
-        sampleIR();
-        oledShow();
-        delay(30);
-    }
 
-    if (!running) return;
+        case CAL: {
+            static uint32_t last = 0;
+            if (millis() - last > 100) { sampleIR(); oledCal(); last = millis(); }
+            if (buttonEdge()) {
+                calL = irVal[1];
+                calR = irVal[2];
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+            }
+            break;
+        }
 
-    sampleIR();
+        case LIVE: {
+            static uint32_t last = 0;
+            if (millis() - last > 100) { sampleIR(); oledBars(); last = millis(); }
+            if (buttonEdge()) {
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+            }
+            break;
+        }
 
-    bool wL = irVal[1] > WALL_SIDE;
-    bool wR = irVal[2] > WALL_SIDE;
-    bool wF = irVal[0] > WALL_FRONT || irVal[3] > WALL_FRONT;
+        case RUN: {
+            if (buttonEdge()) {
+                stopMotors();
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+                break;
+            }
 
-    if (wF) {
-        // Front wall — stop, exit run.
-        stopMotors();
-        running = false;
-        lastErr = 0; lastCorr = 0;
-        oledShow();
-        return;
-    }
+            sampleIR();
+            bool wL = irVal[1] > WALL_SIDE_PRESENT;
+            bool wR = irVal[2] > WALL_SIDE_PRESENT;
+            bool wF = irVal[0] > WALL_FRONT_STOP || irVal[3] > WALL_FRONT_STOP;
 
-    int  pwmL, pwmR;
-    if (wL || wR) {
-        // Centering: error = L - R. Positive = closer to L → steer right
-        // → reduce left wheel, boost right.
-        int  err  = irVal[1] - irVal[2];
-        float corr = pid.compute((float)err);
-        lastErr  = err;
-        lastCorr = (int)corr;
-        pwmL = constrain(BASE_PWM_WF - (int)corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        pwmR = constrain(BASE_PWM_WF + (int)corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-    } else {
-        // No walls — encoder balance only.
-        long tL = leftEnc.getTicks();
-        long tR = rTicks();
-        int  encErr = (int)(tL - tR);
-        lastErr  = encErr;
-        lastCorr = 0;
-        pwmL = constrain(BASE_PWM_WF - (int)(encErr * ENC_BAL_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        pwmR = constrain(BASE_PWM_WF + (int)(encErr * ENC_BAL_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-    }
+            if (wF) {
+                stopMotors();
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+                break;
+            }
 
-    leftMotor.drive(pwmL);
-    rightMotor.drive(pwmR);
+            // ── Sign-correct centering ─────────────────────────────────────
+            // err > 0 when robot is closer to RIGHT wall (irR > calR).
+            // Positive corr → slow L wheel, boost R wheel → turn LEFT (away from R wall).
+            int errR = wR ? (irVal[2] - calR) : 0;
+            int errL = wL ? (irVal[1] - calL) : 0;
+            int err  = errR - errL;
+            float corr = (wL || wR) ? pid.compute((float)err) : 0.0f;
 
-    // OLED at low rate, but only while running. Throttle to avoid I2C hogging.
-    static uint32_t lastOled = 0;
-    if (millis() - lastOled > 150) {
-        oledShow();
-        lastOled = millis();
+            int pwmL, pwmR;
+            if (wL || wR) {
+                pwmL = constrain(BASE_PWM_WF - (int)corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+                pwmR = constrain(BASE_PWM_WF + (int)corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+            } else {
+                // No walls — encoder balance.
+                long tL = leftEnc.getTicks();
+                long tR = rTicks();
+                int  encErr = (int)(tL - tR);
+                pwmL = constrain(BASE_PWM_WF - (int)(encErr * BALANCE_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+                pwmR = constrain(BASE_PWM_WF + (int)(encErr * BALANCE_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+            }
+
+            leftMotor.drive(pwmL);
+            rightMotor.drive(pwmR);
+
+            static uint32_t lastOled = 0;
+            if (millis() - lastOled > 150) {
+                oledRun(err, (int)corr, pwmL, pwmR);
+                lastOled = millis();
+            }
+            break;
+        }
     }
 }
