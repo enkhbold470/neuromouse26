@@ -60,17 +60,17 @@ constexpr bool    MOTOR_R_INV      = true;
 // ISR rising-edge on channel A: 14 PPR motor shaft × 30 gear = 420 ticks/output-rev.
 // Verify on hardware: TEST_ENC menu, spin output shaft one full revolution → ~420.
 constexpr float   WHEEL_DIAMETER   = 33.4f;   // mm, measured
-constexpr float   TICKS_PER_REV    = 420.0f;  // single-channel ISR rising edge
+constexpr float   TICKS_PER_REV    = 205.0f;  // empirical: motor-driven half-quad ~720/cell → 420/rev
 constexpr float   WHEEL_TRACK_MM   = 74.0f;   // mm center-to-center, measured
 constexpr float   BAT_VDIV_MULT    = 3.1197f;
 
 // Recalibrate empirically: spin each wheel one full rev, record L and R counts.
-constexpr float   RIGHT_ENC_SCALE  = 1.0f;    // start at 1.0 until calibrated
+constexpr float   RIGHT_ENC_SCALE  = 1.0f;    // empirical: L=R=360 per cell
 
 // ── Cell / turn geometry (derived) ───────────────────────────────────────────
 constexpr float   CELL_MM          = 180.0f;  // standard half-size micromouse cell
-constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV; // ~0.0624 mm
-constexpr long    TICKS_PER_CELL   = (long)(CELL_MM / MM_PER_TICK);  // ≈ 2886
+constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV; // ~0.512 mm
+constexpr long    TICKS_PER_CELL   = 350;  // ≈ 2886
 constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER)); // ≈ 931
 // PCNT 4× resolution: starting point ≈ 8× old ISR values (old 100 → ~800).
 // Tune: each ~40 ticks ≈ 10°. Left/right calibrate independently.
@@ -80,13 +80,13 @@ constexpr long    TURN_TICKS_90_R  = 410;   // measured: 800 = 180°, halved for
 // ── Drive tuning ──────────────────────────────────────────────────────────────
 // Uses BRAKE stop (both INs HIGH). Recalibrate TURN_TICKS_90 if TURN_PWM changes.
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 200;                        // ← master cruise speed (0–1023)
+constexpr int     DRIVE_PWM        = 140;                        // ← master cruise speed (0–1023)
 constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.80f);  // 70% of cruise for pivots
 constexpr int     DRIVE_PWM_MIN    = 100;                        // dynamic stall floor; 150 is static-only, motor won't stall mid-ramp
 // Coast comp: MIN=100 (dynamic) → shorter brake distance than static-stall MIN=150.
 // Estimate 115mm; COAST_COMP(115) + DECEL(60) = 175mm < 180mm cell.
 // Re-run moveCells(1): stops short → decrease COAST_COMP_MM; overshoots → increase.
-constexpr float   COAST_COMP_MM    = 100.0f;                     // measured: 3.5cm overshoot at 80mm → +35mm; tune empirically
+constexpr float   COAST_COMP_MM    = 70.0f;                      // measured: brake at DRIVE_PWM=140 → 70mm overshoot
 constexpr int     COAST_COMP_TICKS = (int)(COAST_COMP_MM / MM_PER_TICK); // ~1842 ticks
 // Bumped 60 → 130: needed to actually slow heavy robot from cruise to
 // DRIVE_PWM_MIN before brake. Otherwise multi-cell runs overshoot more with N.

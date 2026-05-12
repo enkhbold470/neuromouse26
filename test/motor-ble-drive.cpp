@@ -59,10 +59,8 @@ static void moveCells(int n) {
     while (true) {
         long tL = leftEnc.getTicks();
         long tR = rTicks();
-        long remL = target - tL;
-        long remR = target - tR;
-        bool lDone = (remL <= 0);
-        bool rDone = (remR <= 0);
+        bool lDone = (tL >= target);
+        bool rDone = (tR >= target);
 
         if (lDone && rDone) {
             stopMotors();
@@ -71,12 +69,10 @@ static void moveCells(int n) {
         }
 
         int err = (int)(tL - tR);
-        int baseL = lDone ? 0 : (remL > DECEL_TICKS ? DRIVE_PWM
-                        : (int)map(remL, 0, DECEL_TICKS, DRIVE_PWM_MIN, DRIVE_PWM));
-        int baseR = rDone ? 0 : (remR > DECEL_TICKS ? DRIVE_PWM
-                        : (int)map(remR, 0, DECEL_TICKS, DRIVE_PWM_MIN, DRIVE_PWM));
+        int baseL = lDone ? 0 : DRIVE_PWM;
+        int baseR = rDone ? 0 : DRIVE_PWM;
         int pwmL, pwmR;
-        if (!lDone && !rDone && remL > DECEL_TICKS && remR > DECEL_TICKS) {
+        if (!lDone && !rDone) {
             pwmL = constrain(baseL - (int)(err * BALANCE_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
             pwmR = constrain(baseR + (int)(err * BALANCE_KP), DRIVE_PWM_MIN, MOTOR_PWM_MAX);
         } else {

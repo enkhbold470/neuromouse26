@@ -39,7 +39,7 @@ public:
         else           { ledcSet(ch1, 0);     ledcSet(ch2, -speed); }
     }
 
-    void brake() { ledcSet(ch1, MOTOR_PWM_MAX); ledcSet(ch2, MOTOR_PWM_MAX); }
+    void brake() { ledcSet(ch1, DRIVE_PWM); ledcSet(ch2, DRIVE_PWM); }
     void coast() { ledcSet(ch1, 0);            ledcSet(ch2, 0);            }
 };
 
