@@ -18,11 +18,17 @@ public:
         : pinIN1(in1), pinIN2(in2), ch1(c1), ch2(c2), inverted(inv) {}
 
     void begin() {
+        // Hold IN pins LOW as plain GPIO first → no float, no kick.
+        pinMode(pinIN1, OUTPUT); digitalWrite(pinIN1, LOW);
+        pinMode(pinIN2, OUTPUT); digitalWrite(pinIN2, LOW);
+        // Configure LEDC channels and force duty 0 BEFORE attaching to pins,
+        // so the moment pin switches to LEDC it stays LOW (no stale duty kick).
         ledcSetup(ch1, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_BITS);
         ledcSetup(ch2, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_BITS);
+        ledcWrite(ch1, 0);
+        ledcWrite(ch2, 0);
         ledcAttachPin(pinIN1, ch1);
         ledcAttachPin(pinIN2, ch2);
-        coast();
     }
 
     void drive(int speed) {
