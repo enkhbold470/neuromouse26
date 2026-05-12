@@ -3,7 +3,10 @@
     "allow": [
       "Bash(git -C /mnt/c/Users/in-ryzen-machine/Documents/PlatformIO/Projects/micromouse26 log --oneline --all -- include/PinConfig.h)",
       "Bash(git -C /mnt/c/Users/in-ryzen-machine/Documents/PlatformIO/Projects/micromouse26 log --all --oneline)",
-      "Bash(git -C /mnt/c/Users/in-ryzen-machine/Documents/PlatformIO/Projects/micromouse26 show 1d704c6:include/PinConfig.h)"
+      "Bash(git -C /mnt/c/Users/in-ryzen-machine/Documents/PlatformIO/Projects/micromouse26 show 1d704c6:include/PinConfig.h)",
+      "Bash(command -v platformio)",
+      "Read(//Users/inky/.platformio/penv/bin/**)",
+      "Read(//usr/local/bin/**)"
     ]
   }
 }
