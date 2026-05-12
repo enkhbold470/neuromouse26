@@ -34,12 +34,19 @@ static void setStatus(const char* fmt, ...) {
 void encodersEnable()  { leftEnc.reset(); rightEnc.reset(); }
 void stopMotors()      { leftMotor.brake(); rightMotor.brake(); }
 
+// Mechanical keyswitch, no debounce cap. BUTTON_HOLD_MS in PinConfig.h.
 bool buttonEdge() {
-    static bool last = HIGH;
-    bool cur = digitalRead(BUTTON_1);
-    bool edge = (last == HIGH && cur == LOW);
-    last = cur;
-    return edge;
+    static unsigned long pressStart = 0;
+    static bool armed = true;
+    bool low = (digitalRead(BUTTON_1) == LOW);
+    unsigned long now = millis();
+    if (!low) { pressStart = 0; armed = true; return false; }
+    if (pressStart == 0) pressStart = now;
+    if (armed && (now - pressStart >= BUTTON_HOLD_MS)) {
+        armed = false;
+        return true;
+    }
+    return false;
 }
 
 // ── Motion (same as before but logs to statusLine) ────────────────────────────

@@ -37,6 +37,10 @@ constexpr uint8_t OLED_ADDR        = 0x3C;
 
 constexpr int     BUZZER_FREQ      = 4000;
 
+// Mechanical keyswitch debounce/hold time. Press must stay LOW this long
+// to register one event. 50 ms = snappy but bounce-safe.
+constexpr unsigned long BUTTON_HOLD_MS = 50;
+
 // ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
 // 500 Hz: audible whine but maximum torque — DRV8833 slower switching = more avg current.
 // 4 kHz: silent, smoother but weaker at same duty cycle.
@@ -76,7 +80,7 @@ constexpr long    TURN_TICKS_90_R  = 410;   // measured: 800 = 180°, halved for
 // ── Drive tuning ──────────────────────────────────────────────────────────────
 // Uses BRAKE stop (both INs HIGH). Recalibrate TURN_TICKS_90 if TURN_PWM changes.
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 250;                        // ← master cruise speed (0–1023)
+constexpr int     DRIVE_PWM        = 200;                        // ← master cruise speed (0–1023)
 constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.80f);  // 70% of cruise for pivots
 constexpr int     DRIVE_PWM_MIN    = 100;                        // dynamic stall floor; 150 is static-only, motor won't stall mid-ramp
 // Coast comp: MIN=100 (dynamic) → shorter brake distance than static-stall MIN=150.
