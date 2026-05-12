@@ -1,12 +1,16 @@
 // src/main.cpp — Micromouse26 flood-fill solver
 //
-// Motion stack matches test/wall-follow-encoder-count-cell.cpp:
-//   constant cruise DRIVE_PWM → tick target (TICKS_PER_CELL − COAST_COMP_TICKS)
-//   wall-follow PID centering when side walls present, encoder balance otherwise
-//   brake stop, coast residual ≈ COAST_COMP_MM
+// Motion: constant DRIVE_PWM cruise, IR wall-follow PID centering,
+// brake at (TICKS_PER_CELL × N − COAST_COMP_TICKS), gyro-based 90/180 turns.
 //
-// Menu (right wheel scroll, BUTTON_1 select):
-//   Calibrate    — capture L/R IR centers (centered in cell)
+// Turn policy: side-sensor wall→open mid-cell does NOT trigger early brake.
+// Robot completes the cell first, then at the cell boundary senseWalls()
+// re-samples (LF/RF + L/R). flood-fill on updated wall map picks bestDir.
+// Pivot uses MPU-6500 gz integration (see test/mpu6500.cpp for tuning).
+//
+// Menu:
+//   Cal IR       — capture LF/L/R/RF in dead-end (centered)
+//   Cal Gyro     — capture gz bias (300 samples, keep STILL)
 //   Test Motor   — short fwd/rev each motor
 //   Test Encoder — live L/R tick counts
 //   Test IR      — live 4-bar graph
@@ -24,13 +28,15 @@
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
 // ── Maze geometry ────────────────────────────────────────────────────────────
-constexpr uint8_t MAZE_ROWS = 6;
-constexpr uint8_t MAZE_COLS = 3;
-constexpr uint8_t GOAL_ROW  = 5;
+constexpr uint8_t MAZE_ROWS = 6; // south to north 
+constexpr uint8_t MAZE_COLS = 3; // west to east
+constexpr uint8_t GOAL_ROW  = 2; 
 constexpr uint8_t GOAL_COL  = 1;
 
-// ── IR thresholds (post-calibration: no-wall ~0, wall ~400–550) ──────────────
-constexpr int WALL_SIDE_PRESENT = 400;
+// ── IR thresholds (calibrated: no-wall ~0, wall ~400–550) ────────────────────
+// Sensors: L/R perpendicular to side walls, LF/RF angled forward to catch
+// front wall. wallFront() = LF or RF over threshold.
+constexpr int WALL_SIDE_PRESENT = 2000;
 constexpr int WALL_FRONT_STOP   = 1500;
 
 // ── Hardware ─────────────────────────────────────────────────────────────────
@@ -66,13 +72,23 @@ static int readIR(const IRPair& p) {
 }
 static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
 
-static inline bool wallFront() { return irVal[0] > WALL_FRONT_STOP || irVal[3] > WALL_FRONT_STOP; }
-static inline bool wallLeft()  { return irVal[1] > WALL_SIDE_PRESENT; }
-static inline bool wallRight() { return irVal[2] > WALL_SIDE_PRESENT; }
+// ── Calibration (capture in dead-end: all 4 walls present, centered) ─────────
+// Defaults from repeated empirical calibration of this hardware.
+static int calLF = 3152;
+static int calL  = 1718;
+static int calR  = 2209;
+static int calRF = 2339;
 
-// ── Calibration (L/R wall reference) ─────────────────────────────────────────
-static int calL = L_CENTER;
-static int calR = R_CENTER;
+// Fixed thresholds from empirical readings:
+//   side wall L/R: present > 1000, absent < 1000
+//   front wall LF/RF: present > 1500 (typically 3000+ close range)
+constexpr int WALL_SIDE_THRESH  = 1000;
+constexpr int WALL_FRONT_THRESH = 1500;
+static inline bool wallFront() {
+    return irVal[0] > WALL_FRONT_THRESH || irVal[3] > WALL_FRONT_THRESH;
+}
+static inline bool wallLeft()  { return irVal[1] > WALL_SIDE_THRESH; }
+static inline bool wallRight() { return irVal[2] > WALL_SIDE_THRESH; }
 
 // ── Wall-follow PID ──────────────────────────────────────────────────────────
 constexpr float CENTER_KP   = 0.12f;
@@ -98,16 +114,125 @@ struct PID {
     void reset() { integral = 0; prevError = 0; prevUs = 0; }
 } pid;
 
+// ── Robot pose (declared early — driveChain mutates) ─────────────────────────
+uint8_t robotRow = 0;
+uint8_t robotCol = 0;
+AbsDir  robotHeading = DIR_NORTH;
+
+// ── Crash report (set by driveChain on abort, shown in CRASH state) ──────────
+static bool    crashFlag = false;
+static int     crashIR[4] = {0,0,0,0};
+static uint8_t crashRow = 0, crashCol = 0;
+static AbsDir  crashHeading = DIR_NORTH;
+static const char* crashReason = "";
+
+// ── MPU-6500 gyro (yaw integration for pivot turns) ──────────────────────────
+#define MPU_ADDR          0x68
+#define REG_WHO_AM_I      0x75
+#define REG_PWR_MGMT_1    0x6B
+#define REG_GYRO_CFG      0x1B
+#define REG_ACCEL_CFG     0x1C
+#define REG_ACCEL_XOUT_H  0x3B
+#define GYRO_SCALE        131.0f
+
+struct ImuRaw { int16_t ax, ay, az, temp, gx, gy, gz; };
+
+static float gyroBiasZ = 0.0f;
+static float yaw = 0.0f;
+static unsigned long lastImuUs = 0;
+
+constexpr float TURN_OVERSHOOT_90  = 10.0f;
+constexpr float TURN_OVERSHOOT_180 = 20.0f;
+
+static bool mpuWrite(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(reg); Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+static bool mpuRead(uint8_t reg, uint8_t* buf, uint8_t len) {
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    Wire.requestFrom((uint8_t)MPU_ADDR, len);
+    for (uint8_t i = 0; i < len; i++) {
+        if (!Wire.available()) return false;
+        buf[i] = Wire.read();
+    }
+    return true;
+}
+static int16_t imu_to16(uint8_t hi, uint8_t lo) { return (int16_t)((hi << 8) | lo); }
+
+static bool imuReadAll(ImuRaw& d) {
+    uint8_t b[14];
+    if (!mpuRead(REG_ACCEL_XOUT_H, b, 14)) return false;
+    d.ax=imu_to16(b[0],b[1]); d.ay=imu_to16(b[2],b[3]); d.az=imu_to16(b[4],b[5]);
+    d.temp=imu_to16(b[6],b[7]);
+    d.gx=imu_to16(b[8],b[9]); d.gy=imu_to16(b[10],b[11]); d.gz=imu_to16(b[12],b[13]);
+    return true;
+}
+
+static void updateYaw() {
+    ImuRaw d;
+    if (!imuReadAll(d)) return;
+    unsigned long now = micros();
+    float dt = (lastImuUs == 0) ? 0.001f : (now - lastImuUs) / 1e6f;
+    if (dt > 0.05f) dt = 0.05f;
+    lastImuUs = now;
+    float gz = d.gz / GYRO_SCALE - gyroBiasZ;
+    if (fabsf(gz) < 0.05f) gz = 0;
+    yaw += gz * dt;
+}
+
+static inline float turnOvershootDeg(float target) {
+    float a = fabsf(target);
+    float slope = (TURN_OVERSHOOT_180 - TURN_OVERSHOOT_90) / 90.0f;
+    return TURN_OVERSHOOT_90 + slope * (a - 90.0f);
+}
+
 // ── Motion ───────────────────────────────────────────────────────────────────
 void stopMotors()    { leftMotor.brake(); rightMotor.brake(); }
 void encodersReset() { leftEnc.reset(); rightEnc.reset(); }
 
-// Drive one cell: constant DRIVE_PWM cruise, wall-follow PID centering or
-// encoder balance, brake at (TICKS_PER_CELL − COAST_COMP_TICKS).
-void moveCell() {
-    long target = (long)TICKS_PER_CELL - COAST_COMP_TICKS;
+// Gyro-based pivot. Right=neg yaw, Left=pos yaw. Brakes before target by
+// turnOvershootDeg(target), coast lands on target. Settles 200ms post-brake.
+void doTurn(float targetDeg) {
+    yaw = 0;
+    lastImuUs = micros();
+    float overshoot = turnOvershootDeg(targetDeg);
+    float stopAt = (targetDeg > 0) ? (targetDeg - overshoot)
+                                   : (targetDeg + overshoot);
+    int dir = (targetDeg > 0) ? 1 : -1;
+    leftMotor.drive(-dir * TURN_PWM);
+    rightMotor.drive( dir * TURN_PWM);
+    unsigned long t0 = millis();
+    while (true) {
+        updateYaw();
+        if (targetDeg > 0 ? yaw >= stopAt : yaw <= stopAt) break;
+        if (millis() - t0 > 3000) break;
+    }
+    stopMotors();
+    unsigned long settleStart = millis();
+    while (millis() - settleStart < 200) { updateYaw(); }
+}
+
+// Forward declarations for chained-run logic.
+void senseWalls();
+void rotateToHeading(AbsDir target);
+
+// Drive forward, chaining as many same-heading cells as possible without
+// stopping. On each cell-boundary crossing: sense, flood, decide. If next
+// best dir == heading, extend target by another cell. Else brake and return.
+// On return, robotRow/robotCol have been advanced to the cell the robot
+// physically occupies (last cell entered). Caller pivots if needed.
+void driveChain() {
     encodersReset();
     pid.reset();
+    long cellBoundary = TICKS_PER_CELL;
+    bool front = false;
+    // Side-wall state at last decision point. Wall→open transition signals
+    // opening on that side → brake + advance + replan.
+    bool prevWL = wallLeft();
+    bool prevWR = wallRight();
     unsigned long startMs = millis();
 
     while (true) {
@@ -115,14 +240,58 @@ void moveCell() {
         long tR  = rTicks();
         long avg = (tL + tR) / 2;
 
-        if (avg >= target) { stopMotors(); return; }
-
         sampleIR();
-        if (wallFront()) { stopMotors(); return; }
-
+        front = wallFront();
         bool wL = wallLeft();
         bool wR = wallRight();
 
+        // Mid-cell: never brake. Complete cell first. Side-sensor wall→open
+        // is only acted on at cell boundary via senseWalls + flood.
+
+        // Cell-boundary crossing: advance position + replan.
+        if (avg >= cellBoundary) {
+            robotRow += DIR_DR[robotHeading];
+            robotCol += DIR_DC[robotHeading];
+            maze.visited[robotRow][robotCol] = true;
+
+            // Brake first so subsequent IR sample isn't motion-noisy. If
+            // decision is "continue straight", we'll release brake. Cost of
+            // brake-then-release ≈ 100ms of stopped time per cell — only paid
+            // when actually crossing into a new cell.
+            stopMotors();
+            delay(100);
+            sampleIR();
+            senseWalls();
+            maze.floodFill();
+
+            if (maze.isGoal(robotRow, robotCol)) {
+                return;
+            }
+            uint8_t bd;
+            AbsDir best = maze.bestDirectionBiased(robotRow, robotCol, robotHeading, bd);
+            if (bd == FLOOD_INFINITY || best != robotHeading) {
+                return;  // RUN handles turn/no-path
+            }
+            // Continue straight: extend target, refresh PID, restart drive.
+            cellBoundary += TICKS_PER_CELL;
+            prevWL = wallLeft();
+            prevWR = wallRight();
+            pid.reset();
+        }
+
+        // No mid-cell front brake — LF/RF cone sees next cell's wall early
+        // and triggers spurious stop. Only imminent-crash threshold (both
+        // sensors very close = ≥2500) brakes mid-cell.
+        if (irVal[0] > 3500 && irVal[3] > 3500) {
+            stopMotors();
+            crashFlag    = true;
+            crashRow     = robotRow;
+            crashCol     = robotCol;
+            crashHeading = robotHeading;
+            for (int i = 0; i < 4; i++) crashIR[i] = irVal[i];
+            crashReason  = "front imminent";
+            return;
+        }
         int errR = wR ? (irVal[2] - calR) : 0;
         int errL = wL ? (irVal[1] - calL) : 0;
         int err  = errR - errL;
@@ -140,49 +309,25 @@ void moveCell() {
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
-        if (millis() - startMs > (unsigned long)TIMEOUT_MS) { stopMotors(); return; }
+        if (millis() - startMs > (unsigned long)(TIMEOUT_MS * 10)) { stopMotors(); return; }
     }
 }
 
-void turnRight() {
-    encodersReset();
-    leftMotor.drive(TURN_PWM);
-    rightMotor.drive(-TURN_PWM);
-    unsigned long t = millis();
-    while (leftEnc.getTicks() < TURN_TICKS_90_R) {
-        if (millis() - t > 2000) break;
-    }
-    stopMotors();
-}
-
-void turnLeft() {
-    encodersReset();
-    leftMotor.drive(-TURN_PWM);
-    rightMotor.drive(TURN_PWM);
-    unsigned long t = millis();
-    while (rTicks() < TURN_TICKS_90_L) {
-        if (millis() - t > 2000) break;
-    }
-    stopMotors();
-}
-
-void turnAround() { turnRight(); delay(150); turnRight(); }
+void turnRight()  { doTurn(-90); }    // R = yaw negative
+void turnLeft()   { doTurn(+90); }
+void turnAround() { doTurn(-180); }
 
 // ── State + menu ─────────────────────────────────────────────────────────────
-enum State { IDLE, CAL, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL };
+enum State { IDLE, CAL, CAL_GYRO, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL, CRASH };
 State robotState = IDLE;
 
-enum MenuItem { M_CAL = 0, M_TEST_MOTOR, M_TEST_ENC, M_TEST_IR, M_START, M_COUNT };
+enum MenuItem { M_CAL = 0, M_CAL_GYRO, M_TEST_MOTOR, M_TEST_ENC, M_TEST_IR, M_START, M_COUNT };
 static const char* MENU_LABELS[M_COUNT] = {
-    "Calibrate", "Test Motor", "Test Encoder", "Test IR", "START"
+    "Cal IR", "Cal Gyro", "Test Motor", "Test Encoder", "Test IR", "START"
 };
 static int  menuSel    = M_START;
 static long menuEncRef = 0;
 constexpr long ENC_PER_MENU_STEP = 80;
-
-uint8_t robotRow = 0;
-uint8_t robotCol = 0;
-AbsDir  robotHeading = DIR_NORTH;
 
 // Mechanical keyswitch debounce — BUTTON_HOLD_MS in PinConfig.h.
 bool buttonEdge() {
@@ -231,25 +376,54 @@ void oledMenu() {
     oled.drawHLine(0, 64 - 10, 128);
     oled.setFont(u8g2_font_5x7_tf);
     char buf[24];
-    snprintf(buf, sizeof(buf), "cal L%d R%d", calL, calR);
+    snprintf(buf, sizeof(buf), "gz%+.2f LF%d L%d R%d RF%d", gyroBiasZ, calLF, calL, calR, calRF);
     oled.drawStr(0, 63, buf);
     oled.sendBuffer();
 }
 
-void oledCal() {
+void oledGyroCal(int prog, int total) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x12_tf);
-    oled.drawStr(0, 10, "CALIBRATE");
+    oled.drawStr(0, 10, "CAL GYRO");
     oled.drawHLine(0, 12, 128);
+    oled.setFont(u8g2_font_8x13B_tf);
+    oled.drawStr(0, 32, "STILL");
+    char buf[24]; snprintf(buf, sizeof(buf), "%d/%d", prog, total);
+    oled.drawStr(0, 50, buf);
+    oled.sendBuffer();
+}
+
+void calibrateGyro() {
+    constexpr int N = 300;
+    float sum = 0;
+    int good = 0;
+    for (int i = 0; i < N; i++) {
+        ImuRaw d;
+        if (imuReadAll(d)) { sum += d.gz / GYRO_SCALE; good++; }
+        if ((i & 0x3F) == 0) oledGyroCal(i, N);
+        delay(2);
+    }
+    gyroBiasZ = (good > 0) ? sum / good : 0;
+    yaw = 0;
+    lastImuUs = micros();
+}
+
+void oledCal() {
+    oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
-    oled.drawStr(0, 24, "Center robot in cell");
+    oled.drawStr(0, 8, "CAL: dead-end");
+    oled.drawHLine(0, 10, 128);
     char buf[24];
-    snprintf(buf, sizeof(buf), "L now %4d (cal %d)", irVal[1], calL);
-    oled.drawStr(0, 36, buf);
-    snprintf(buf, sizeof(buf), "R now %4d (cal %d)", irVal[2], calR);
-    oled.drawStr(0, 48, buf);
+    snprintf(buf, sizeof(buf), "LF %4d  c%d", irVal[0], calLF);
+    oled.drawStr(0, 22, buf);
+    snprintf(buf, sizeof(buf), "L  %4d  c%d", irVal[1], calL);
+    oled.drawStr(0, 34, buf);
+    snprintf(buf, sizeof(buf), "R  %4d  c%d", irVal[2], calR);
+    oled.drawStr(0, 46, buf);
+    snprintf(buf, sizeof(buf), "RF %4d  c%d", irVal[3], calRF);
+    oled.drawStr(0, 58, buf);
     oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(0, 63, "btn = save & exit");
+    oled.drawStr(0, 64, "btn=save");
     oled.sendBuffer();
 }
 
@@ -310,6 +484,39 @@ void oledRunStatus(const char* msg) {
     snprintf(buf, sizeof(buf), "h%d d%u", (int)robotHeading, maze.flood[robotRow][robotCol]);
     oled.drawStr(0, 44, buf);
     if (msg) oled.drawStr(0, 62, msg);
+    oled.sendBuffer();
+}
+
+// Crash screen: 128x64 layout
+//   row1: "CRASH" + reason
+//   row2: cell r=X c=Y h=N
+//   row3: LF#### L####
+//   row4: RF#### R####
+//   row5: open L:0 R:1 F:1
+//   row6: btn=back
+void oledCrash() {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "CRASH %s", crashReason);
+    oled.drawStr(0, 8, buf);
+    oled.drawHLine(0, 10, 128);
+
+    snprintf(buf, sizeof(buf), "r=%u c=%u h=%d", crashRow, crashCol, (int)crashHeading);
+    oled.drawStr(0, 20, buf);
+    snprintf(buf, sizeof(buf), "LF%4d L%4d", crashIR[0], crashIR[1]);
+    oled.drawStr(0, 30, buf);
+    snprintf(buf, sizeof(buf), "RF%4d R%4d", crashIR[3], crashIR[2]);
+    oled.drawStr(0, 40, buf);
+
+    bool oL = crashIR[1] < WALL_SIDE_THRESH;
+    bool oR = crashIR[2] < WALL_SIDE_THRESH;
+    bool wF = crashIR[0] > WALL_FRONT_THRESH || crashIR[3] > WALL_FRONT_THRESH;
+    snprintf(buf, sizeof(buf), "openL%d openR%d F%d", oL, oR, wF);
+    oled.drawStr(0, 50, buf);
+
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 63, "btn=back");
     oled.sendBuffer();
 }
 
@@ -382,6 +589,18 @@ void setup() {
     oled.setI2CAddress(OLED_ADDR << 1);
     oled.begin();
 
+    // MPU-6500 on same I2C bus.
+    uint8_t who = 0;
+    mpuRead(REG_WHO_AM_I, &who, 1);
+    mpuWrite(REG_PWR_MGMT_1, 0x00); delay(50);
+    mpuWrite(REG_GYRO_CFG,   0x00);
+    mpuWrite(REG_ACCEL_CFG,  0x00);
+    lastImuUs = micros();
+    Serial.printf("[INIT] MPU WHO=0x%02X\n", who);
+
+    // Auto-calibrate gyro at boot (robot must be still).
+    calibrateGyro();
+
     setupMaze();
     menuEncRef = rightEnc.getTicks();
     oledMenu();
@@ -406,6 +625,7 @@ void loop() {
             if (buttonEdge()) {
                 switch (menuSel) {
                     case M_CAL:        sampleIR(); oledCal(); robotState = CAL; break;
+                    case M_CAL_GYRO:   calibrateGyro(); oledMenu(); break;
                     case M_TEST_MOTOR: robotState = TEST_MOTOR; break;
                     case M_TEST_ENC:   leftEnc.reset(); rightEnc.reset();
                                        oledEncoderTest();
@@ -426,8 +646,10 @@ void loop() {
             static uint32_t last = 0;
             if (millis() - last > 100) { sampleIR(); oledCal(); last = millis(); }
             if (buttonEdge()) {
-                calL = irVal[1];
-                calR = irVal[2];
+                calLF = irVal[0];
+                calL  = irVal[1];
+                calR  = irVal[2];
+                calRF = irVal[3];
                 menuEncRef = rightEnc.getTicks();
                 oledMenu();
                 robotState = IDLE;
@@ -480,22 +702,19 @@ void loop() {
             uint8_t bestDist;
             AbsDir best = maze.bestDirectionBiased(robotRow, robotCol, robotHeading, bestDist);
             if (bestDist == FLOOD_INFINITY) {
-                Serial.println("[ERR] no path");
                 stopMotors();
-                oledRunStatus("no path");
-                delay(800);
-                menuEncRef = rightEnc.getTicks();
-                oledMenu();
-                robotState = IDLE;
+                crashFlag = true;
+                crashRow = robotRow; crashCol = robotCol;
+                crashHeading = robotHeading;
+                for (int i = 0; i < 4; i++) crashIR[i] = irVal[i];
+                crashReason = "no path";
+                robotState = CRASH;
                 break;
             }
 
-            oledRunStatus("step");
             rotateToHeading(best);
-            moveCell();
-            robotRow += DIR_DR[robotHeading];
-            robotCol += DIR_DC[robotHeading];
-            delay(CELL_PAUSE_MS);
+            driveChain();   // chains straight cells, updates robotRow/Col
+            if (crashFlag) { robotState = CRASH; }
             break;
         }
 
@@ -503,6 +722,19 @@ void loop() {
             stopMotors();
             oledRunStatus("GOAL");
             if (buttonEdge()) {
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                robotState = IDLE;
+            }
+            break;
+        }
+
+        case CRASH: {
+            static bool drawn = false;
+            if (!drawn) { oledCrash(); drawn = true; }
+            if (buttonEdge()) {
+                crashFlag = false;
+                drawn = false;
                 menuEncRef = rightEnc.getTicks();
                 oledMenu();
                 robotState = IDLE;
