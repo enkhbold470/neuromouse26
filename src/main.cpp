@@ -145,6 +145,14 @@ static unsigned long lastImuUs = 0;
 constexpr float TURN_OVERSHOOT_90  = 10.0f;
 constexpr float TURN_OVERSHOOT_180 = 20.0f;
 
+// Front-wall safety derived from calLF/calRF (dead-end center reading).
+// MID_BRAKE_FRAC: mid-cell brake fires when LF or RF exceeds this fraction
+// of cal — prevents bump when side opens and robot crosses cell w/o lateral
+// reference. TURN_CLEAR_FRAC: must be below to start pivot (nose 50mm fwd
+// of axle needs swing clearance). Reverse-pulse until safe.
+constexpr float MID_BRAKE_FRAC  = 0.45f;
+constexpr float TURN_CLEAR_FRAC = 0.55f;
+
 static bool mpuWrite(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(reg); Wire.write(val);
@@ -289,10 +297,19 @@ void driveChain() {
             return;
         }
 
+        // Side-open bump guard: if a front sensor crosses MID_BRAKE_FRAC of
+        // cal mid-cell (typical when one side is open and IR PID has no
+        // lateral reference), brake NOW and treat as cell-boundary reached.
+        // Requires >⅓ cell already traveled to avoid spurious early stops.
+        int midBrakeLF = (int)(calLF * MID_BRAKE_FRAC);
+        int midBrakeRF = (int)(calRF * MID_BRAKE_FRAC);
+        bool frontClose = (irVal[0] > midBrakeLF || irVal[3] > midBrakeRF);
+        bool pastThird  = (avg > TICKS_PER_CELL / 3);
+
         // Cell-boundary crossing: stop first, then advance position + replan.
-        if (avg >= cellBoundary) {
-            // stopMotors();
-            // delay(100);
+        if (avg >= cellBoundary || (frontClose && pastThird)) {
+            stopMotors();
+            delay(100);
             robotRow += DIR_DR[robotHeading];
             robotCol += DIR_DC[robotHeading];
             maze.visited[robotRow][robotCol] = true;
@@ -353,7 +370,13 @@ void driveChain() {
 
 void turnRight()  { doTurn(-90); }    // R = yaw negative
 void turnLeft()   { doTurn(+90); }
-void turnAround() { doTurn(-180); }
+// 180 single-shot consistently undershoots/overshoots — split into two 90s
+// with brief settle. Same direction (CW) keeps yaw sign consistent.
+void turnAround() {
+    doTurn(-180);
+    // delay(120);
+    // doTurn(-90);
+}
 
 // ── State + menu ─────────────────────────────────────────────────────────────
 enum State { IDLE, CAL, CAL_GYRO, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL, CRASH };
@@ -580,8 +603,29 @@ void senseWalls() {
     maze.setWall(robotRow, robotCol, rightDir,     wallRight());
 }
 
+// Reverse-pulse if front wall too close for safe pivot. Threshold derived
+// from calLF/calRF — nose (sensor) is 50mm fwd of axle, needs clearance to
+// arc through 90°. Below TURN_CLEAR_FRAC × cal = safe.
+void ensureFrontClearance() {
+    int safeLF = (int)(calLF * TURN_CLEAR_FRAC);
+    int safeRF = (int)(calRF * TURN_CLEAR_FRAC);
+    sampleIR();
+    if (irVal[0] < safeLF && irVal[3] < safeRF) return;
+    leftMotor.drive(-DRIVE_PWM);
+    rightMotor.drive(-DRIVE_PWM);
+    unsigned long t0 = millis();
+    while (millis() - t0 < 300) {
+        sampleIR();
+        if (irVal[0] < safeLF - 150 && irVal[3] < safeRF - 150) break;
+    }
+    stopMotors();
+    delay(60);
+}
+
 void rotateToHeading(AbsDir target) {
     int diff = ((int)target - (int)robotHeading + 4) % 4;
+    if (diff == 0) return;
+    ensureFrontClearance();
     if      (diff == 1) { turnRight();  robotHeading = (AbsDir)(((int)robotHeading + 1) % 4); }
     else if (diff == 3) { turnLeft();   robotHeading = (AbsDir)(((int)robotHeading + 3) % 4); }
     else if (diff == 2) { turnAround(); robotHeading = (AbsDir)(((int)robotHeading + 2) % 4); }
@@ -741,12 +785,23 @@ void loop() {
             uint8_t bestDist;
             AbsDir best = maze.bestDirectionBiased(robotRow, robotCol, robotHeading, bestDist);
             if (bestDist == FLOOD_INFINITY) {
+                // Recovery: turnAround once, re-sense, re-flood. Pro mice
+                // never crash on first no-path — assume wall mis-mark.
+                static int noPathRetries = 0;
+                if (noPathRetries < 2) {
+                    noPathRetries++;
+                    stopMotors();
+                    turnAround();
+                    robotHeading = (AbsDir)(((int)robotHeading + 2) % 4);
+                    break;  // re-enter RUN, sense again with new heading
+                }
+                noPathRetries = 0;
                 stopMotors();
                 crashFlag = true;
                 crashRow = robotRow; crashCol = robotCol;
                 crashHeading = robotHeading;
                 for (int i = 0; i < 4; i++) crashIR[i] = irVal[i];
-                crashReason = "no path";
+                crashReason = "no path x3";
                 crashDrawn = false;
                 robotState = CRASH;
                 break;
