@@ -389,10 +389,8 @@ void loop() {
                 break;
             }
 
-            // Per-cell decel ramp on the remaining portion of the LAST cell.
-            long rem = runTarget - avg;
-            int  base = (rem > DECEL_TICKS) ? BASE_PWM_WF
-                       : (int)map(rem, 0, DECEL_TICKS, DRIVE_PWM_MIN, BASE_PWM_WF);
+            // Constant cruise — no decel ramp, no brake. Pure coast stop.
+            int base = BASE_PWM_WF;
 
             // Centering correction.
             int errR = wR ? (irVal[2] - calR) : 0;
