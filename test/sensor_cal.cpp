@@ -1,50 +1,99 @@
+// test/sensor_cal.cpp — pro-style IR sampler
+// FreeRTOS task on Core 0 scans all 4 sensors continuously.
+// Main loop (Core 1) just prints latest values @ 20 Hz — no blocking.
+//
+// Settle time tightened to 80µs (SFH4545 rise ≈10µs, BPV23 fall ≈30µs).
+// Full scan ≈ 4 × (2 × analogRead + 80µs) ≈ 800µs → ~1.2 kHz per sensor.
+//
+// delta = max(0, amb - lit). Closer wall → bigger value.
+// Order: L, LF, RF, R. Cmd 'r' resets peaks.
+
 #include <Arduino.h>
 #include "../include/PinConfig.h"
 
-// Physics: We must subtract ambient light to see the "true" wall signal.
-int getTrueSignal(int rxPin, int emitPin) {
-    int ambient = analogRead(rxPin);
-    digitalWrite(emitPin, HIGH);
-    delayMicroseconds(50); // Physics: LED rise time
-    int lit = analogRead(rxPin);
-    digitalWrite(emitPin, LOW);
-    return max(0, lit - ambient);
+struct IRPair { const char* name; uint8_t emit, rx; };
+
+static IRPair PAIRS[4] = {
+    { "L ", EMIT_L,  RX_L  },
+    { "LF", EMIT_LF, RX_LF },
+    { "RF", EMIT_RF, RX_RF },
+    { "R ", EMIT_R,  RX_R  },
+};
+
+// Shared between sampler task and printer. volatile = no caching across cores.
+volatile int      irVal[4]   = {0,0,0,0};
+volatile int      irMin[4]   = {INT_MAX,INT_MAX,INT_MAX,INT_MAX};
+volatile int      irMax[4]   = {0,0,0,0};
+volatile uint32_t scanCount  = 0;
+volatile bool     wantReset  = false;
+
+static inline int readDelta(const IRPair& p) {
+    digitalWrite(p.emit, LOW);
+    delayMicroseconds(80);
+    int amb = analogRead(p.rx);
+    digitalWrite(p.emit, HIGH);
+    delayMicroseconds(80);
+    int lit = analogRead(p.rx);
+    digitalWrite(p.emit, LOW);
+    int d = amb - lit;
+    return d < 0 ? 0 : d;
+}
+
+// Sampler task — Core 0, max rate
+void samplerTask(void*) {
+    for (;;) {
+        if (wantReset) {
+            for (int i = 0; i < 4; i++) { irMin[i] = INT_MAX; irMax[i] = 0; }
+            scanCount = 0;
+            wantReset = false;
+        }
+        for (int i = 0; i < 4; i++) {
+            int v = readDelta(PAIRS[i]);
+            irVal[i] = v;
+            if (v < irMin[i]) irMin[i] = v;
+            if (v > irMax[i]) irMax[i] = v;
+        }
+        scanCount++;
+        // No vTaskDelay — sensors need fastest scan. Yield via taskYIELD() so
+        // FreeRTOS housekeeping still runs on Core 0.
+        taskYIELD();
+    }
 }
 
 void setup() {
     Serial.begin(115200);
-    while(!Serial); // Wait for USB
-    
-    // Init IR hardware
-    pinMode(EMIT_LF, OUTPUT);
-    pinMode(EMIT_L45, OUTPUT);
-    pinMode(EMIT_R45, OUTPUT);
-    pinMode(EMIT_RF, OUTPUT);
-    
-    Serial.println("\n--- MICROMOUSE SENSOR CALIBRATION TOOL ---");
-    Serial.println("Physics Law: Values are Differential (Lit - Ambient)");
-    Serial.println("1. Place robot in CENTER of cell for L45/R45 centers.");
-    Serial.println("2. Place robot nose 1cm from wall for LF/RF thresholds.");
-    Serial.println("-------------------------------------------\n");
-    delay(2000);
+    delay(800);
+    for (auto& p : PAIRS) {
+        pinMode(p.emit, OUTPUT);
+        digitalWrite(p.emit, LOW);
+        pinMode(p.rx, INPUT);
+    }
+    analogReadResolution(12);
+
+    Serial.println("\n--- IR SENSOR CAL (Core0 sampler) ---");
+    Serial.println("Format: cur (min/max)  rate=Hz  — closer wall = bigger");
+    Serial.println("Cmd: 'r' reset stats");
+    for (auto& p : PAIRS)
+        Serial.printf("  %s emit=GPIO%-2d rx=GPIO%-2d\n", p.name, p.emit, p.rx);
+    Serial.println("-------------------------------------\n");
+
+    xTaskCreatePinnedToCore(samplerTask, "ir-samp", 4096, nullptr, 5, nullptr, 0);
 }
 
 void loop() {
-    int lf  = getTrueSignal(RX_LF,  EMIT_LF);
-    int l45 = getTrueSignal(RX_L45, EMIT_L45);
-    int r45 = getTrueSignal(RX_R45, EMIT_R45);
-    int rf  = getTrueSignal(RX_RF,  EMIT_RF);
+    if (Serial.available() && Serial.read() == 'r') wantReset = true;
 
-    // Print values in a format easy to copy into PinConfig.h
-    Serial.printf("LF:%-4d  L45:%-4d  R45:%-4d  RF:%-4d\n", lf, l45, r45, rf);
-    
-    // Physics Check: If any value is < 10, the sensor might be unplugged or LED is dead
-    if (lf < 10)  Serial.print("[WARN: LF LOW] ");
-    if (l45 < 10) Serial.print("[WARN: L45 LOW] ");
-    if (r45 < 10) Serial.print("[WARN: R45 LOW] ");
-    if (rf < 10)  Serial.print("[WARN: RF LOW] ");
-    
-    if (lf < 10 || l45 < 10 || r45 < 10 || rf < 10) Serial.println();
-
-    delay(200);
+    static uint32_t lastCnt = 0;
+    static uint32_t lastMs  = 0;
+    uint32_t now = millis();
+    if (now - lastMs >= 100) {
+        uint32_t cnt  = scanCount;
+        float    hz   = (cnt - lastCnt) * 1000.0f / (now - lastMs);
+        lastCnt = cnt; lastMs = now;
+        for (int i = 0; i < 4; i++) {
+            Serial.printf("%s %4d (%4d/%4d) ",
+                          PAIRS[i].name, irVal[i], irMin[i], irMax[i]);
+        }
+        Serial.printf(" %.0fHz n=%lu\n", hz, (unsigned long)cnt);
+    }
 }

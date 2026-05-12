@@ -15,15 +15,15 @@ constexpr uint8_t ENC_L_B          = 39;
 constexpr uint8_t ENC_R_A          = 21;
 constexpr uint8_t ENC_R_B          = 14;
 
+constexpr uint8_t RX_L            = 10;
 constexpr uint8_t RX_LF            = 4;
-constexpr uint8_t RX_L45           = 6;
-constexpr uint8_t RX_R45           = 2;
 constexpr uint8_t RX_RF            = 1;
+constexpr uint8_t RX_R            = 7;
 
+constexpr uint8_t EMIT_L          = 47;
 constexpr uint8_t EMIT_LF          = 13;
-constexpr uint8_t EMIT_L45         = 45;
-constexpr uint8_t EMIT_R45         = 12;
-constexpr uint8_t EMIT_RF          = 11;
+constexpr uint8_t EMIT_RF          = 46;
+constexpr uint8_t EMIT_R          = 11;
 
 constexpr uint8_t BUTTON_1         = 42;
 constexpr uint8_t BUZZER_PIN       = 40;
@@ -85,10 +85,10 @@ constexpr int     BASE_PWM         = DRIVE_PWM;
 
 // ── IR thresholds (calibrated 2026-05-07, dead-end centered, all 4 walls) ─────
 // irRead() is ambient-subtracted: no-wall ~0, wall ~400–550. Threshold=50 is safe.
-constexpr int     L45_CENTER       = 421;
-constexpr int     R45_CENTER       = 504;
-constexpr int     L45_THRESH       = 450;
-constexpr int     R45_THRESH       = 450;
+constexpr int     L_CENTER         = 421;
+constexpr int     R_CENTER         = 504;
+constexpr int     L_THRESH         = 450;
+constexpr int     R_THRESH         = 450;
 constexpr int     LF_THRESH        = 450;
 constexpr int     RF_THRESH        = 450;
 
