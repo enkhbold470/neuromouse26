@@ -81,7 +81,7 @@ constexpr long    TURN_TICKS_90_R  = 410;   // measured: 800 = 180°, halved for
 // Uses BRAKE stop (both INs HIGH). Recalibrate TURN_TICKS_90 if TURN_PWM changes.
 constexpr int     MOTOR_PWM_MAX    = 1023;
 constexpr int     DRIVE_PWM        = 140;                        // ← master cruise speed (0–1023)
-constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.80f);  // 70% of cruise for pivots
+constexpr int     TURN_PWM         = (int)(DRIVE_PWM);  // 70% of cruise for pivots
 constexpr int     DRIVE_PWM_MIN    = 100;                        // dynamic stall floor; 150 is static-only, motor won't stall mid-ramp
 // Coast comp: MIN=100 (dynamic) → shorter brake distance than static-stall MIN=150.
 // Estimate 115mm; COAST_COMP(115) + DECEL(60) = 175mm < 180mm cell.

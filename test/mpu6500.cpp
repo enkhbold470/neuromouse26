@@ -1,42 +1,50 @@
-// main.cpp — MPU-6500 IMU complete test (minimal)
-// Tests: I2C ping, WHO_AM_I, all 6 axes (accel + gyro), temp, bias calibration, yaw integration
+// test/mpu6500.cpp — IMU-based turn practice
+// MPU-6500 on shared I2C bus with OLED (SDA=OLED_SDA, SCL=OLED_SCL).
+// Menu:
+//   Cal Gyro     — 300 samples bias capture (keep robot STILL)
+//   Turn R 90    — pivot until yaw >= +90°
+//   Turn L 90    — pivot until yaw <= -90°
+//   Turn R 180   — pivot until yaw >= +180°
+//   Turn L 180   — pivot until yaw <= -180°
+//   Live IMU     — yaw + gz live
+//   Reset Yaw    — zero integration
+//
+// Pivot: left=+, right=- on left motor; mirrored on right. Brake at target,
+// no decel ramp. Coast residual ≈ a few degrees — tune TURN_OVERSHOOT_DEG.
+
 #include <Arduino.h>
 #include <Wire.h>
+#include <U8g2lib.h>
 #include "PinConfig.h"
+#include "MicromouseMotor.h"
+#include "MicromouseEncoder.h"
 
-// MPU-6500 register map
-#define MPU_ADDR        0x68
-#define REG_WHO_AM_I    0x75
-#define REG_PWR_MGMT_1  0x6B
-#define REG_GYRO_CFG    0x1B
-#define REG_ACCEL_CFG   0x1C
-#define REG_ACCEL_XOUT_H 0x3B  // accel X,Y,Z + temp + gyro X,Y,Z = 14 bytes total
-#define REG_TEMP_OUT_H  0x41
-#define REG_GYRO_XOUT_H 0x43
+// ── Turn overshoot tuning ────────────────────────────────────────────────────
+// Coast residual after brake. Measured per turn-angle.
+constexpr float TURN_OVERSHOOT_90  = 10.0f;
+constexpr float TURN_OVERSHOOT_180 = 20.0f;
 
-// Scales
-#define ACCEL_SCALE     16384.0f  // LSB/g  at ±2g (AFS_SEL=0)
-#define GYRO_SCALE      131.0f    // LSB/(°/s) at ±250°/s (FS_SEL=0)
-#define TEMP_OFFSET     0.0f      // °C offset (MPU-6500: Temp = raw/333.87 + 21.0)
+// ── MPU-6500 ─────────────────────────────────────────────────────────────────
+#define MPU_ADDR          0x68
+#define REG_WHO_AM_I      0x75
+#define REG_PWR_MGMT_1    0x6B
+#define REG_GYRO_CFG      0x1B
+#define REG_ACCEL_CFG     0x1C
+#define REG_ACCEL_XOUT_H  0x3B
+#define GYRO_SCALE        131.0f   // LSB/(°/s) at ±250°/s
 
-// Bias calibration samples
-#define CALIB_SAMPLES   200
+struct RawData { int16_t ax, ay, az, temp, gx, gy, gz; };
 
-float gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
-float accelBiasX = 0, accelBiasY = 0; // Z not calibrated (gravity)
-float yaw = 0, pitch = 0, roll = 0;
-unsigned long lastUpdate = 0;
+static float gyroBiasZ = 0.0f;
+static float yaw = 0.0f;
+static unsigned long lastUpdateUs = 0;
 
-// ─── helpers ────────────────────────────────────────────────────────────────
-
-bool writeReg(uint8_t reg, uint8_t val) {
+static bool mpuWrite(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(MPU_ADDR);
-    Wire.write(reg);
-    Wire.write(val);
+    Wire.write(reg); Wire.write(val);
     return Wire.endTransmission() == 0;
 }
-
-bool readRegs(uint8_t reg, uint8_t* buf, uint8_t len) {
+static bool mpuRead(uint8_t reg, uint8_t* buf, uint8_t len) {
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(reg);
     if (Wire.endTransmission(false) != 0) return false;
@@ -47,170 +55,262 @@ bool readRegs(uint8_t reg, uint8_t* buf, uint8_t len) {
     }
     return true;
 }
+static int16_t to16(uint8_t hi, uint8_t lo) { return (int16_t)((hi << 8) | lo); }
 
-int16_t to16(uint8_t hi, uint8_t lo) {
-    return (int16_t)((hi << 8) | lo);
-}
-
-// Read all 7 sensors in one 14-byte burst: AX AY AZ TEMP GX GY GZ
-struct RawData { int16_t ax, ay, az, temp, gx, gy, gz; };
-bool readAll(RawData& d) {
-    uint8_t buf[14];
-    if (!readRegs(REG_ACCEL_XOUT_H, buf, 14)) return false;
-    d.ax   = to16(buf[0],  buf[1]);
-    d.ay   = to16(buf[2],  buf[3]);
-    d.az   = to16(buf[4],  buf[5]);
-    d.temp = to16(buf[6],  buf[7]);
-    d.gx   = to16(buf[8],  buf[9]);
-    d.gy   = to16(buf[10], buf[11]);
-    d.gz   = to16(buf[12], buf[13]);
+static bool readAll(RawData& d) {
+    uint8_t b[14];
+    if (!mpuRead(REG_ACCEL_XOUT_H, b, 14)) return false;
+    d.ax=to16(b[0],b[1]); d.ay=to16(b[2],b[3]); d.az=to16(b[4],b[5]);
+    d.temp=to16(b[6],b[7]);
+    d.gx=to16(b[8],b[9]); d.gy=to16(b[10],b[11]); d.gz=to16(b[12],b[13]);
     return true;
 }
 
-// ─── setup ──────────────────────────────────────────────────────────────────
-
-void setup() {
-    Serial.begin(115200);
-    delay(2000);
-
-    Serial.println("\n[IMU-TEST] ==============================");
-    Serial.println("[IMU-TEST] MPU-6500 complete test");
-    Serial.println("[IMU-TEST] ==============================\n");
-
-    Wire.begin(IMU_SDA, IMU_SCL);
-    Wire.setClock(400000);  // 400 kHz fast mode
-
-    // ── STEP 1: I2C ping ──
-    Serial.printf("[1] I2C ping addr=0x%02X ... ", MPU_ADDR);
-    Wire.beginTransmission(MPU_ADDR);
-    uint8_t err = Wire.endTransmission();
-    if (err != 0) {
-        Serial.printf("FAIL (error %d) — check SDA=GPIO%d SCL=GPIO%d\n", err, IMU_SDA, IMU_SCL);
-        while (1) delay(1000);
-    }
-    Serial.println("OK");
-
-    // ── STEP 2: WHO_AM_I ──
-    uint8_t who = 0;
-    readRegs(REG_WHO_AM_I, &who, 1);
-    Serial.printf("[2] WHO_AM_I = 0x%02X  expect=0x70  → %s\n",
-                  who, who == 0x70 ? "PASS" : "FAIL (wrong device?)");
-    if (who != 0x70) {
-        Serial.println("    Continuing anyway...");
-    }
-
-    // ── STEP 3: Wake up ──
-    Serial.print("[3] Wake up (PWR_MGMT_1=0x00) ... ");
-    Serial.println(writeReg(REG_PWR_MGMT_1, 0x00) ? "OK" : "FAIL");
-    delay(100);
-
-    // ── STEP 4: Config ──
-    Serial.print("[4] Gyro  FS_SEL=0 (±250°/s)  ... ");
-    Serial.println(writeReg(REG_GYRO_CFG, 0x00) ? "OK" : "FAIL");
-    Serial.print("[4] Accel AFS_SEL=0 (±2g)      ... ");
-    Serial.println(writeReg(REG_ACCEL_CFG, 0x00) ? "OK" : "FAIL");
-
-    // ── STEP 5: Single raw read ──
-    Serial.println("\n[5] Single raw read:");
+// Integrate yaw from gz. Call frequently.
+static void updateYaw() {
     RawData d;
-    if (!readAll(d)) {
-        Serial.println("    FAIL — could not read sensor registers");
-    } else {
-        float ax_g  = d.ax  / ACCEL_SCALE;
-        float ay_g  = d.ay  / ACCEL_SCALE;
-        float az_g  = d.az  / ACCEL_SCALE;
-        float gx_ds = d.gx  / GYRO_SCALE;
-        float gy_ds = d.gy  / GYRO_SCALE;
-        float gz_ds = d.gz  / GYRO_SCALE;
-        float tempC = d.temp / 333.87f + 21.0f;
-        Serial.printf("    Accel : X=%.3fg  Y=%.3fg  Z=%.3fg  (expect ~0,0,+1 when flat)\n", ax_g, ay_g, az_g);
-        Serial.printf("    Gyro  : X=%.3f°/s  Y=%.3f°/s  Z=%.3f°/s  (expect ~0 when still)\n", gx_ds, gy_ds, gz_ds);
-        Serial.printf("    Temp  : %.2f°C\n", tempC);
-    }
-
-    // ── STEP 6: Bias calibration ──
-    Serial.printf("\n[6] Bias calibration (%d samples — keep robot STILL) ...\n", CALIB_SAMPLES);
-    float sgx=0, sgy=0, sgz=0, sax=0, say=0;
-    int good = 0;
-    for (int i = 0; i < CALIB_SAMPLES; i++) {
-        RawData s;
-        if (readAll(s)) {
-            sgx += s.gx / GYRO_SCALE;
-            sgy += s.gy / GYRO_SCALE;
-            sgz += s.gz / GYRO_SCALE;
-            sax += s.ax / ACCEL_SCALE;
-            say += s.ay / ACCEL_SCALE;
-            good++;
-        }
-        if (i % 50 == 0) Serial.printf("    sample %d/%d\n", i, CALIB_SAMPLES);
-        delay(2);
-    }
-    gyroBiasX  = sgx / good;
-    gyroBiasY  = sgy / good;
-    gyroBiasZ  = sgz / good;
-    accelBiasX = sax / good;
-    accelBiasY = say / good;
-    Serial.printf("    Gyro  bias: X=%.4f  Y=%.4f  Z=%.4f  °/s\n", gyroBiasX, gyroBiasY, gyroBiasZ);
-    Serial.printf("    Accel bias: X=%.4f  Y=%.4f  g  (Z not calibrated)\n", accelBiasX, accelBiasY);
-    Serial.printf("    Good reads: %d/%d\n", good, CALIB_SAMPLES);
-
-    // Warn if bias too high
-    if (fabsf(gyroBiasZ) > 1.0f)
-        Serial.println("    WARN: gyro Z bias > 1°/s — was robot moving during calibration?");
-    else
-        Serial.println("    Gyro bias OK");
-
-    lastUpdate = micros();
-
-    Serial.println("\n[IMU-TEST] Live stream starting (yaw/pitch/roll + all axes)");
-    Serial.println("[IMU-TEST] Format: yaw pitch roll | ax ay az | gx gy gz | temp");
-    Serial.println("[IMU-TEST] ==============================\n");
+    if (!readAll(d)) return;
+    unsigned long now = micros();
+    float dt = (lastUpdateUs == 0) ? 0.001f : (now - lastUpdateUs) / 1e6f;
+    if (dt > 0.05f) dt = 0.05f;
+    lastUpdateUs = now;
+    float gz = d.gz / GYRO_SCALE - gyroBiasZ;
+    if (fabsf(gz) < 0.05f) gz = 0;
+    yaw += gz * dt;
 }
 
-// ─── loop ───────────────────────────────────────────────────────────────────
+// ── OLED + motors ────────────────────────────────────────────────────────────
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
-void loop() {
-    RawData d;
-    if (!readAll(d)) {
-        Serial.println("[IMU-TEST] read FAIL");
-        delay(100);
-        return;
+MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, MOTOR_L_INV);
+MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, MOTOR_R_INV);
+MicromouseEncoder rightEnc  (ENC_R_A, ENC_R_B);   // for menu scroll only
+
+static void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
+
+// Mechanical keyswitch debounce.
+static bool buttonEdge() {
+    static unsigned long pressStart = 0;
+    static bool armed = true;
+    bool low = (digitalRead(BUTTON_1) == LOW);
+    unsigned long now = millis();
+    if (!low) { pressStart = 0; armed = true; return false; }
+    if (pressStart == 0) pressStart = now;
+    if (armed && (now - pressStart >= BUTTON_HOLD_MS)) { armed = false; return true; }
+    return false;
+}
+
+// ── Turn logic ───────────────────────────────────────────────────────────────
+// Coast adds ~3-5° overshoot at TURN_PWM. Stop short by this amount.
+// Pick overshoot constant for target angle. Linear interp between 90/180
+// for intermediate values; extrapolated linearly outside.
+static inline float turnOvershootDeg(float target) {
+    float a = fabsf(target);
+    float slope = (TURN_OVERSHOOT_180 - TURN_OVERSHOOT_90) / 90.0f;
+    return TURN_OVERSHOOT_90 + slope * (a - 90.0f);
+}
+
+static void doTurn(float targetDeg) {
+    yaw = 0;
+    lastUpdateUs = micros();
+    float overshoot = turnOvershootDeg(targetDeg);
+    float stopAt = (targetDeg > 0) ? (targetDeg - overshoot)
+                                   : (targetDeg + overshoot);
+    int dir = (targetDeg > 0) ? 1 : -1;
+    leftMotor.drive(-dir * TURN_PWM);
+    rightMotor.drive( dir * TURN_PWM);
+
+    unsigned long t0 = millis();
+    while (true) {
+        updateYaw();
+        if (targetDeg > 0 ? yaw >= stopAt : yaw <= stopAt) break;
+        if (millis() - t0 > 3000) break;
     }
+    stopMotors();
+    // settle to capture coast
+    unsigned long settleStart = millis();
+    while (millis() - settleStart < 200) { updateYaw(); }
+}
 
-    unsigned long now = micros();
-    float dt = (now - lastUpdate) / 1e6f;
-    lastUpdate = now;
+// ── Calibration ──────────────────────────────────────────────────────────────
+static char calStatus[24] = "";
 
-    // Calibrated values
-    float ax = d.ax / ACCEL_SCALE - accelBiasX;
-    float ay = d.ay / ACCEL_SCALE - accelBiasY;
-    float az = d.az / ACCEL_SCALE;  // includes gravity
-    float gx = d.gx / GYRO_SCALE   - gyroBiasX;
-    float gy = d.gy / GYRO_SCALE   - gyroBiasY;
-    float gz = d.gz / GYRO_SCALE   - gyroBiasZ;
-    float tempC = d.temp / 333.87f + 21.0f;
+static void oledMsg(const char* title, const char* l1, const char* l2 = nullptr) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(0, 10, title);
+    oled.drawHLine(0, 12, 128);
+    oled.setFont(u8g2_font_8x13B_tf);
+    if (l1) oled.drawStr(0, 32, l1);
+    if (l2) oled.drawStr(0, 50, l2);
+    oled.sendBuffer();
+}
 
-    // Noise floor
-    if (fabsf(gx) < 0.05f) gx = 0;
-    if (fabsf(gy) < 0.05f) gy = 0;
-    if (fabsf(gz) < 0.05f) gz = 0;
+static void calibrateGyro() {
+    constexpr int N = 300;
+    float sum = 0;
+    int good = 0;
+    char buf[24];
+    for (int i = 0; i < N; i++) {
+        RawData d;
+        if (readAll(d)) { sum += d.gz / GYRO_SCALE; good++; }
+        if ((i & 0x3F) == 0) {
+            snprintf(buf, sizeof(buf), "%d/%d", i, N);
+            oledMsg("CAL GYRO", "STILL", buf);
+        }
+        delay(2);
+    }
+    gyroBiasZ = (good > 0) ? sum / good : 0;
+    snprintf(calStatus, sizeof(calStatus), "bias=%.3f", gyroBiasZ);
+    yaw = 0;
+    lastUpdateUs = micros();
+}
 
-    // Integrate gyro → angles
-    yaw   += gz * dt;
-    pitch += gy * dt;
-    roll  += gx * dt;
+// ── Menu ─────────────────────────────────────────────────────────────────────
+enum { M_CAL = 0, M_TR90, M_TL90, M_TR180, M_TL180, M_LIVE, M_RST, M_COUNT };
+static const char* MENU[M_COUNT] = {
+    "Cal Gyro", "Turn R 90", "Turn L 90", "Turn R 180", "Turn L 180",
+    "Live IMU", "Reset Yaw"
+};
+static int menuSel = M_CAL;
+static long menuEncRef = 0;
+constexpr long ENC_PER_STEP = 80;
 
-    // Print at ~20 Hz
-    static unsigned long lastPrint = 0;
-    if (millis() - lastPrint >= 50) {
-        lastPrint = millis();
-        Serial.printf("yaw=%7.2f°  pitch=%7.2f°  roll=%7.2f° | "
-                      "ax=%6.3fg ay=%6.3fg az=%6.3fg | "
-                      "gx=%6.2f gy=%6.2f gz=%6.2f °/s | "
-                      "%.1f°C\n",
-                      yaw, pitch, roll,
-                      ax, ay, az,
-                      gx, gy, gz,
-                      tempC);
+static void oledMenu() {
+    const int VIS = 5;
+    int top = menuSel - VIS / 2;
+    if (top < 0) top = 0;
+    if (top > M_COUNT - VIS) top = M_COUNT - VIS;
+    if (top < 0) top = 0;
+
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "IMU turn");
+    char hdr[20]; snprintf(hdr, sizeof(hdr), "%d/%d", menuSel + 1, M_COUNT);
+    oled.drawStr(96, 8, hdr);
+    oled.drawHLine(0, 10, 128);
+
+    const int LH = 10;
+    for (int i = 0; i < VIS; i++) {
+        int idx = top + i;
+        if (idx >= M_COUNT) break;
+        int y = 12 + i * LH;
+        if (idx == menuSel) {
+            oled.drawBox(0, y, 128, LH);
+            oled.setDrawColor(0);
+            oled.drawStr(3, y + 8, MENU[idx]);
+            oled.setDrawColor(1);
+        } else {
+            oled.drawStr(3, y + 8, MENU[idx]);
+        }
+    }
+    oled.drawHLine(0, 64 - 10, 128);
+    oled.setFont(u8g2_font_5x7_tf);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "yaw=%+.1f  %s", yaw, calStatus);
+    oled.drawStr(0, 63, buf);
+    oled.sendBuffer();
+}
+
+static void oledLive() {
+    RawData d;
+    readAll(d);
+    float gz = d.gz / GYRO_SCALE - gyroBiasZ;
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tf);
+    oled.drawStr(0, 10, "Live IMU");
+    oled.drawHLine(0, 12, 128);
+    oled.setFont(u8g2_font_8x13B_tf);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "yaw %+.1f", yaw);
+    oled.drawStr(0, 32, buf);
+    snprintf(buf, sizeof(buf), "gz  %+.2f", gz);
+    oled.drawStr(0, 50, buf);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 63, "btn=back");
+    oled.sendBuffer();
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+enum State { IDLE, LIVE };
+State state = IDLE;
+
+// ── Setup ────────────────────────────────────────────────────────────────────
+void setup() {
+    Serial.begin(115200);
+    pinMode(BUTTON_1, INPUT_PULLUP);
+
+    leftMotor.begin();
+    rightMotor.begin();
+    rightEnc.begin();
+
+    Wire.begin(OLED_SDA, OLED_SCL, 400000);
+    oled.setI2CAddress(OLED_ADDR << 1);
+    oled.begin();
+
+    // MPU init
+    uint8_t who = 0;
+    if (!mpuRead(REG_WHO_AM_I, &who, 1)) {
+        oledMsg("MPU-6500", "I2C FAIL");
+        while (1) delay(1000);
+    }
+    snprintf(calStatus, sizeof(calStatus), "WHO=0x%02X", who);
+    mpuWrite(REG_PWR_MGMT_1, 0x00); delay(50);
+    mpuWrite(REG_GYRO_CFG,   0x00);
+    mpuWrite(REG_ACCEL_CFG,  0x00);
+    lastUpdateUs = micros();
+
+    menuEncRef = rightEnc.getTicks();
+    oledMenu();
+    Serial.println("[INIT] imu turn ready");
+}
+
+// ── Loop ─────────────────────────────────────────────────────────────────────
+void loop() {
+    updateYaw();   // always integrate
+
+    switch (state) {
+        case IDLE: {
+            long delta = rightEnc.getTicks() - menuEncRef;
+            if (delta >= ENC_PER_STEP) {
+                menuSel = (menuSel + 1) % M_COUNT;
+                menuEncRef += ENC_PER_STEP;
+                oledMenu();
+                return;
+            }
+            if (delta <= -ENC_PER_STEP) {
+                menuSel = (menuSel - 1 + M_COUNT) % M_COUNT;
+                menuEncRef -= ENC_PER_STEP;
+                oledMenu();
+                return;
+            }
+            if (buttonEdge()) {
+                switch (menuSel) {
+                    case M_CAL:   calibrateGyro(); oledMenu(); break;
+                    case M_TR90:  doTurn(-90);  oledMenu(); break;  // R = yaw negative
+                    case M_TL90:  doTurn(+90);  oledMenu(); break;
+                    case M_TR180: doTurn(-180); oledMenu(); break;
+                    case M_TL180: doTurn(+180); oledMenu(); break;
+                    case M_LIVE:  state = LIVE; break;
+                    case M_RST:   yaw = 0; oledMenu(); break;
+                }
+                menuEncRef = rightEnc.getTicks();
+            }
+            // Periodic refresh for yaw footer
+            static uint32_t lastRefresh = 0;
+            if (millis() - lastRefresh > 200) { oledMenu(); lastRefresh = millis(); }
+            break;
+        }
+
+        case LIVE: {
+            static uint32_t last = 0;
+            if (millis() - last > 100) { oledLive(); last = millis(); }
+            if (buttonEdge()) {
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+            }
+            break;
+        }
     }
 }
