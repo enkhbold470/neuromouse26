@@ -147,12 +147,19 @@ uint8_t robotRow = 0;
 uint8_t robotCol = 0;
 AbsDir  robotHeading = DIR_NORTH;
 
+// Mechanical keyswitch, no debounce cap. BUTTON_HOLD_MS in PinConfig.h.
 bool buttonEdge() {
-    static bool last = HIGH;
-    bool cur = digitalRead(BUTTON_1);
-    bool edge = (last == HIGH && cur == LOW);
-    last = cur;
-    return edge;
+    static unsigned long pressStart = 0;
+    static bool armed = true;
+    bool low = (digitalRead(BUTTON_1) == LOW);
+    unsigned long now = millis();
+    if (!low) { pressStart = 0; armed = true; return false; }
+    if (pressStart == 0) pressStart = now;
+    if (armed && (now - pressStart >= BUTTON_HOLD_MS)) {
+        armed = false;
+        return true;
+    }
+    return false;
 }
 
 // ── OLED screens ─────────────────────────────────────────────────────────────
