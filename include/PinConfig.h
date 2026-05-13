@@ -88,12 +88,14 @@ constexpr int     MOTOR_PWM_MAX    = 1023;
 constexpr int     DRIVE_PWM        = 250;   // ← only change this (0–1023)
 constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.7f);
 constexpr int     DRIVE_PWM_MIN    = 100;
+constexpr float   TURN_VERIFY_THRESH = 3.0f;  // degrees tolerance after pivot settle
+constexpr int     TURN_CORRECT_PWM   = DRIVE_PWM_MIN;  // nudge PWM for post-turn correction
 constexpr float   BALANCE_KP       = 0.4f;
 constexpr int     TIMEOUT_MS       = 5000;
 constexpr int     CELL_PAUSE_MS    = 40;
 constexpr int     BASE_PWM         = DRIVE_PWM;
 constexpr int     STALL_TIME_MS    = 150;   // ms without encoder advance → stall
-constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 1.4f);  // capped to MOTOR_PWM_MAX at use
+constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 1.8f);  // capped to MOTOR_PWM_MAX at use
 
 // Trapezoidal velocity profile (GreenYe pattern).
 // ACC_RATE / DEC_RATE: PWM units per encoder tick.
