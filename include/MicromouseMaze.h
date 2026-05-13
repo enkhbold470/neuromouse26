@@ -124,11 +124,15 @@ public:
             if (!inBounds(nr, nc)) continue;
             uint8_t dist = flood[nr][nc];
             int turn = ((int)d - (int)h + 4) % 4;
-            int pref;
-            if      (turn == 0) pref = 0;
-            else if (turn == 3) pref = 1;
-            else if (turn == 1) pref = 2;
-            else                pref = 3;
+            int turnPref;
+            if      (turn == 0) turnPref = 0;
+            else if (turn == 3) turnPref = 1;
+            else if (turn == 1) turnPref = 2;
+            else                turnPref = 3;
+            // GreenYe: when flood distances tie, prefer unvisited cells to map
+            // the maze faster. Explored cells get a 4-point penalty so any
+            // unvisited neighbour beats any visited one at the same distance.
+            int pref = (visited[nr][nc] ? 4 : 0) + turnPref;
             if (dist < bestDist || (dist == bestDist && pref < bestPref)) {
                 bestDist = dist;
                 best     = (AbsDir)d;
