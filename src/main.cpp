@@ -74,10 +74,10 @@ static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i])
 
 // ── Calibration (capture in dead-end: all 4 walls present, centered) ─────────
 // Defaults from repeated empirical calibration of this hardware.
-static int calLF = 3152;
-static int calL  = 1718;
-static int calR  = 2209;
-static int calRF = 2339;
+static int calLF = 3300;
+static int calL  = 1800;
+static int calR  = 1800;
+static int calRF = 2500;
 
 // Fixed thresholds from empirical readings:
 //   side wall L/R: present > 1000, absent < 1000
@@ -276,19 +276,24 @@ void driveChain() {
     unsigned long startMs = millis();
     unsigned long lastIR = 0;
 
-    // Mid-cell: pure gyro yaw-hold + small encoder-balance backup.
-    // IR is NOT used as live PID input — too noisy mid-cell. Instead, at each
-    // cell boundary we compute a yawBias from IR alignment and bias the gyro
-    // target so the next cell's straight-line drive corrects toward center.
-    constexpr float YAW_KP    = 3.0f;     // PWM per ° yaw error
+    // Mid-cell: gyro yaw PI + small encoder-balance backup (GreenYe X/W pattern).
+    // KI accumulates positional yaw error so multi-cell drift is corrected even
+    // when the P-term alone can't close the loop (e.g. sticky floor, imbalanced motors).
+    constexpr float YAW_KP    = 3.0f;     // PWM per ° instantaneous yaw error
+    constexpr float YAW_KI    = 0.3f;     // PWM per °·cell accumulated yaw error
     constexpr float ENC_KP_BK = 0.2f;     // small encoder-balance backup
     constexpr int   STRAIGHT_MAX = 200;
+    float yawInteg = 0.0f;
+    long stallRef = 0;
+    unsigned long stallSince = millis();
 
     while (true) {
         updateYaw();
         long tL = leftEnc.getTicks();
         long tR = rTicks();
         long avg = (tL + tR) / 2;
+        if (avg > stallRef) { stallRef = avg; stallSince = millis(); }
+        bool stalled = (millis() - stallSince > (unsigned long)STALL_TIME_MS);
 
         // Periodic IR sample for crash check + control feedback.
         if (millis() - lastIR > 25) {
@@ -358,20 +363,40 @@ void driveChain() {
             yawBias = constrain(IR_ALIGN_K * (float)align, -5.0f, 5.0f);
 
             // Reset encoder counts so encDiff is per-cell, not cumulative.
+            // Reset yaw integral too — IR yawBias already corrects the offset.
             encodersReset();
             cellBoundary = TICKS_PER_CELL;
             yaw = yawBias;
+            yawInteg = 0.0f;
+            stallRef = 0;
+            stallSince = millis();
             lastImuUs = micros();
         }
 
-        // Mid-cell control: gyro yaw-hold + small encoder-balance backup.
-        // yaw>0 = CCW drift → speed L, slow R (steer CW). encDiff>0 (tL>tR)
-        // means right wheel slow → robot turning right → counter with neg corr.
+        // Trapezoidal velocity profile (GreenYe): basePwm = min(accel ramp, decel ramp).
+        // Both ramps are linear in encoder ticks. Their minimum naturally forms a
+        // triangular profile when ACCEL+DECEL > cell length, trapezoidal otherwise.
+        long ticksLeft = cellBoundary - avg;
+        int accelPwm = DRIVE_PWM_MIN + (ACCEL_TICKS > 0
+            ? (int)((long)(DRIVE_PWM - DRIVE_PWM_MIN) * avg      / ACCEL_TICKS)
+            : (DRIVE_PWM - DRIVE_PWM_MIN));
+        int decelPwm = DRIVE_PWM_MIN + (DECEL_TICKS > 0
+            ? (int)((long)(DRIVE_PWM - DRIVE_PWM_MIN) * ticksLeft / DECEL_TICKS)
+            : (DRIVE_PWM - DRIVE_PWM_MIN));
+        int basePwm = stalled
+            ? constrain(STALL_BOOST_PWM, DRIVE_PWM, MOTOR_PWM_MAX)
+            : constrain(min(accelPwm, decelPwm), DRIVE_PWM_MIN, DRIVE_PWM);
+
+        // Gyro yaw PI + encoder-balance correction on top of base speed.
+        // Integral term (GreenYe posErrorW pattern) corrects slow drift that the
+        // P-term alone can't close — e.g. floor friction imbalance over long straights.
+        yawInteg += yaw * 0.001f;   // approximate dt ≈ 1ms per loop
+        yawInteg  = constrain(yawInteg, -8.0f, 8.0f);
         int encDiff = (int)(tL - tR);
-        int corr = (int)(yaw * YAW_KP) - (int)(encDiff * ENC_KP_BK);
+        int corr = (int)(yaw * YAW_KP + yawInteg * YAW_KI) - (int)(encDiff * ENC_KP_BK);
         corr = constrain(corr, -STRAIGHT_MAX, STRAIGHT_MAX);
-        int pwmL = constrain(DRIVE_PWM + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        int pwmR = constrain(DRIVE_PWM - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+        int pwmL = constrain(basePwm + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+        int pwmR = constrain(basePwm - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 

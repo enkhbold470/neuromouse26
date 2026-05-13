@@ -53,7 +53,7 @@ constexpr unsigned long BUTTON_HOLD_MS = 50;
 // 500 Hz: audible whine but maximum torque — DRV8833 slower switching = more avg current.
 // 4 kHz: silent, smoother but weaker at same duty cycle.
 // 20 kHz: silent but lowest torque at low duty. Recalibrate DRIVE_PWM/TURN_PWM after changing.
-constexpr int     MOTOR_PWM_FREQ_HZ = 500;
+constexpr int     MOTOR_PWM_FREQ_HZ = 1000;
 constexpr int     MOTOR_PWM_BITS    = 10;
 
 // ── Motor polarity ────────────────────────────────────────────────────────────
@@ -75,37 +75,45 @@ constexpr float   BAT_VDIV_MULT    = 3.1197f;
 // Recalibrate empirically: spin each wheel one full rev, record L and R counts.
 constexpr float   RIGHT_ENC_SCALE  = 1.0f;    // empirical: L=R=360 per cell
 
-// ── Cell / turn geometry (derived) ───────────────────────────────────────────
-constexpr float   CELL_MM          = 180.0f;  // standard half-size micromouse cell
-constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV; // ~0.512 mm
-constexpr long    TICKS_PER_CELL   = 300;  // ≈ 2886
-constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER)); // ≈ 931
-// PCNT 4× resolution: starting point ≈ 8× old ISR values (old 100 → ~800).
-// Tune: each ~40 ticks ≈ 10°. Left/right calibrate independently.
-constexpr long    TURN_TICKS_90_L  = 420;   // measured: 800 = 180°, halved for 90°
-constexpr long    TURN_TICKS_90_R  = 410;   // measured: 800 = 180°, halved for 90°
+// ── Cell / turn geometry ─────────────────────────────────────────────────────
+constexpr float   CELL_MM          = 180.0f;
+constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV;
+constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER));
+constexpr long    TURN_TICKS_90_L  = 420;
+constexpr long    TURN_TICKS_90_R  = 410;
 
-// ── Drive tuning ──────────────────────────────────────────────────────────────
-// Uses BRAKE stop (both INs HIGH). Recalibrate TURN_TICKS_90 if TURN_PWM changes.
+// ── Drive tuning ─────────────────────────────────────────────────────────────
+// Change DRIVE_PWM only — ramp zones and TICKS_PER_CELL auto-scale.
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 180;                        // ← master cruise speed (0–1023)
-constexpr int     TURN_PWM         = (int)(DRIVE_PWM*0.7f);  // 70% of cruise for pivots
-constexpr int     DRIVE_PWM_MIN    = 100;                        // dynamic stall floor; 150 is static-only, motor won't stall mid-ramp
-// Coast comp: MIN=100 (dynamic) → shorter brake distance than static-stall MIN=150.
-// Estimate 115mm; COAST_COMP(115) + DECEL(60) = 175mm < 180mm cell.
-// Re-run moveCells(1): stops short → decrease COAST_COMP_MM; overshoots → increase.
-constexpr float   COAST_COMP_MM    = 70.0f;                      // measured: brake at DRIVE_PWM=140 → 70mm overshoot
-constexpr int     COAST_COMP_TICKS = (int)(COAST_COMP_MM / MM_PER_TICK); // ~1842 ticks
-// Bumped 60 → 130: needed to actually slow heavy robot from cruise to
-// DRIVE_PWM_MIN before brake. Otherwise multi-cell runs overshoot more with N.
-// Side effect: for N=1 the decel zone exceeds target, so the robot
-// runs the first cell entirely at the decel ramp (≈ slower).
-constexpr float   DECEL_MM         = 130.0f;
-constexpr int     DECEL_TICKS      = (int)(DECEL_MM / MM_PER_TICK); // ~961 ticks
-constexpr float   BALANCE_KP       = 0.4f;                      // PWM per tick L-R error (scaled for PCNT 8× resolution)
-constexpr int     TIMEOUT_MS       = 5000;                       // per-cell abort timeout ms
+constexpr int     DRIVE_PWM        = 250;   // ← only change this (0–1023)
+constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.7f);
+constexpr int     DRIVE_PWM_MIN    = 100;
+constexpr float   BALANCE_KP       = 0.4f;
+constexpr int     TIMEOUT_MS       = 5000;
 constexpr int     CELL_PAUSE_MS    = 40;
 constexpr int     BASE_PWM         = DRIVE_PWM;
+constexpr int     STALL_TIME_MS    = 150;   // ms without encoder advance → stall
+constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 1.4f);  // capped to MOTOR_PWM_MAX at use
+
+// Trapezoidal velocity profile (GreenYe pattern).
+// ACC_RATE / DEC_RATE: PWM units per encoder tick.
+// Larger value = shorter ramp zone. Recalibrate if robot jerks or overshoots.
+constexpr int     ACC_RATE         = 2;    // PWM per tick, ramp up
+constexpr int     DEC_RATE         = 2;    // PWM per tick, ramp down
+constexpr int     ACCEL_TICKS      = (DRIVE_PWM - DRIVE_PWM_MIN) / ACC_RATE;
+constexpr float   ACCEL_MM         = ACCEL_TICKS * MM_PER_TICK;
+constexpr int     DECEL_TICKS      = (DRIVE_PWM - DRIVE_PWM_MIN) / DEC_RATE;
+constexpr float   DECEL_MM         = DECEL_TICKS * MM_PER_TICK;
+
+// Coast from DRIVE_PWM_MIN (end of decel ramp). v² model calibrated: 26mm at PWM=180.
+// DRIVE_PWM_MIN is fixed → coast is constant regardless of cruise speed.
+constexpr float   COAST_COMP_MM    = 26.0f * ((float)DRIVE_PWM_MIN / 180.0f) * ((float)DRIVE_PWM_MIN / 180.0f);
+constexpr int     COAST_COMP_TICKS = (int)(COAST_COMP_MM / MM_PER_TICK);
+
+// Brake this many ticks early; coast at DRIVE_PWM_MIN lands on cell boundary.
+// At DRIVE_PWM_MIN=100: coast≈8mm (≈15 ticks). TICKS_PER_CELL ≈ 352−15 = 337.
+// NOTE: if stopping short/long after adding decel ramp, adjust COAST_COMP_MM.
+constexpr long    TICKS_PER_CELL   = (long)(CELL_MM / MM_PER_TICK) - COAST_COMP_TICKS;
 
 // ── IR thresholds (calibrated 2026-05-07, dead-end centered, all 4 walls) ─────
 // irRead() is ambient-subtracted: no-wall ~0, wall ~400–550. Threshold=50 is safe.
