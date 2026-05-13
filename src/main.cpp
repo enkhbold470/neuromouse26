@@ -224,6 +224,24 @@ void doTurn(float targetDeg) {
     stopMotors();
     unsigned long settleStart = millis();
     while (millis() - settleStart < 200) { updateYaw(); }
+
+    // Verify and correct: nudge at low speed if settled yaw is off target.
+    // Runs up to 3 times; stops each attempt when within 1° or after 400ms.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        float err = targetDeg - yaw;
+        if (fabsf(err) <= TURN_VERIFY_THRESH) break;
+        int cdir = (err > 0) ? 1 : -1;
+        leftMotor.drive(-cdir * TURN_CORRECT_PWM);
+        rightMotor.drive( cdir * TURN_CORRECT_PWM);
+        unsigned long ct0 = millis();
+        while (millis() - ct0 < 400) {
+            updateYaw();
+            if (fabsf(targetDeg - yaw) <= 1.0f) break;
+        }
+        stopMotors();
+        unsigned long cs = millis();
+        while (millis() - cs < 80) { updateYaw(); }
+    }
 }
 
 // Forward declarations for chained-run logic.
@@ -248,7 +266,7 @@ void advanceToCellCenter() {
         if (avg >= CENTER_ADVANCE_TICKS) break;
         // Gyro yaw-hold + gentle IR lateral correction using whichever walls exist.
         // Mirrors driveChain's yawBias logic but as direct PWM correction.
-        constexpr float IR_CTR_K = 0.04f;
+        constexpr float IR_CTR_K = 0.10f;
         float irCorr = 0;
         bool wL = irVal[1] > WALL_SIDE_THRESH;
         bool wR = irVal[2] > WALL_SIDE_THRESH;
@@ -286,6 +304,7 @@ void driveChain() {
     float yawInteg = 0.0f;
     long stallRef = 0;
     unsigned long stallSince = millis();
+    constexpr float IR_ALIGN_K = 0.005f;  // IR error → equivalent heading offset (degrees)
 
     while (true) {
         updateYaw();
@@ -352,7 +371,6 @@ void driveChain() {
             //   R only     : align = -(irR-calR)              → hold R distance
             //   neither    : align = 0                        → pure gyro
             // align>0 → drifted left → set yaw positive → P-loop steers right.
-            constexpr float IR_ALIGN_K = 0.005f;
             float yawBias = 0;
             bool wL = wallLeft();
             bool wR = wallRight();
@@ -387,13 +405,24 @@ void driveChain() {
             ? constrain(STALL_BOOST_PWM, DRIVE_PWM, MOTOR_PWM_MAX)
             : constrain(min(accelPwm, decelPwm), DRIVE_PWM_MIN, DRIVE_PWM);
 
-        // Gyro yaw PI + encoder-balance correction on top of base speed.
-        // Integral term (GreenYe posErrorW pattern) corrects slow drift that the
-        // P-term alone can't close — e.g. floor friction imbalance over long straights.
-        yawInteg += yaw * 0.001f;   // approximate dt ≈ 1ms per loop
+        // Live IR lateral correction: convert wall-distance error to an equivalent
+        // heading offset so the gyro P-loop steers the robot back to lane center.
+        // Works continuously — prevents drift when one side opens mid-cell.
+        float irBias = 0;
+        {
+            bool wLl = irVal[1] > WALL_SIDE_THRESH;
+            bool wRl = irVal[2] > WALL_SIDE_THRESH;
+            if (wLl && wRl)   irBias = IR_ALIGN_K * ((irVal[1]-calL) - (irVal[2]-calR));
+            else if (wLl)      irBias = IR_ALIGN_K *  (irVal[1]-calL);
+            else if (wRl)      irBias = IR_ALIGN_K * -(irVal[2]-calR);
+            irBias = constrain(irBias, -5.0f, 5.0f);
+        }
+
+        // Gyro yaw PI (with IR lateral bias) + encoder-balance correction.
+        yawInteg += yaw * 0.001f;
         yawInteg  = constrain(yawInteg, -8.0f, 8.0f);
         int encDiff = (int)(tL - tR);
-        int corr = (int)(yaw * YAW_KP + yawInteg * YAW_KI) - (int)(encDiff * ENC_KP_BK);
+        int corr = (int)((yaw + irBias) * YAW_KP + yawInteg * YAW_KI) - (int)(encDiff * ENC_KP_BK);
         corr = constrain(corr, -STRAIGHT_MAX, STRAIGHT_MAX);
         int pwmL = constrain(basePwm + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
         int pwmR = constrain(basePwm - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
