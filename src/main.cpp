@@ -151,7 +151,9 @@ constexpr float TURN_OVERSHOOT_180 = 20.0f;
 // reference. TURN_CLEAR_FRAC: must be below to start pivot (nose 50mm fwd
 // of axle needs swing clearance). Reverse-pulse until safe.
 constexpr float MID_BRAKE_FRAC  = 0.45f;
-constexpr float TURN_CLEAR_FRAC = 0.55f;
+// 1.15× cal = only fire when robot is closer than the calibration position (~90mm).
+// 0.55 caused ensureFrontClearance() to fire every turn (robot at cell center = cal reading).
+constexpr float TURN_CLEAR_FRAC = 1.15f;
 
 static bool mpuWrite(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(MPU_ADDR);
@@ -241,15 +243,24 @@ void advanceToCellCenter() {
     unsigned long t0 = millis();
     while (true) {
         updateYaw();
+        sampleIR();
         long avg = (leftEnc.getTicks() + rTicks()) / 2;
         if (avg >= CENTER_ADVANCE_TICKS) break;
-        int corr = constrain((int)(yaw * 3.0f), -200, 200);
+        // Gyro yaw-hold + gentle IR lateral correction using whichever walls exist.
+        // Mirrors driveChain's yawBias logic but as direct PWM correction.
+        constexpr float IR_CTR_K = 0.04f;
+        float irCorr = 0;
+        bool wL = irVal[1] > WALL_SIDE_THRESH;
+        bool wR = irVal[2] > WALL_SIDE_THRESH;
+        if (wL && wR)  irCorr = IR_CTR_K * ((irVal[1]-calL) - (irVal[2]-calR));
+        else if (wL)   irCorr = IR_CTR_K *  (irVal[1]-calL);
+        else if (wR)   irCorr = IR_CTR_K * -(irVal[2]-calR);
+        int corr = constrain((int)(yaw * 3.0f + irCorr), -200, 200);
         leftMotor.drive(constrain(DRIVE_PWM + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX));
         rightMotor.drive(constrain(DRIVE_PWM - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX));
         if (millis() - t0 > 1500) break;
     }
     stopMotors();
-    // delay(100);
 }
 
 // Drive forward, chaining as many same-heading cells as possible without
@@ -607,15 +618,23 @@ void senseWalls() {
 // from calLF/calRF — nose (sensor) is 50mm fwd of axle, needs clearance to
 // arc through 90°. Below TURN_CLEAR_FRAC × cal = safe.
 void ensureFrontClearance() {
-    int safeLF = (int)(calLF * TURN_CLEAR_FRAC);
-    int safeRF = (int)(calRF * TURN_CLEAR_FRAC);
+    int safeLF = min((int)(calLF * TURN_CLEAR_FRAC), 4090);
+    int safeRF = min((int)(calRF * TURN_CLEAR_FRAC), 4090);
     sampleIR();
     if (irVal[0] < safeLF && irVal[3] < safeRF) return;
-    leftMotor.drive(-DRIVE_PWM);
-    rightMotor.drive(-DRIVE_PWM);
+    // Slow reverse, capped at ~20mm to avoid retreating far from cell center.
+    // ~2 ticks/mm at TICKS_PER_REV=210, WHEEL_DIA=33.4mm → 40 ticks ≈ 20mm.
+    constexpr long BACKUP_LIMIT_TICKS = 40;
+    long startL = leftEnc.getTicks();
+    long startR = rTicks();
+    leftMotor.drive(-DRIVE_PWM_MIN);
+    rightMotor.drive(-DRIVE_PWM_MIN);
     unsigned long t0 = millis();
-    while (millis() - t0 < 300) {
+    while (millis() - t0 < 500) {
         sampleIR();
+        long dL = abs(leftEnc.getTicks() - startL);
+        long dR = abs(rTicks() - startR);
+        if ((dL + dR) / 2 >= BACKUP_LIMIT_TICKS) break;
         if (irVal[0] < safeLF - 150 && irVal[3] < safeRF - 150) break;
     }
     stopMotors();
