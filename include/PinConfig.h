@@ -95,7 +95,7 @@ constexpr int     TIMEOUT_MS       = 5000;
 constexpr int     CELL_PAUSE_MS    = 40;
 constexpr int     BASE_PWM         = DRIVE_PWM;
 constexpr int     STALL_TIME_MS    = 150;   // ms without encoder advance → stall
-constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 1.8f);  // capped to MOTOR_PWM_MAX at use
+constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 4.0f);  // capped to MOTOR_PWM_MAX at use
 
 // Trapezoidal velocity profile (GreenYe pattern).
 // ACC_RATE / DEC_RATE: PWM units per encoder tick.
