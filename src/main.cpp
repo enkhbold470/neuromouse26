@@ -200,6 +200,10 @@ static inline float turnOvershootDeg(float target) {
     return TURN_OVERSHOOT_90 + slope * (a - 90.0f);
 }
 
+// ── Wheel speed monitor shared state ─────────────────────────────────────────
+struct { float rpmL, rpmR; bool stalledL, stalledR; } wheelSpeed = {};
+static portMUX_TYPE speedMux = portMUX_INITIALIZER_UNLOCKED;
+
 // ── Motion ───────────────────────────────────────────────────────────────────
 void stopMotors()    { leftMotor.brake(); rightMotor.brake(); }
 void encodersReset() { leftEnc.reset(); rightEnc.reset(); }
@@ -255,14 +259,14 @@ void rotateToHeading(AbsDir target);
 constexpr long CENTER_ADVANCE_TICKS = TICKS_PER_CELL / 2;   // ~90mm forward
 
 void advanceToCellCenter() {
-    encodersReset();
+    long refL = leftEnc.getTicks(), refR = rTicks();
     yaw = 0;
     lastImuUs = micros();
     unsigned long t0 = millis();
     while (true) {
         updateYaw();
         sampleIR();
-        long avg = (leftEnc.getTicks() + rTicks()) / 2;
+        long avg = ((leftEnc.getTicks() - refL) + (rTicks() - refR)) / 2;
         if (avg >= CENTER_ADVANCE_TICKS) break;
         // Gyro yaw-hold + gentle IR lateral correction using whichever walls exist.
         // Mirrors driveChain's yawBias logic but as direct PWM correction.
@@ -287,32 +291,33 @@ void advanceToCellCenter() {
 // On return, robotRow/robotCol have been advanced to the cell the robot
 // physically occupies (last cell entered). Caller pivots if needed.
 void driveChain() {
-    encodersReset();
+    long refL = leftEnc.getTicks(), refR = rTicks();
     yaw = 0;
     lastImuUs = micros();
     long cellBoundary = TICKS_PER_CELL;
     unsigned long startMs = millis();
     unsigned long lastIR = 0;
 
-    // Mid-cell: gyro yaw PI + small encoder-balance backup (GreenYe X/W pattern).
-    // KI accumulates positional yaw error so multi-cell drift is corrected even
-    // when the P-term alone can't close the loop (e.g. sticky floor, imbalanced motors).
-    constexpr float YAW_KP    = 3.0f;     // PWM per ° instantaneous yaw error
-    constexpr float YAW_KI    = 0.3f;     // PWM per °·cell accumulated yaw error
-    constexpr float ENC_KP_BK = 0.2f;     // small encoder-balance backup
+    constexpr float YAW_KP    = 3.0f;
+    constexpr float YAW_KI    = 0.3f;
+    constexpr float ENC_KP_BK = 0.2f;
     constexpr int   STRAIGHT_MAX = 200;
     float yawInteg = 0.0f;
-    long stallRef = 0;
-    unsigned long stallSince = millis();
-    constexpr float IR_ALIGN_K = 0.005f;  // IR error → equivalent heading offset (degrees)
+    float velIntegL = 0.0f, velIntegR = 0.0f;
+    constexpr float IR_ALIGN_K = 0.005f;
 
     while (true) {
         updateYaw();
-        long tL = leftEnc.getTicks();
-        long tR = rTicks();
+        long tL = leftEnc.getTicks() - refL;
+        long tR = rTicks() - refR;
         long avg = (tL + tR) / 2;
-        if (avg > stallRef) { stallRef = avg; stallSince = millis(); }
-        bool stalled = (millis() - stallSince > (unsigned long)STALL_TIME_MS);
+        float curRpmL, curRpmR;
+        bool stalled;
+        taskENTER_CRITICAL(&speedMux);
+        curRpmL = wheelSpeed.rpmL;
+        curRpmR = wheelSpeed.rpmR;
+        stalled = wheelSpeed.stalledL || wheelSpeed.stalledR;
+        taskEXIT_CRITICAL(&speedMux);
 
         // Periodic IR sample for crash check + control feedback.
         if (millis() - lastIR > 25) {
@@ -380,14 +385,12 @@ void driveChain() {
             else if (wR)       align = -(irVal[2] - calR);
             yawBias = constrain(IR_ALIGN_K * (float)align, -5.0f, 5.0f);
 
-            // Reset encoder counts so encDiff is per-cell, not cumulative.
-            // Reset yaw integral too — IR yawBias already corrects the offset.
-            encodersReset();
+            refL = leftEnc.getTicks();
+            refR = rTicks();
             cellBoundary = TICKS_PER_CELL;
             yaw = yawBias;
             yawInteg = 0.0f;
-            stallRef = 0;
-            stallSince = millis();
+            velIntegL = velIntegR = 0.0f;
             lastImuUs = micros();
         }
 
@@ -405,9 +408,17 @@ void driveChain() {
             ? constrain(STALL_BOOST_PWM, DRIVE_PWM, MOTOR_PWM_MAX)
             : constrain(min(accelPwm, decelPwm), DRIVE_PWM_MIN, DRIVE_PWM);
 
-        // Live IR lateral correction: convert wall-distance error to an equivalent
-        // heading offset so the gyro P-loop steers the robot back to lane center.
-        // Works continuously — prevents drift when one side opens mid-cell.
+        // Velocity PI: target RPM proportional to trapezoid basePwm.
+        // Additive correction on top of basePwm — degrades gracefully if mis-tuned.
+        float targetRpm = CRUISE_RPM * (float)basePwm / DRIVE_PWM;
+        float errL = targetRpm - fabsf(curRpmL);
+        float errR = targetRpm - fabsf(curRpmR);
+        velIntegL = constrain(velIntegL + errL * 0.02f, -200.0f, 200.0f);
+        velIntegR = constrain(velIntegR + errR * 0.02f, -200.0f, 200.0f);
+        int vCorrL = constrain((int)(VEL_KP * errL + VEL_KI * velIntegL), -150, 150);
+        int vCorrR = constrain((int)(VEL_KP * errR + VEL_KI * velIntegR), -150, 150);
+
+        // Live IR lateral correction.
         float irBias = 0;
         {
             bool wLl = irVal[1] > WALL_SIDE_THRESH;
@@ -418,14 +429,14 @@ void driveChain() {
             irBias = constrain(irBias, -5.0f, 5.0f);
         }
 
-        // Gyro yaw PI (with IR lateral bias) + encoder-balance correction.
+        // Gyro yaw PI + encoder-balance correction.
         yawInteg += yaw * 0.001f;
         yawInteg  = constrain(yawInteg, -8.0f, 8.0f);
         int encDiff = (int)(tL - tR);
         int corr = (int)((yaw + irBias) * YAW_KP + yawInteg * YAW_KI) - (int)(encDiff * ENC_KP_BK);
         corr = constrain(corr, -STRAIGHT_MAX, STRAIGHT_MAX);
-        int pwmL = constrain(basePwm + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
-        int pwmR = constrain(basePwm - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+        int pwmL = constrain(basePwm + vCorrL + corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
+        int pwmR = constrain(basePwm + vCorrR - corr, DRIVE_PWM_MIN, MOTOR_PWM_MAX);
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
 
@@ -441,6 +452,24 @@ void turnAround() {
     doTurn(-180);
     // delay(120);
     // doTurn(-90);
+}
+
+void speedTask(void*) {
+    vTaskDelay(pdMS_TO_TICKS(200));
+    long prevL = leftEnc.getTicks(), prevR = rightEnc.getTicks();
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        long nowL = leftEnc.getTicks(), nowR = rightEnc.getTicks();
+        long dL = nowL - prevL, dR = nowR - prevR;
+        prevL = nowL; prevR = nowR;
+        // dL ticks / 20ms * (1000ms/s) / TICKS_PER_REV * 60s/min = RPM
+        taskENTER_CRITICAL(&speedMux);
+        wheelSpeed.rpmL     = (float)dL / TICKS_PER_REV * 3000.0f;
+        wheelSpeed.rpmR     = (float)dR / TICKS_PER_REV * 3000.0f;
+        wheelSpeed.stalledL = (abs(dL) < 2);
+        wheelSpeed.stalledR = (abs(dR) < 2);
+        taskEXIT_CRITICAL(&speedMux);
+    }
 }
 
 // ── State + menu ─────────────────────────────────────────────────────────────
@@ -758,6 +787,7 @@ void setup() {
     calibrateGyro();
 
     setupMaze();
+    xTaskCreatePinnedToCore(speedTask, "speed", 2048, NULL, 2, NULL, 0);
     menuEncRef = rightEnc.getTicks();
     oledMenu();
     Serial.println("[INIT] ready");
