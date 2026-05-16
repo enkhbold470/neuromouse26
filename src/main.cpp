@@ -453,7 +453,7 @@ static const char* MENU_LABELS[M_COUNT] = {
 };
 static int  menuSel    = M_START;
 static long menuEncRef = 0;
-constexpr long ENC_PER_MENU_STEP = 80;
+constexpr long ENC_PER_MENU_STEP = 20;
 
 // Mechanical keyswitch debounce — BUTTON_HOLD_MS in PinConfig.h.
 bool buttonEdge() {
