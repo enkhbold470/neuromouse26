@@ -125,6 +125,13 @@ constexpr int     R_THRESH         = 450;
 constexpr int     LF_THRESH        = 450;
 constexpr int     RF_THRESH        = 450;
 
+// ── Velocity PID (closed-loop wheel speed) ───────────────────────────────────
+// CRUISE_RPM: measured output-shaft RPM at DRIVE_PWM. Calibrate via serial RPM log.
+// At DRIVE_PWM=400, 500Hz, N20 1:30 @ 7.4V: estimate ~150 RPM.
+constexpr float   CRUISE_RPM       = 150.0f;
+constexpr float   VEL_KP           = 0.8f;
+constexpr float   VEL_KI           = 0.05f;
+
 // ── Wall-centering PID ────────────────────────────────────────────────────────
 constexpr float   WALL_KP          = 0.25f;
 constexpr float   WALL_KI          = 0.00f;
