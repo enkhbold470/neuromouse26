@@ -50,10 +50,9 @@ constexpr unsigned long BUTTON_HOLD_MS = 50;
 // we have 40mm from wheel axle to rear bumper,
 
 // ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
-// 500 Hz: audible whine but maximum torque — DRV8833 slower switching = more avg current.
-// 4 kHz: silent, smoother but weaker at same duty cycle.
-// 20 kHz: silent but lowest torque at low duty. Recalibrate DRIVE_PWM/TURN_PWM after changing.
-constexpr int     MOTOR_PWM_FREQ_HZ = 1000;
+// 500 Hz: audible whine but maximum torque — inductor fully charges each cycle,
+// switching losses ~0. Best choice for N20 on a heavy robot.
+constexpr int     MOTOR_PWM_FREQ_HZ = 500;
 constexpr int     MOTOR_PWM_BITS    = 10;
 
 // ── Motor polarity ────────────────────────────────────────────────────────────
@@ -85,11 +84,11 @@ constexpr long    TURN_TICKS_90_R  = 410;
 // ── Drive tuning ─────────────────────────────────────────────────────────────
 // Change DRIVE_PWM only — ramp zones and TICKS_PER_CELL auto-scale.
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 250;   // ← only change this (0–1023)
-constexpr int     TURN_PWM         = (int)(DRIVE_PWM * 0.7f);
-constexpr int     DRIVE_PWM_MIN    = 100;
+constexpr int     DRIVE_PWM        = 400;   // ← only change this (0–1023)
+constexpr int     TURN_PWM         = 300;
+constexpr int     DRIVE_PWM_MIN    = 100;   // 500Hz motors start at 10% duty reliably
 constexpr float   TURN_VERIFY_THRESH = 3.0f;  // degrees tolerance after pivot settle
-constexpr int     TURN_CORRECT_PWM   = DRIVE_PWM_MIN;  // nudge PWM for post-turn correction
+constexpr int     TURN_CORRECT_PWM   = DRIVE_PWM_MIN;
 constexpr float   BALANCE_KP       = 0.4f;
 constexpr int     TIMEOUT_MS       = 5000;
 constexpr int     CELL_PAUSE_MS    = 40;
@@ -100,8 +99,9 @@ constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 4.0f);  // capped to MOTO
 // Trapezoidal velocity profile (GreenYe pattern).
 // ACC_RATE / DEC_RATE: PWM units per encoder tick.
 // Larger value = shorter ramp zone. Recalibrate if robot jerks or overshoots.
-constexpr int     ACC_RATE         = 2;    // PWM per tick, ramp up
-constexpr int     DEC_RATE         = 2;    // PWM per tick, ramp down
+// At 500Hz: ACC_RATE=4 → ACCEL_TICKS=175, peaks at DRIVE_PWM at mid-cell (350/2).
+constexpr int     ACC_RATE         = 4;    // PWM per tick, ramp up
+constexpr int     DEC_RATE         = 4;    // PWM per tick, ramp down
 constexpr int     ACCEL_TICKS      = (DRIVE_PWM - DRIVE_PWM_MIN) / ACC_RATE;
 constexpr float   ACCEL_MM         = ACCEL_TICKS * MM_PER_TICK;
 constexpr int     DECEL_TICKS      = (DRIVE_PWM - DRIVE_PWM_MIN) / DEC_RATE;
@@ -112,10 +112,9 @@ constexpr float   DECEL_MM         = DECEL_TICKS * MM_PER_TICK;
 constexpr float   COAST_COMP_MM    = 26.0f * ((float)DRIVE_PWM_MIN / 180.0f) * ((float)DRIVE_PWM_MIN / 180.0f);
 constexpr int     COAST_COMP_TICKS = (int)(COAST_COMP_MM / MM_PER_TICK);
 
-// Brake this many ticks early; coast at DRIVE_PWM_MIN lands on cell boundary.
-// At DRIVE_PWM_MIN=100: coast≈8mm (≈15 ticks). TICKS_PER_CELL ≈ 352−15 = 337.
-// NOTE: if stopping short/long after adding decel ramp, adjust COAST_COMP_MM.
-constexpr long    TICKS_PER_CELL   = (long)(CELL_MM / MM_PER_TICK) - COAST_COMP_TICKS;
+// Hardcoded to 350 — tune up/down if stopping short/long after frequency change.
+// If stopping short/long, adjust this value directly.
+constexpr long    TICKS_PER_CELL   = 350;
 
 // ── IR thresholds (calibrated 2026-05-07, dead-end centered, all 4 walls) ─────
 // irRead() is ambient-subtracted: no-wall ~0, wall ~400–550. Threshold=50 is safe.

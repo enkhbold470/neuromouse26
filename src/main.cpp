@@ -33,12 +33,6 @@ constexpr uint8_t MAZE_COLS = 3; // west to east
 constexpr uint8_t GOAL_ROW  = 5; 
 constexpr uint8_t GOAL_COL  = 2;
 
-// ── IR thresholds (calibrated: no-wall ~0, wall ~400–550) ────────────────────
-// Sensors: L/R perpendicular to side walls, LF/RF angled forward to catch
-// front wall. wallFront() = LF or RF over threshold.
-constexpr int WALL_SIDE_PRESENT = 2000;
-constexpr int WALL_FRONT_STOP   = 1500;
-
 // ── Hardware ─────────────────────────────────────────────────────────────────
 MicromouseMotor   leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, MOTOR_L_INV);
 MicromouseMotor   rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, MOTOR_R_INV);
