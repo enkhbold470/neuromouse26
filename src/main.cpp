@@ -499,11 +499,12 @@ void oledMenu() {
             oled.drawStr(3, y + 8, MENU_LABELS[idx]);
         }
     }
-    oled.drawHLine(0, 64 - 10, 128);
-    oled.setFont(u8g2_font_5x7_tf);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "gz%+.2f LF%d L%d R%d RF%d", gyroBiasZ, calLF, calL, calR, calRF);
-    oled.drawStr(0, 63, buf);
+    //it was dispaying kind of status, like gyrobias, sensors etc
+    // oled.drawHLine(0, 64 - 10, 128);
+    // oled.setFont(u8g2_font_5x7_tf);
+    // char buf[24];
+    // snprintf(buf, sizeof(buf), "gz%+.2f LF%d L%d R%d RF%d", gyroBiasZ, calLF, calL, calR, calRF);
+    // oled.drawStr(0, 63, buf);
     oled.sendBuffer();
 }
 
