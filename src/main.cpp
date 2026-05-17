@@ -11,9 +11,7 @@
 // Turn: trapezoidal angular-velocity profile + Kff + PID on integrated
 // MPU-6500 yaw. Surface-independent.
 //
-// Menu:
-//   Cal IR       — capture LF/L/R/RF in dead-end (centered)
-//   Cal Gyro     — capture gz bias (300 samples, STILL)
+// Menu (gyro bias auto-captured every boot, IR cal baked into PinConfig.h):
 //   Test Motor   — short fwd/rev each motor
 //   Test Encoder — live L/R tick counts
 //   Test IR      — live 4-bar graph
@@ -88,6 +86,12 @@ static inline bool wallRight() { return irVal[2] > WALL_SIDE_THRESH; }
 uint8_t robotRow = 0;
 uint8_t robotCol = 0;
 AbsDir  robotHeading = DIR_NORTH;
+
+// Set true on START so first driveChain travels (cell pitch + back-wall
+// offset) instead of one cell pitch. Robot is assumed to begin with its
+// back pressed against the south wall of cell (0,0); axle ≈ 30 mm from
+// wall, so reaching cell (1,0) center needs ~60 mm extra travel.
+static bool firstCellOfRun = false;
 
 // ── Crash report ─────────────────────────────────────────────────────────────
 static bool    crashFlag = false;
@@ -334,12 +338,57 @@ static void vpidStep(VpidState& s, float target, long curL, long curR,
 }
 
 // ── Wall sensing ─────────────────────────────────────────────────────────────
+// GEOMETRY NOTE — side IR sensors aim 30° forward-outward and read a wall
+// point ~150 mm ahead of robot center. At cell-center stop they're aimed
+// into cell N+2, so reading there is the wrong cell. Side walls must be
+// sensed via look-ahead during driveChain traversal (avg in 17%–100% of
+// cell tick window = sensor scanning cell N+1's side). Only the front
+// sensor reads the correct cell at cell-center stop.
+void senseWallsFrontOnly() {
+    maze.setWall(robotRow, robotCol, robotHeading, wallFront());
+}
 void senseWalls() {
     AbsDir leftDir  = (AbsDir)(((int)robotHeading + 3) % 4);
     AbsDir rightDir = (AbsDir)(((int)robotHeading + 1) % 4);
     maze.setWall(robotRow, robotCol, robotHeading, wallFront());
     maze.setWall(robotRow, robotCol, leftDir,      wallLeft());
     maze.setWall(robotRow, robotCol, rightDir,     wallRight());
+}
+
+// ── Side-wall look-ahead (populates next cell's side walls during approach)
+// Updated every control loop while sensor is aimed past the current cell's
+// far edge into the next cell. At cell-boundary stop, `applyLookaheadSides`
+// writes maze walls for the cell we just entered.
+struct SideLook {
+    int  Lhigh, Llow;
+    int  Rhigh, Rlow;
+    int  n;
+    void reset() { Lhigh = 0; Llow = INT_MAX; Rhigh = 0; Rlow = INT_MAX; n = 0; }
+    void update(int L, int R) {
+        if (L > Lhigh) Lhigh = L;  if (L < Llow) Llow = L;
+        if (R > Rhigh) Rhigh = R;  if (R < Rlow) Rlow = R;
+        n++;
+    }
+};
+static SideLook sideLook = { 0, INT_MAX, 0, INT_MAX, 0 };
+
+static void applyLookaheadSides() {
+    AbsDir leftDir  = (AbsDir)(((int)robotHeading + 3) % 4);
+    AbsDir rightDir = (AbsDir)(((int)robotHeading + 1) % 4);
+    if (sideLook.n > 0) {
+        // Wall present iff peak reading exceeds threshold AND min reading
+        // stayed above half-threshold (no mid-window drop = no opening).
+        bool hasL = (sideLook.Lhigh > WALL_SIDE_THRESH) &&
+                    (sideLook.Llow  > WALL_SIDE_THRESH / 2);
+        bool hasR = (sideLook.Rhigh > WALL_SIDE_THRESH) &&
+                    (sideLook.Rlow  > WALL_SIDE_THRESH / 2);
+        maze.setWall(robotRow, robotCol, leftDir,  hasL);
+        maze.setWall(robotRow, robotCol, rightDir, hasR);
+    } else {
+        maze.setWall(robotRow, robotCol, leftDir,  wallLeft());
+        maze.setWall(robotRow, robotCol, rightDir, wallRight());
+    }
+    sideLook.reset();
 }
 
 void ensureFrontClearance() {
@@ -385,6 +434,13 @@ void advanceToCellCenter() {
     unsigned long nextUs = micros();
     unsigned long t0     = millis();
 
+    constexpr float POS_KP_PWM     = 0.08f;
+    constexpr float YAW_KP_PWM     = 8.0f;
+    constexpr int   POS_BIAS_MAX   = 120;
+    constexpr int   YAW_BIAS_MAX   = 150;
+    constexpr int   LATERAL_MAX    = 220;
+    constexpr float CRASH_BRAKE_MM = 30.0f;
+
     while (true) {
         while ((long)(micros() - nextUs) < 0) {}
         nextUs += VPID_LOOP_US;
@@ -397,16 +453,23 @@ void advanceToCellCenter() {
         if (avg >= CENTER_ADVANCE_TICKS) break;
         if (millis() - t0 > 1500) break;
 
-        // Yaw + IR lateral bias (positive → steer right)
-        constexpr float IR_CTR_K = 0.10f;
-        constexpr float YAW_K    = 3.0f;
-        float irCorr = 0;
+        // Front safety — stop early if a wall is suddenly close.
+        if (wallFront() && IRCal::estimateFrontDistMM(irVal[0], irVal[3]) <= CRASH_BRAKE_MM) {
+            break;
+        }
+
         bool wL = irVal[1] > WALL_SIDE_THRESH;
         bool wR = irVal[2] > WALL_SIDE_THRESH;
-        if (wL && wR)  irCorr = IR_CTR_K * ((irVal[1]-calL) - (irVal[2]-calR));
-        else if (wL)   irCorr = IR_CTR_K *  (irVal[1]-calL);
-        else if (wR)   irCorr = IR_CTR_K * -(irVal[2]-calR);
-        int bias = constrain((int)(yaw * YAW_K + irCorr), -200, 200);
+        int posErr = 0;
+        if (wL && wR)  posErr = (irVal[1] - calL) - (irVal[2] - calR);
+        else if (wL)   posErr =  (irVal[1] - calL);
+        else if (wR)   posErr = -(irVal[2] - calR);
+
+        int posBias = (int)constrain(POS_KP_PWM * (float)posErr,
+                                     (float)-POS_BIAS_MAX, (float)POS_BIAS_MAX);
+        int yawBias = (int)constrain(YAW_KP_PWM * yaw,
+                                     (float)-YAW_BIAS_MAX, (float)YAW_BIAS_MAX);
+        int bias = constrain(posBias + yawBias, -LATERAL_MAX, LATERAL_MAX);
 
         int pwmL, pwmR;
         vpidStep(st, (float)CELL_TARGET_MMS, curL, curR, bias, pwmL, pwmR);
@@ -417,25 +480,43 @@ void advanceToCellCenter() {
 }
 
 // ── Drive forward, chaining same-heading cells (cascade-driven) ──────────────
-// Replaces the old bespoke trapezoid + per-wheel PI. Inner loop is the
-// cascaded velocity PI; cell-boundary detection, mid-cell brake, crash
-// guard, and lateral bias from IR/yaw stay the same.
+// Cell boundary is IR-anchored when a front wall is present (front-LUT
+// distance ≤ CELL_ANCHOR_MM ≈ robot center at cell center); falls back to
+// encoder tick count when no front wall. Hard crash brake at ≤ 30 mm.
+//
+// Lateral hold is direct PWM bias from side-IR position error + gyro yaw,
+// no longer routed through the (too-weak) YAW_KP*yaw chain.
 void driveChain() {
     leftEnc.reset(); rightEnc.reset();
     long refL = leftEnc.getTicks(), refR = rTicks();
     yaw = 0; lastImuUs = micros();
+    sideLook.reset();
 
     VpidState st; st.reset(readVbat());
-    unsigned long nextUs = micros();
-    long cellBoundary  = TICKS_PER_CELL;
+    unsigned long nextUs  = micros();
+    // First cell after START is longer — robot back was against wall, axle
+    // ~30 mm from south of cell 0, so reaching cell 1 center needs ~60 mm
+    // more than a normal cell pitch.
+    constexpr long FIRST_CELL_EXTRA = (long)(60.0f / MM_PER_TICK);
+    long          cellBoundary = firstCellOfRun
+        ? TICKS_PER_CELL + FIRST_CELL_EXTRA
+        : TICKS_PER_CELL;
+    // Look-ahead becomes valid once sensor has scanned past current cell's
+    // far edge into the next cell — geometrically ≈ 17% of the cell.
+    const long LOOKAHEAD_START_TICKS = TICKS_PER_CELL / 5;
     unsigned long startMs = millis();
-    unsigned long lastIR  = 0;
 
-    constexpr float YAW_KP     = 3.0f;
-    constexpr float YAW_KI     = 0.3f;
-    constexpr float IR_ALIGN_K = 0.005f;
-    constexpr int   LATERAL_MAX = 200;
-    float yawInteg = 0.0f;
+    // Lateral controller — direct PWM units.
+    constexpr float POS_KP_PWM   = 0.08f;   // pwm per IR-unit position error
+    constexpr float YAW_KP_PWM   = 8.0f;    // pwm per degree yaw error
+    constexpr int   POS_BIAS_MAX = 120;
+    constexpr int   YAW_BIAS_MAX = 150;
+    constexpr int   LATERAL_MAX  = 220;
+
+    // IR-anchored stop / cell thresholds (sensor-to-wall, mm).
+    // Per IRCal LUT: avg ≥ 3914 → 10 mm; 3138 → 40 mm; 2552 → 50 mm.
+    constexpr float CRASH_BRAKE_MM  = 30.0f;
+    constexpr float CELL_ANCHOR_MM  = 50.0f;
 
     while (true) {
         while ((long)(micros() - nextUs) < 0) {}
@@ -444,88 +525,89 @@ void driveChain() {
 
         long curL = leftEnc.getTicks();
         long curR = rTicks();
-        long tL   = curL - refL;
-        long tR   = curR - refR;
-        long avg  = (tL + tR) / 2;
+        long avg  = ((curL - refL) + (curR - refR)) / 2;
 
-        // Periodic IR sample (every 25 ms).
-        if (millis() - lastIR > 25) {
-            sampleIR();
-            lastIR = millis();
+        // Sample IR every control loop (5 ms). Side-sensor wall→opening
+        // transition lasts ~30 ms at 300 mm/s; per-loop sampling catches it.
+        sampleIR();
+
+        // Build look-ahead estimate of NEXT cell's side walls. Sensor is
+        // geometrically aimed into the next cell once we're past the first
+        // ~17% of the current cell.
+        if (avg > LOOKAHEAD_START_TICKS) {
+            sideLook.update(irVal[1], irVal[2]);
         }
 
-        // Imminent-crash brake — both front sensors very close.
-        if (irVal[0] > 3500 && irVal[3] > 3500) {
-            stopMotors();
-            crashFlag    = true;
-            crashRow     = robotRow;
-            crashCol     = robotCol;
-            crashHeading = robotHeading;
-            for (int i = 0; i < 4; i++) crashIR[i] = irVal[i];
-            crashReason  = "front imminent";
-            return;
-        }
+        // ── Front-wall handling: IR is ground truth when wall present. ────────
+        bool  frontWall = wallFront();
+        float frontMM   = frontWall
+            ? IRCal::estimateFrontDistMM(irVal[0], irVal[3])
+            : 999.0f;
 
-        // Mid-cell bump guard: front sensor crosses MID_BRAKE_FRAC of cal
-        // (typical when a side opens and lateral reference is lost).
-        int midBrakeLF = (int)(calLF * MID_BRAKE_FRAC);
-        int midBrakeRF = (int)(calRF * MID_BRAKE_FRAC);
-        bool frontClose = (irVal[0] > midBrakeLF || irVal[3] > midBrakeRF);
-        bool pastThird  = (avg > TICKS_PER_CELL / 3);
+        bool crashBrake = frontWall && frontMM <= CRASH_BRAKE_MM;
+        bool irAnchor   = frontWall && frontMM <= CELL_ANCHOR_MM;
+        bool encAnchor  = (avg >= cellBoundary);
 
-        if (avg >= cellBoundary || (frontClose && pastThird)) {
+        if (crashBrake || irAnchor || encAnchor) {
             stopMotors();
-            delay(100);
+            delay(80);
             robotRow += DIR_DR[robotHeading];
             robotCol += DIR_DC[robotHeading];
             maze.visited[robotRow][robotCol] = true;
             AbsDir back = (AbsDir)(((int)robotHeading + 2) % 4);
             maze.setWall(robotRow, robotCol, back, false);
             sampleIR();
-            senseWalls();
+            // Front wall is sampled correctly at cell-center. Sides use
+            // look-ahead data captured during the approach.
+            senseWallsFrontOnly();
+            applyLookaheadSides();
+            firstCellOfRun = false;
             maze.floodFill();
 
             if (maze.isGoal(robotRow, robotCol)) return;
             uint8_t bd;
             AbsDir best = maze.bestDirectionBiased(robotRow, robotCol, robotHeading, bd);
             if (bd == FLOOD_INFINITY || best != robotHeading) {
-                return;  // RUN handles turn / no-path
+                return;
             }
+            // If we stopped because wall is right ahead, can't go straight.
+            if (crashBrake) return;
 
-            // Continue straight — seed next cell's yaw bias from IR center error.
-            float yawBias = 0;
-            bool wL = wallLeft();
-            bool wR = wallRight();
-            int align = 0;
-            if (wL && wR)      align = (irVal[1] - calL) - (irVal[2] - calR);
-            else if (wL)       align = irVal[1] - calL;
-            else if (wR)       align = -(irVal[2] - calR);
-            yawBias = constrain(IR_ALIGN_K * (float)align, -5.0f, 5.0f);
+            // Continue straight — seed next-cell yaw bias from IR center error.
+            float seed = 0;
+            int   align = 0;
+            bool  wLn = wallLeft();
+            bool  wRn = wallRight();
+            if (wLn && wRn) align = (irVal[1] - calL) - (irVal[2] - calR);
+            else if (wLn)   align =  (irVal[1] - calL);
+            else if (wRn)   align = -(irVal[2] - calR);
+            seed = constrain(0.005f * (float)align, -5.0f, 5.0f);
 
             refL = leftEnc.getTicks();
             refR = rTicks();
             cellBoundary = TICKS_PER_CELL;
-            yaw = yawBias;
-            yawInteg = 0.0f;
-            lastImuUs = micros();
-            // Reset cascade state too — new cell, fresh integrator.
+            yaw          = seed;
+            lastImuUs    = micros();
             st.reset(readVbat());
             st.prevL = curL; st.prevR = curR;
+            continue;
         }
 
-        // Lateral bias (IR centering + yaw hold), summed to pwmL+/pwmR-.
-        float irBias = 0;
-        {
-            bool wLl = irVal[1] > WALL_SIDE_THRESH;
-            bool wRl = irVal[2] > WALL_SIDE_THRESH;
-            if (wLl && wRl)    irBias = IR_ALIGN_K * ((irVal[1]-calL) - (irVal[2]-calR));
-            else if (wLl)      irBias = IR_ALIGN_K *  (irVal[1]-calL);
-            else if (wRl)      irBias = IR_ALIGN_K * -(irVal[2]-calR);
-            irBias = constrain(irBias, -5.0f, 5.0f);
-        }
-        yawInteg = constrain(yawInteg + yaw * 0.001f, -8.0f, 8.0f);
-        int lateralBias = (int)((yaw + irBias) * YAW_KP + yawInteg * YAW_KI);
-        lateralBias = constrain(lateralBias, -LATERAL_MAX, LATERAL_MAX);
+        // ── Lateral bias (direct PWM units) ───────────────────────────────────
+        // posErr > 0  ↔ drifted left (L sensor closer to wall, R farther).
+        // Positive bias → L faster, R slower → robot steers right. ✓
+        bool wL = irVal[1] > WALL_SIDE_THRESH;
+        bool wR = irVal[2] > WALL_SIDE_THRESH;
+        int posErr = 0;
+        if (wL && wR)   posErr = (irVal[1] - calL) - (irVal[2] - calR);
+        else if (wL)    posErr =  (irVal[1] - calL);
+        else if (wR)    posErr = -(irVal[2] - calR);
+
+        int posBias = (int)constrain(POS_KP_PWM * (float)posErr,
+                                     (float)-POS_BIAS_MAX, (float)POS_BIAS_MAX);
+        int yawBias = (int)constrain(YAW_KP_PWM * yaw,
+                                     (float)-YAW_BIAS_MAX, (float)YAW_BIAS_MAX);
+        int lateralBias = constrain(posBias + yawBias, -LATERAL_MAX, LATERAL_MAX);
 
         int pwmL, pwmR;
         vpidStep(st, (float)CELL_TARGET_MMS, curL, curR, lateralBias, pwmL, pwmR);
@@ -540,12 +622,12 @@ void driveChain() {
 }
 
 // ── State + menu ─────────────────────────────────────────────────────────────
-enum State { IDLE, CAL, CAL_GYRO, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL, CRASH };
+enum State { IDLE, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL, CRASH };
 State robotState = IDLE;
 
-enum MenuItem { M_CAL = 0, M_CAL_GYRO, M_TEST_MOTOR, M_TEST_ENC, M_TEST_IR, M_START, M_COUNT };
+enum MenuItem { M_TEST_MOTOR = 0, M_TEST_ENC, M_TEST_IR, M_START, M_COUNT };
 static const char* MENU_LABELS[M_COUNT] = {
-    "Cal IR", "Cal Gyro", "Test Motor", "Test Encoder", "Test IR", "START"
+    "Test Motor", "Test Encoder", "Test IR", "START"
 };
 static int  menuSel    = M_START;
 static long menuEncRef = 0;
@@ -566,6 +648,27 @@ bool buttonEdge() {
 }
 
 // ── OLED screens ─────────────────────────────────────────────────────────────
+// 2S LiPo: empty 6.0V (3.0/cell), full 8.4V (4.2/cell). Fill bar maps to %.
+static void drawBatteryIcon(int x, int y) {
+    float vb  = readVbat();
+    float pct = constrain((vb - 6.0f) / (8.4f - 6.0f), 0.0f, 1.0f);
+    constexpr int W = 14, H = 6;
+    oled.drawFrame(x, y, W, H);
+    oled.drawBox(x + W, y + 2, 2, H - 4);
+    int fill = (int)(pct * (W - 2) + 0.5f);
+    if (fill > 0) oled.drawBox(x + 1, y + 1, fill, H - 2);
+}
+
+static void drawBatteryHeader(int yBaseline) {
+    char vbuf[8];
+    snprintf(vbuf, sizeof(vbuf), "%.1fV", readVbat());
+    int vw = oled.getStrWidth(vbuf);
+    int iconX = 128 - 16;          // 14W + 2 tip
+    int iconY = yBaseline - 7;
+    drawBatteryIcon(iconX, iconY);
+    oled.drawStr(iconX - vw - 2, yBaseline, vbuf);
+}
+
 void oledMenu() {
     const int VIS = 5;
     int top = menuSel - VIS / 2;
@@ -576,8 +679,7 @@ void oledMenu() {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(0, 8, "MM26");
-    char hdr[20]; snprintf(hdr, sizeof(hdr), "%d/%d", menuSel + 1, M_COUNT);
-    oled.drawStr(96, 8, hdr);
+    drawBatteryHeader(8);
     oled.drawHLine(0, 10, 128);
 
     const int LH = 10;
@@ -622,25 +724,6 @@ void calibrateGyro() {
     gyroBiasZ = (good > 0) ? sum / good : 0;
     yaw = 0;
     lastImuUs = micros();
-}
-
-void oledCal() {
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_6x10_tf);
-    oled.drawStr(0, 8, "CAL: dead-end");
-    oled.drawHLine(0, 10, 128);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "LF %4d  c%d", irVal[0], calLF);
-    oled.drawStr(0, 22, buf);
-    snprintf(buf, sizeof(buf), "L  %4d  c%d", irVal[1], calL);
-    oled.drawStr(0, 34, buf);
-    snprintf(buf, sizeof(buf), "R  %4d  c%d", irVal[2], calR);
-    oled.drawStr(0, 46, buf);
-    snprintf(buf, sizeof(buf), "RF %4d  c%d", irVal[3], calRF);
-    oled.drawStr(0, 58, buf);
-    oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(0, 64, "btn=save");
-    oled.sendBuffer();
 }
 
 void oledEncoderTest() {
@@ -691,8 +774,10 @@ void oledBars() {
 
 void oledRunStatus(const char* msg) {
     oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "RUN");
+    drawBatteryHeader(8);
     oled.setFont(u8g2_font_6x12_tf);
-    oled.drawStr(0, 10, "RUN");
     oled.drawHLine(0, 12, 128);
     char buf[24];
     snprintf(buf, sizeof(buf), "r%u c%u", robotRow, robotCol);
@@ -811,35 +896,19 @@ void loop() {
             }
             if (buttonEdge()) {
                 switch (menuSel) {
-                    case M_CAL:        sampleIR(); oledCal(); robotState = CAL; break;
-                    case M_CAL_GYRO:   calibrateGyro(); oledMenu(); break;
                     case M_TEST_MOTOR: robotState = TEST_MOTOR; break;
                     case M_TEST_ENC:   leftEnc.reset(); rightEnc.reset();
                                        oledEncoderTest();
                                        robotState = TEST_ENC; break;
                     case M_TEST_IR:    sampleIR(); oledBars();
                                        robotState = TEST_IR; break;
-                    case M_START:      for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(1000); }
+                    case M_START:      for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(333); }
                                        robotRow = 0; robotCol = 0; robotHeading = DIR_NORTH;
+                                       firstCellOfRun = true;
                                        setupMaze();
                                        oledRunStatus("go");
                                        robotState = RUN; break;
                 }
-            }
-            break;
-        }
-
-        case CAL: {
-            static uint32_t last = 0;
-            if (millis() - last > 100) { sampleIR(); oledCal(); last = millis(); }
-            if (buttonEdge()) {
-                calLF = irVal[0];
-                calL  = irVal[1];
-                calR  = irVal[2];
-                calRF = irVal[3];
-                menuEncRef = rightEnc.getTicks();
-                oledMenu();
-                robotState = IDLE;
             }
             break;
         }
@@ -883,7 +952,10 @@ void loop() {
             maze.visited[robotRow][robotCol] = true;
 
             sampleIR();
-            senseWalls();
+            // At cell-center, only the front sensor reads the correct cell.
+            // Side walls of the current cell were populated by the previous
+            // driveChain's look-ahead window during approach.
+            senseWallsFrontOnly();
             maze.floodFill();
 
             uint8_t bestDist;

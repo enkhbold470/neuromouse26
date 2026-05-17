@@ -98,7 +98,7 @@ constexpr long    TICKS_PER_CELL   = 350;     // empirical, validated by tape
 // velocity PID computes per-loop PWM from target mm/s, kV, and FF — actual
 // running duty is determined by the controller, not these constants.
 constexpr int     DRIVE_PWM        = 250;
-constexpr int     TURN_PWM         = 200;
+constexpr int     TURN_PWM         = 250;
 constexpr int     DRIVE_PWM_MIN    = 100;     // 200 Hz motors reliably start
                                               // around 10 % duty
 
