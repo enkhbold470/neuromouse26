@@ -129,18 +129,18 @@ constexpr float   OFF_L            = 0.0f;
 constexpr float   OFF_R            = 0.0f;
 
 // Default cell-cruise target mm/s. Recalibrate motors before raising.
-constexpr int     CELL_TARGET_MMS  = 300;
+constexpr int     CELL_TARGET_MMS  = 250;
 
 // ── Gyro turn (trapezoidal ω + PID on integrated yaw) ────────────────────────
 // Surface-independent. Peak/accel scaled for TURN_PWM cap above.
-constexpr float   TURN_PEAK_OMEGA_DPS  = 200.0f;
-constexpr float   TURN_ACCEL_DPS2      = 1200.0f;
+constexpr float   TURN_PEAK_OMEGA_DPS  = 150.0f;
+constexpr float   TURN_ACCEL_DPS2      = 800.0f;
 constexpr float   TURN_KFF_PWM_PER_DPS = 1.0f;
 constexpr float   TURN_KP_PWM_PER_DEG  = 12.0f;
 constexpr float   TURN_KD_PWM_PER_DPS  = 0.4f;
-constexpr int     TURN_MIN_HOLD_PWM    = 100; // stiction floor during hold
-constexpr float   TURN_DEADBAND_DEG    = 3.0f;
-constexpr unsigned long TURN_HOLD_MS    = 350;
+constexpr int     TURN_MIN_HOLD_PWM    = 80;  // stiction floor during hold
+constexpr float   TURN_DEADBAND_DEG    = 1.0f;
+constexpr unsigned long TURN_HOLD_MS    = 400;
 constexpr unsigned long TURN_TIMEOUT_MS = 4000;
 constexpr unsigned long TURN_SETTLE_MS  = 200;
 
@@ -169,6 +169,11 @@ constexpr int     WALL_FRONT_THRESH = 1400;
 
 // ── Drive loop misc ──────────────────────────────────────────────────────────
 constexpr int     TIMEOUT_MS       = 5000;    // per-cell drive timeout
+
+// Pause after the cell-boundary stopMotors() before pose update / sensing.
+// 0 = no pause (max speed). >0 helps if motors coast past the boundary or
+// the chassis rocks at brake. Original value before tuning was 80 ms.
+constexpr unsigned long CELL_STOP_DELAY_MS = 0;
 
 // ── Maze constants ────────────────────────────────────────────────────────────
 constexpr uint8_t MAZE_SIZE        = 16;

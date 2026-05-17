@@ -218,6 +218,15 @@ void doTurn(float targetDeg) {
     lastImuUs = micros();
     TurnProfile prof; prof.init(targetDeg);
 
+    // Counter-rotation pivot — one wheel forward, other reverse, equal
+    // angular speed → pivot around robot center with zero translation.
+    // KV_L ≠ KV_R, so same PWM produces different wheel speeds and the
+    // pivot center drifts off-axis. Scale each wheel's PWM by kV_avg/kV_i
+    // so |vL| == |vR| at any commanded PWM.
+    constexpr float kV_avg     = 0.5f * (KV_L + KV_R);
+    constexpr float L_TURN_SCL = kV_avg / KV_L;   // >1 if L weaker
+    constexpr float R_TURN_SCL = kV_avg / KV_R;   // >1 if R weaker
+
     unsigned long t0     = millis();
     unsigned long lastUs = micros();
     float prevErr  = 0;
@@ -244,15 +253,28 @@ void doTurn(float targetDeg) {
                   + TURN_KP_PWM_PER_DEG  * err
                   + TURN_KD_PWM_PER_DPS  * derr;
 
-        bool holding = (t >= prof.t_tot);
-        if (holding && fabsf(pwm) > 1.0f && fabsf(pwm) < TURN_MIN_HOLD_PWM) {
-            pwm = (pwm > 0) ? TURN_MIN_HOLD_PWM : -TURN_MIN_HOLD_PWM;
+        bool holding    = (t >= prof.t_tot);
+        bool inDeadband = (fabsf(targetDeg - yaw) <= TURN_DEADBAND_DEG);
+
+        // Motor deadband fix — at small pwm magnitudes one wheel stalls
+        // (causes the "right turn but right wheel doesn't reverse" symptom
+        // during the trapezoid's accel ramp). If we want motion (not yet in
+        // deadband), force pwm to at least TURN_MIN_HOLD_PWM in the
+        // commanded direction. The commanded direction is targetDeg's sign
+        // (overall turn direction), not pwm's sign, so we never reverse the
+        // intended rotation when P/D briefly push the other way.
+        if (!inDeadband) {
+            int wantSign = (targetDeg >= 0) ? +1 : -1;
+            if (fabsf(pwm) < TURN_MIN_HOLD_PWM) {
+                pwm = wantSign * TURN_MIN_HOLD_PWM;
+            }
         }
+
         if (pwm >  TURN_PWM) pwm =  TURN_PWM;
         if (pwm < -TURN_PWM) pwm = -TURN_PWM;
 
-        leftMotor.drive(-(int)pwm);
-        rightMotor.drive( (int)pwm);
+        leftMotor.drive(-(int)(pwm * L_TURN_SCL));
+        rightMotor.drive( (int)(pwm * R_TURN_SCL));
 
         if (fabsf(err) > peakErr) peakErr = fabsf(err);
 
@@ -271,9 +293,82 @@ void doTurn(float targetDeg) {
                   targetDeg, yaw, targetDeg - yaw, peakErr);
 }
 
-void turnRight() { doTurn(-90); }
-void turnLeft()  { doTurn(+90); }
-void turnAround(){ doTurn(-180); }
+// ── Pro-technique helpers ────────────────────────────────────────────────────
+
+// Quick gyro re-bias before each turn. Bias drifts with temperature/time;
+// even ~0.1°/s of drift across a 0.85 s turn = 0.085° error. ~80 ms of
+// standstill sampling re-zeros it cheaply.
+static void quickGyroRecal(unsigned ms = 80) {
+    stopMotors();
+    unsigned long t0 = millis();
+    float sum = 0;
+    int   n   = 0;
+    while (millis() - t0 < ms) {
+        ImuRaw d;
+        if (imuReadAll(d)) { sum += d.gz / GYRO_SCALE; n++; }
+        delayMicroseconds(500);
+    }
+    if (n > 0) gyroBiasZ = sum / n;
+    yaw = 0;
+    lastImuUs = micros();
+}
+
+// Square robot perpendicular to the front wall using LF/RF reading
+// difference. At 30° outboard mount, if robot rotated left of perpendicular,
+// LF beam strikes wall closer to normal → higher reading; RF reads less.
+// Pivot until |LF - RF| < tolerance. Side benefit: zeros yaw, corrects
+// approach-pose drift before the next turn or drive.
+static void squareToFrontWall(unsigned long timeoutMs = 1200) {
+    constexpr float SQUARE_KP        = 0.30f;  // pwm per IR-unit diff
+    constexpr int   SQUARE_MAX_PWM   = 120;
+    constexpr int   SQUARE_MIN_PWM   = 70;     // motor deadband
+    constexpr int   SQUARE_TOL       = 40;     // |LF-RF| accept band
+    constexpr unsigned long HOLD_MS  = 150;
+
+    unsigned long t0 = millis();
+    unsigned long inBand = 0;
+    while (millis() - t0 < timeoutMs) {
+        sampleIR();
+        // Bail if front wall no longer visible (drifted away).
+        if (irVal[0] < WALL_FRONT_THRESH || irVal[3] < WALL_FRONT_THRESH) break;
+        int diff = irVal[0] - irVal[3];   // +: LF closer → robot rotated left
+        if (abs(diff) <= SQUARE_TOL) {
+            if (inBand == 0) inBand = millis();
+            if (millis() - inBand >= HOLD_MS) { stopMotors(); break; }
+            stopMotors();
+            delay(10);
+            continue;
+        } else {
+            inBand = 0;
+        }
+        int pwm = (int)constrain(SQUARE_KP * (float)diff,
+                                 (float)-SQUARE_MAX_PWM, (float)SQUARE_MAX_PWM);
+        if (pwm > 0 && pwm < SQUARE_MIN_PWM) pwm = SQUARE_MIN_PWM;
+        if (pwm < 0 && pwm > -SQUARE_MIN_PWM) pwm = -SQUARE_MIN_PWM;
+        // +pwm = CW pivot (R wheel reverse, L wheel forward) corrects left
+        // rotation. Same kV scaling as doTurn for symmetric pivot.
+        constexpr float kV_avg = 0.5f * (KV_L + KV_R);
+        leftMotor.drive( (int)( pwm * (kV_avg / KV_L)));
+        rightMotor.drive((int)(-pwm * (kV_avg / KV_R)));
+        delay(8);
+    }
+    stopMotors();
+    yaw = 0;
+    lastImuUs = micros();
+}
+
+void turnRight() { quickGyroRecal();  doTurn(-90); }
+void turnLeft()  { quickGyroRecal();  doTurn(+90); }
+// 180° as two chained 90°s — single 180° doubles momentum/error budget and
+// is the least-reliable single move. Two 90°s with a brief settle between
+// gives independent error budgets and lets gyro re-zero mid-spin.
+void turnAround() {
+    quickGyroRecal();
+    doTurn(-90);
+    delay(80);
+    quickGyroRecal();
+    doTurn(-90);
+}
 
 // ── Cascaded velocity PI — SOTA inner-loop drive ─────────────────────────────
 // One iteration of the cascade. Caller manages encoder reset, target velocity,
@@ -375,18 +470,18 @@ static SideLook sideLook = { 0, INT_MAX, 0, INT_MAX, 0 };
 static void applyLookaheadSides() {
     AbsDir leftDir  = (AbsDir)(((int)robotHeading + 3) % 4);
     AbsDir rightDir = (AbsDir)(((int)robotHeading + 1) % 4);
-    if (sideLook.n > 0) {
-        // Wall present iff peak reading exceeds threshold AND min reading
-        // stayed above half-threshold (no mid-window drop = no opening).
+    // Need a few clean look-ahead samples to trust the call. Approach to a
+    // close front wall poisons late samples (front wall enters 30° side
+    // cone) so we may end up with very few valid ones; in that case leave
+    // the side walls at their prior state rather than writing phantoms.
+    constexpr int MIN_LOOKAHEAD_SAMPLES = 3;
+    if (sideLook.n >= MIN_LOOKAHEAD_SAMPLES) {
         bool hasL = (sideLook.Lhigh > WALL_SIDE_THRESH) &&
                     (sideLook.Llow  > WALL_SIDE_THRESH / 2);
         bool hasR = (sideLook.Rhigh > WALL_SIDE_THRESH) &&
                     (sideLook.Rlow  > WALL_SIDE_THRESH / 2);
         maze.setWall(robotRow, robotCol, leftDir,  hasL);
         maze.setWall(robotRow, robotCol, rightDir, hasR);
-    } else {
-        maze.setWall(robotRow, robotCol, leftDir,  wallLeft());
-        maze.setWall(robotRow, robotCol, rightDir, wallRight());
     }
     sideLook.reset();
 }
@@ -434,8 +529,8 @@ void advanceToCellCenter() {
     unsigned long nextUs = micros();
     unsigned long t0     = millis();
 
-    constexpr float POS_KP_PWM     = 0.08f;
-    constexpr float YAW_KP_PWM     = 8.0f;
+    constexpr float POS_KP_PWM     = 0.04f;
+    constexpr float YAW_KP_PWM     = 4.0f;
     constexpr int   POS_BIAS_MAX   = 120;
     constexpr int   YAW_BIAS_MAX   = 150;
     constexpr int   LATERAL_MAX    = 220;
@@ -494,10 +589,10 @@ void driveChain() {
 
     VpidState st; st.reset(readVbat());
     unsigned long nextUs  = micros();
-    // First cell after START is longer — robot back was against wall, axle
-    // ~30 mm from south of cell 0, so reaching cell 1 center needs ~60 mm
-    // more than a normal cell pitch.
-    constexpr long FIRST_CELL_EXTRA = (long)(60.0f / MM_PER_TICK);
+    // First cell after START is longer — robot back against wall puts robot
+    // center 40 mm short of cell-0 center (user-measured). Reaching cell 1
+    // center therefore needs cell pitch + 40 mm.
+    constexpr long FIRST_CELL_EXTRA = (long)(40.0f / MM_PER_TICK);
     long          cellBoundary = firstCellOfRun
         ? TICKS_PER_CELL + FIRST_CELL_EXTRA
         : TICKS_PER_CELL;
@@ -507,8 +602,8 @@ void driveChain() {
     unsigned long startMs = millis();
 
     // Lateral controller — direct PWM units.
-    constexpr float POS_KP_PWM   = 0.08f;   // pwm per IR-unit position error
-    constexpr float YAW_KP_PWM   = 8.0f;    // pwm per degree yaw error
+    constexpr float POS_KP_PWM   = 0.04f;   // pwm per IR-unit position error
+    constexpr float YAW_KP_PWM   = 4.0f;    // pwm per degree yaw error
     constexpr int   POS_BIAS_MAX = 120;
     constexpr int   YAW_BIAS_MAX = 150;
     constexpr int   LATERAL_MAX  = 220;
@@ -531,18 +626,24 @@ void driveChain() {
         // transition lasts ~30 ms at 300 mm/s; per-loop sampling catches it.
         sampleIR();
 
-        // Build look-ahead estimate of NEXT cell's side walls. Sensor is
-        // geometrically aimed into the next cell once we're past the first
-        // ~17% of the current cell.
-        if (avg > LOOKAHEAD_START_TICKS) {
-            sideLook.update(irVal[1], irVal[2]);
-        }
-
         // ── Front-wall handling: IR is ground truth when wall present. ────────
         bool  frontWall = wallFront();
         float frontMM   = frontWall
             ? IRCal::estimateFrontDistMM(irVal[0], irVal[3])
             : 999.0f;
+
+        // Build look-ahead estimate of NEXT cell's side walls. Sensor is
+        // geometrically aimed into the next cell once we're past the first
+        // ~17% of the current cell.
+        //
+        // POISON FILTER: at front distances <60 mm the 30° side sensors
+        // pick up the FRONT wall in their forward-bias cone and report it
+        // as a "side wall". Reject samples in that range — they'd corrupt
+        // the look-ahead and cause a phantom side wall in the next cell.
+        constexpr float SIDE_POISON_MM = 60.0f;
+        if (avg > LOOKAHEAD_START_TICKS && frontMM > SIDE_POISON_MM) {
+            sideLook.update(irVal[1], irVal[2]);
+        }
 
         bool crashBrake = frontWall && frontMM <= CRASH_BRAKE_MM;
         bool irAnchor   = frontWall && frontMM <= CELL_ANCHOR_MM;
@@ -550,13 +651,22 @@ void driveChain() {
 
         if (crashBrake || irAnchor || encAnchor) {
             stopMotors();
-            delay(80);
+            if (CELL_STOP_DELAY_MS > 0) delay(CELL_STOP_DELAY_MS);
             robotRow += DIR_DR[robotHeading];
             robotCol += DIR_DC[robotHeading];
             maze.visited[robotRow][robotCol] = true;
             AbsDir back = (AbsDir)(((int)robotHeading + 2) % 4);
             maze.setWall(robotRow, robotCol, back, false);
             sampleIR();
+            // Front-wall squaring: if we stopped because of a wall ahead,
+            // pivot until LF == RF → robot perpendicular → yaw zeroed →
+            // both lateral pose and angle are calibrated for free. Pro
+            // technique: front wall is the most reliable pose reference in
+            // the maze.
+            if (wallFront()) {
+                squareToFrontWall();
+                sampleIR();   // refresh after pivot
+            }
             // Front wall is sampled correctly at cell-center. Sides use
             // look-ahead data captured during the approach.
             senseWallsFrontOnly();
