@@ -128,7 +128,10 @@ static bool   crashDrawn = false;
 #define REG_GYRO_CFG      0x1B
 #define REG_ACCEL_CFG     0x1C
 #define REG_ACCEL_XOUT_H  0x3B
-#define GYRO_SCALE        131.0f
+// Gyro full-scale: 0x00=±250(131), 0x08=±500(65.5), 0x10=±1000(32.8), 0x18=±2000(16.4)
+// Must exceed TURN_PEAK_OMEGA_DPS to avoid clipping.
+#define GYRO_FS_SEL       0x10
+#define GYRO_SCALE        32.8f
 
 struct ImuRaw { int16_t ax, ay, az, temp, gx, gy, gz; };
 
@@ -136,8 +139,16 @@ static float gyroBiasZ = 0.0f;
 static float yaw = 0.0f;
 static unsigned long lastImuUs = 0;
 
-constexpr float TURN_OVERSHOOT_90  = 10.0f;
-constexpr float TURN_OVERSHOOT_180 = 20.0f;
+// Closed-loop turn: trapezoidal ω profile + Kff + PID on integrated yaw.
+// Surface-independent — PID corrects whatever the robot actually does.
+// Peak/accel scaled to TURN_PWM=200 (lower than test rig's 380).
+constexpr float TURN_PEAK_OMEGA_DPS  = 200.0f;
+constexpr float TURN_ACCEL_DPS2      = 1200.0f;
+constexpr float TURN_KFF_PWM_PER_DPS = 1.0f;
+constexpr float TURN_KP_PWM_PER_DEG  = 12.0f;
+constexpr float TURN_KD_PWM_PER_DPS  = 0.4f;
+constexpr unsigned long TURN_HOLD_MS    = 350;
+constexpr unsigned long TURN_TIMEOUT_MS = 4000;
 
 // Front-wall safety derived from calLF/calRF (dead-end center reading).
 // MID_BRAKE_FRAC: mid-cell brake fires when LF or RF exceeds this fraction
@@ -188,11 +199,52 @@ static void updateYaw() {
     yaw += gz * dt;
 }
 
-static inline float turnOvershootDeg(float target) {
-    float a = fabsf(target);
-    float slope = (TURN_OVERSHOOT_180 - TURN_OVERSHOOT_90) / 90.0f;
-    return TURN_OVERSHOOT_90 + slope * (a - 90.0f);
-}
+// Trapezoidal angular-velocity profile. Triangle if target small.
+struct TurnProfile {
+    float accel, peak, target;
+    float t_acc, t_cru, t_tot;
+    float d_acc, d_cru;
+    int   sign;
+
+    void init(float targetDeg) {
+        sign   = (targetDeg >= 0) ? 1 : -1;
+        target = fabsf(targetDeg);
+        accel  = TURN_ACCEL_DPS2;
+        peak   = TURN_PEAK_OMEGA_DPS;
+        float d_full_acc = (peak * peak) / (2.0f * accel);
+        if (2.0f * d_full_acc >= target) {
+            peak  = sqrtf(accel * target);
+            d_acc = target * 0.5f;
+            d_cru = 0;
+        } else {
+            d_acc = d_full_acc;
+            d_cru = target - 2.0f * d_full_acc;
+        }
+        t_acc = peak / accel;
+        t_cru = (peak > 0) ? d_cru / peak : 0;
+        t_tot = 2.0f * t_acc + t_cru;
+    }
+
+    void at(float t, float& angle_des, float& omega_des) const {
+        float a, w;
+        if (t < t_acc) {
+            w = accel * t;
+            a = 0.5f * accel * t * t;
+        } else if (t < t_acc + t_cru) {
+            w = peak;
+            a = d_acc + peak * (t - t_acc);
+        } else if (t < t_tot) {
+            float tp = t - t_acc - t_cru;
+            w = peak - accel * tp;
+            a = d_acc + d_cru + peak * tp - 0.5f * accel * tp * tp;
+        } else {
+            w = 0;
+            a = target;
+        }
+        angle_des = sign * a;
+        omega_des = sign * w;
+    }
+};
 
 // ── Wheel speed monitor shared state ─────────────────────────────────────────
 struct { float rpmL, rpmR; bool stalledL, stalledR; } wheelSpeed = {};
@@ -202,44 +254,66 @@ static portMUX_TYPE speedMux = portMUX_INITIALIZER_UNLOCKED;
 void stopMotors()    { leftMotor.brake(); rightMotor.brake(); }
 void encodersReset() { leftEnc.reset(); rightEnc.reset(); }
 
-// Gyro-based pivot. Right=neg yaw, Left=pos yaw. Brakes before target by
-// turnOvershootDeg(target), coast lands on target. Settles 200ms post-brake.
+// Closed-loop pivot: trapezoid ω profile + Kff + PID on integrated yaw.
+// PID drives motors to track desired angle in flight; after profile end,
+// continues tracking target until |err| stays inside TURN_VERIFY_THRESH for
+// TURN_HOLD_MS. Right=neg yaw, Left=pos yaw.
 void doTurn(float targetDeg) {
     yaw = 0;
     lastImuUs = micros();
-    float overshoot = turnOvershootDeg(targetDeg);
-    float stopAt = (targetDeg > 0) ? (targetDeg - overshoot)
-                                   : (targetDeg + overshoot);
-    int dir = (targetDeg > 0) ? 1 : -1;
-    leftMotor.drive(-dir * TURN_PWM);
-    rightMotor.drive( dir * TURN_PWM);
-    unsigned long t0 = millis();
+    TurnProfile prof; prof.init(targetDeg);
+
+    unsigned long t0     = millis();
+    unsigned long lastUs = micros();
+    float prevErr  = 0;
+    float peakErr  = 0;
+    unsigned long inBandStart = 0;
+
     while (true) {
         updateYaw();
-        if (targetDeg > 0 ? yaw >= stopAt : yaw <= stopAt) break;
-        if (millis() - t0 > 3000) break;
+        unsigned long nowMs = millis();
+        unsigned long nowUs = micros();
+        float t  = (nowMs - t0) / 1000.0f;
+        float dt = (nowUs - lastUs) / 1.0e6f;
+        if (dt < 1.0e-4f) continue;
+        lastUs = nowUs;
+
+        float angle_des, omega_des;
+        prof.at(t, angle_des, omega_des);
+
+        float err  = angle_des - yaw;
+        float derr = (err - prevErr) / dt;
+        prevErr    = err;
+
+        float pwm = TURN_KFF_PWM_PER_DPS * omega_des
+                  + TURN_KP_PWM_PER_DEG  * err
+                  + TURN_KD_PWM_PER_DPS  * derr;
+
+        bool holding = (t >= prof.t_tot);
+        if (holding && fabsf(pwm) > 1.0f && fabsf(pwm) < TURN_CORRECT_PWM) {
+            pwm = (pwm > 0) ? TURN_CORRECT_PWM : -TURN_CORRECT_PWM;
+        }
+        if (pwm >  TURN_PWM) pwm =  TURN_PWM;
+        if (pwm < -TURN_PWM) pwm = -TURN_PWM;
+
+        leftMotor.drive(-(int)pwm);
+        rightMotor.drive( (int)pwm);
+
+        if (fabsf(err) > peakErr) peakErr = fabsf(err);
+
+        if (holding && fabsf(targetDeg - yaw) <= TURN_VERIFY_THRESH) {
+            if (inBandStart == 0) inBandStart = nowMs;
+            if (nowMs - inBandStart >= TURN_HOLD_MS) break;
+        } else {
+            inBandStart = 0;
+        }
+        if (nowMs - t0 > TURN_TIMEOUT_MS) break;
     }
     stopMotors();
     unsigned long settleStart = millis();
     while (millis() - settleStart < 200) { updateYaw(); }
-
-    // Verify and correct: nudge at low speed if settled yaw is off target.
-    // Runs up to 3 times; stops each attempt when within 1° or after 400ms.
-    for (int attempt = 0; attempt < 3; attempt++) {
-        float err = targetDeg - yaw;
-        if (fabsf(err) <= TURN_VERIFY_THRESH) break;
-        int cdir = (err > 0) ? 1 : -1;
-        leftMotor.drive(-cdir * TURN_CORRECT_PWM);
-        rightMotor.drive( cdir * TURN_CORRECT_PWM);
-        unsigned long ct0 = millis();
-        while (millis() - ct0 < 400) {
-            updateYaw();
-            if (fabsf(targetDeg - yaw) <= 1.0f) break;
-        }
-        stopMotors();
-        unsigned long cs = millis();
-        while (millis() - cs < 80) { updateYaw(); }
-    }
+    Serial.printf("[TURN] tgt=%+.1f fin=%+.2f err=%+.2f peakProf=%.2f\n",
+                  targetDeg, yaw, targetDeg - yaw, peakErr);
 }
 
 // Forward declarations for chained-run logic.
@@ -773,7 +847,7 @@ void setup() {
     uint8_t who = 0;
     mpuRead(REG_WHO_AM_I, &who, 1);
     mpuWrite(REG_PWR_MGMT_1, 0x00); delay(50);
-    mpuWrite(REG_GYRO_CFG,   0x00);
+    mpuWrite(REG_GYRO_CFG,   GYRO_FS_SEL);
     mpuWrite(REG_ACCEL_CFG,  0x00);
     lastImuUs = micros();
     Serial.printf("[INIT] MPU WHO=0x%02X\n", who);

@@ -84,7 +84,7 @@ constexpr long    TURN_TICKS_90_R  = 410;
 // ── Drive tuning ─────────────────────────────────────────────────────────────
 // Change DRIVE_PWM only — ramp zones and TICKS_PER_CELL auto-scale.
 constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 400;   // ← only change this (0–1023)
+constexpr int     DRIVE_PWM        = 250;   // ← only change this (0–1023)
 constexpr int     TURN_PWM         = 200;
 constexpr int     DRIVE_PWM_MIN    = 100;   // 500Hz motors start at 10% duty reliably
 constexpr float   TURN_VERIFY_THRESH = 3.0f;  // degrees tolerance after pivot settle
