@@ -126,6 +126,34 @@
   <div class="cell"><label>off_R (ofr)</label><input id="p_ofr" value="0"></div>
 </div>
 
+<h2>IR sensor calibration</h2>
+<p style="font-size:11px;color:#888;margin-bottom:6px">
+  Place robot in dead-end (4 walls), centered. Stream → wait stable → Capture IR.
+  Values latch as new cal. Copy into <code>include/PinConfig.h</code> IR_CAL_* to make permanent.
+</p>
+<div class="row">
+  <button class="primary" id="btnIrStream" disabled>Start IR stream</button>
+  <button id="btnIrStop" disabled>Stop stream</button>
+  <button class="ok" id="btnIrCal" disabled>Capture IR cal</button>
+</div>
+<div id="irLive" style="background:#0a0a0a;border:1px solid #333;border-radius:4px;
+     padding:8px;margin-top:6px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+  <div><span style="font-size:10px;color:#888">LF live</span><br>
+       <span style="font-size:16px;color:#4fc3f7" id="irLF">--</span></div>
+  <div><span style="font-size:10px;color:#888">L  live</span><br>
+       <span style="font-size:16px;color:#4fc3f7" id="irL">--</span></div>
+  <div><span style="font-size:10px;color:#888">R  live</span><br>
+       <span style="font-size:16px;color:#4fc3f7" id="irR">--</span></div>
+  <div><span style="font-size:10px;color:#888">RF live</span><br>
+       <span style="font-size:16px;color:#4fc3f7" id="irRF">--</span></div>
+</div>
+<div class="grid" style="margin-top:8px">
+  <div class="cell"><label>calLF (clf)</label><input id="p_clf" value="3300"></div>
+  <div class="cell"><label>calL  (cl)</label><input id="p_cl"  value="1800"></div>
+  <div class="cell"><label>calR  (cr)</label><input id="p_cr"  value="1800"></div>
+  <div class="cell"><label>calRF (crf)</label><input id="p_crf" value="2500"></div>
+</div>
+
 <div class="row" style="margin-top:10px">
   <button class="primary" id="btnApplyAll" disabled>Apply ALL params</button>
   <span style="font-size:11px;color:#888">Changes also apply on Enter/blur per field.</span>
@@ -155,7 +183,8 @@
     p_kp:'kp', p_ki:'ki', p_il:'il', p_ema:'ema',
     p_str:'str', p_sm:'sm',
     p_lb:'lb', p_rb:'rb',
-    p_kvl:'kvl', p_kvr:'kvr', p_ofl:'ofl', p_ofr:'ofr'
+    p_kvl:'kvl', p_kvr:'kvr', p_ofl:'ofl', p_ofr:'ofr',
+    p_clf:'clf', p_cl:'cl', p_cr:'cr', p_crf:'crf'
   };
 
   function ts() {
@@ -179,7 +208,8 @@
     document.getElementById('btnSend').disabled       = !ok;
     document.getElementById('btnQuery').disabled      = !ok;
     document.getElementById('btnApplyAll').disabled   = !ok;
-    ['btnCal','btnRun','btnTape','btnChar','btnStop'].forEach(id =>
+    ['btnCal','btnRun','btnTape','btnChar','btnStop',
+     'btnIrStream','btnIrStop','btnIrCal'].forEach(id =>
       document.getElementById(id).disabled = !ok);
   }
 
@@ -262,6 +292,18 @@
     if (line.startsWith('cal done')) {
       setTimeout(() => send('?'), 200);
     }
+    // IR live stream — push into 4 readout boxes.
+    if (line.startsWith('ir LF=')) {
+      const m = Object.fromEntries(line.slice(3).split(/\s+/).map(kv => kv.split('=')));
+      if (m.LF) document.getElementById('irLF').textContent = m.LF;
+      if (m.L)  document.getElementById('irL').textContent  = m.L;
+      if (m.R)  document.getElementById('irR').textContent  = m.R;
+      if (m.RF) document.getElementById('irRF').textContent = m.RF;
+    }
+    // IR cal capture acknowledged — pull params so cal fields update.
+    if (line.startsWith('ircal done')) {
+      setTimeout(() => send('?'), 200);
+    }
     // Parse param dump: "p kp=1.00 ki=1.50 il=800 ..."
     if (line.startsWith('p ')) {
       const m = Object.fromEntries(line.slice(2).split(/\s+/)
@@ -283,6 +325,9 @@
   document.getElementById('btnTape').onclick       = () => send('tape');
   document.getElementById('btnChar').onclick       = () => send('char');
   document.getElementById('btnStop').onclick       = () => send('stop');
+  document.getElementById('btnIrStream').onclick   = () => send('irstream');
+  document.getElementById('btnIrStop').onclick     = () => send('irstop');
+  document.getElementById('btnIrCal').onclick      = () => send('ircal');
 
   function applyOne(id) {
     const v = document.getElementById(id).value.trim();

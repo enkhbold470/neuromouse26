@@ -129,6 +129,36 @@ enum BleAction { ACT_NONE = 0, ACT_RUN, ACT_TAPE, ACT_CHAR, ACT_CAL, ACT_STOP, A
 static volatile int          bleAction     = ACT_NONE;
 static volatile bool         stopRequested = false;
 
+// IR state: live ambient-subtracted readings + cal values (per-sensor anchor
+// captured in dead-end). irStream toggles continuous telemetry from main loop.
+struct IRPair { uint8_t emit, rx; };
+static IRPair PAIRS[4] = {
+    { EMIT_LF, RX_LF },
+    { EMIT_L,  RX_L  },
+    { EMIT_R,  RX_R  },
+    { EMIT_RF, RX_RF },
+};
+static int    irVal[4]  = { 0, 0, 0, 0 };
+static int    calLF     = IR_CAL_LF;
+static int    calL      = IR_CAL_L;
+static int    calR      = IR_CAL_R;
+static int    calRF     = IR_CAL_RF;
+static volatile bool irStream  = false;
+static volatile bool irCaptureRequested = false;
+
+static int readIR(const IRPair& p) {
+    digitalWrite(p.emit, LOW);
+    delayMicroseconds(80);
+    int amb = analogRead(p.rx);
+    digitalWrite(p.emit, HIGH);
+    delayMicroseconds(80);
+    int lit = analogRead(p.rx);
+    digitalWrite(p.emit, LOW);
+    int d = amb - lit;
+    return d < 0 ? 0 : d;
+}
+static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
+
 static void blePrint(const char* str) {
     if (!bleConnected || !pTX) return;
     size_t len = strlen(str);
@@ -613,6 +643,7 @@ static void dumpParams() {
     blePrintf("p lb=%d rb=%d\n", lPwmBias, rPwmBias);
     blePrintf("p kvl=%.3f kvr=%.3f ofl=%.1f ofr=%.1f\n", kV_L, kV_R, off_L, off_R);
     blePrintf("p t=%d rs=%.4f runms=%lu\n", targetMmS, R_SCALE, RUN_MS);
+    blePrintf("p clf=%d cl=%d cr=%d crf=%d\n", calLF, calL, calR, calRF);
 }
 
 static void handleBleCommand(const char* cmd) {
@@ -623,12 +654,15 @@ static void handleBleCommand(const char* cmd) {
     if (n < 1 || key[0] == 0) return;
 
     // action keywords
-    if      (!strcmp(key, "run"))  { bleAction = ACT_RUN;  return; }
-    else if (!strcmp(key, "cal"))  { bleAction = ACT_CAL;  return; }
-    else if (!strcmp(key, "tape")) { bleAction = ACT_TAPE; return; }
-    else if (!strcmp(key, "char")) { bleAction = ACT_CHAR; return; }
-    else if (!strcmp(key, "stop")) { stopRequested = true; return; }
-    else if (!strcmp(key, "?"))    { dumpParams(); return; }
+    if      (!strcmp(key, "run"))      { bleAction = ACT_RUN;  return; }
+    else if (!strcmp(key, "cal"))      { bleAction = ACT_CAL;  return; }
+    else if (!strcmp(key, "tape"))     { bleAction = ACT_TAPE; return; }
+    else if (!strcmp(key, "char"))     { bleAction = ACT_CHAR; return; }
+    else if (!strcmp(key, "stop"))     { stopRequested = true; irStream = false; return; }
+    else if (!strcmp(key, "?"))        { dumpParams(); return; }
+    else if (!strcmp(key, "irstream")) { irStream = true;  blePrintf("ir stream on\n");  return; }
+    else if (!strcmp(key, "irstop"))   { irStream = false; blePrintf("ir stream off\n"); return; }
+    else if (!strcmp(key, "ircal"))    { irCaptureRequested = true; return; }
 
     if (n < 2) { blePrintf("err: need value for %s\n", key); return; }
     float fv = atof(val);
@@ -649,6 +683,10 @@ static void handleBleCommand(const char* cmd) {
     else if (!strcmp(key, "t"))     targetMmS    = constrain(iv, TARG_MIN, TARG_MAX);
     else if (!strcmp(key, "rs"))    R_SCALE      = fv;
     else if (!strcmp(key, "runms")) RUN_MS       = (unsigned long)iv;
+    else if (!strcmp(key, "clf"))   calLF        = iv;
+    else if (!strcmp(key, "cl"))    calL         = iv;
+    else if (!strcmp(key, "cr"))    calR         = iv;
+    else if (!strcmp(key, "crf"))   calRF        = iv;
     else { blePrintf("err: unknown %s\n", key); return; }
 
     blePrintf("ok %s=%s\n", key, val);
@@ -764,6 +802,13 @@ void setup() {
     rightEnc.begin();
     applyPwmFreq();
 
+    // IR emitters/receivers — same pattern as main.cpp.
+    for (auto& p : PAIRS) {
+        pinMode(p.emit, OUTPUT);
+        digitalWrite(p.emit, LOW);
+        pinMode(p.rx, INPUT);
+    }
+
     Wire.begin(OLED_SDA, OLED_SCL, 400000);
     oled.setI2CAddress(OLED_ADDR << 1);
     oled.begin();
@@ -781,6 +826,28 @@ void loop() {
     if (bleCmdReady) {
         bleCmdReady = false;
         handleBleCommand((const char*)bleCmdBuf);
+    }
+
+    // 1b) IR stream — continuously sample + push when armed.
+    static unsigned long lastIrBle = 0;
+    if (irStream) {
+        unsigned long now = millis();
+        if (now - lastIrBle >= 100) {
+            lastIrBle = now;
+            sampleIR();
+            blePrintf("ir LF=%d L=%d R=%d RF=%d\n",
+                      irVal[0], irVal[1], irVal[2], irVal[3]);
+        }
+    }
+    // 1c) IR cal capture: take a fresh sample, latch as new cal values, echo.
+    if (irCaptureRequested) {
+        irCaptureRequested = false;
+        sampleIR();
+        calLF = irVal[0]; calL = irVal[1]; calR = irVal[2]; calRF = irVal[3];
+        blePrintf("ircal done clf=%d cl=%d cr=%d crf=%d\n",
+                  calLF, calL, calR, calRF);
+        setStatus("IR cal %d/%d/%d/%d", calLF, calL, calR, calRF);
+        drawMenu();
     }
 
     // 2) BLE-triggered actions (run from main loop so they own motors safely)

@@ -144,9 +144,28 @@ constexpr unsigned long TURN_HOLD_MS    = 350;
 constexpr unsigned long TURN_TIMEOUT_MS = 4000;
 constexpr unsigned long TURN_SETTLE_MS  = 200;
 
-// ── Cell-boundary brake thresholds (drived from cal at runtime) ──────────────
+// ── Cell-boundary brake thresholds (derived from cal at runtime) ─────────────
 constexpr float   MID_BRAKE_FRAC   = 0.45f;
 constexpr float   TURN_CLEAR_FRAC  = 1.15f;
+
+// ── IR calibration defaults ──────────────────────────────────────────────────
+// Captured 2026-05-17 in dead-end (centered, all 4 walls present) via
+// test/sensor-cal-ble.cpp `de` command, 32-sample mean. Re-capture via BLE
+// `ircal` or on-device "Cal IR" menu after a sensor swap, mount-angle
+// change, or surface-reflectivity change. Each value = differential
+// ambient-subtracted reading (no-wall ~0, wall present 1500–3500).
+constexpr int     IR_CAL_LF        = 3483;
+constexpr int     IR_CAL_L         = 1491;
+constexpr int     IR_CAL_R         = 1648;
+constexpr int     IR_CAL_RF        = 2702;
+
+// Wall-presence thresholds.
+// Side: ~60% of mean side-cal (1491+1648)/2 ≈ 1570 × 0.6 ≈ 940 → 900.
+// Front: front-sweep at 9cm gives RF=1504 (worst). 1400 keeps margin so
+// far-wall detection at full cell distance (≈9cm sensor-to-wall) doesn't
+// flicker. See test/sensor-cal-ble.cpp capture log 2026-05-17.
+constexpr int     WALL_SIDE_THRESH  = 900;
+constexpr int     WALL_FRONT_THRESH = 1400;
 
 // ── Drive loop misc ──────────────────────────────────────────────────────────
 constexpr int     TIMEOUT_MS       = 5000;    // per-cell drive timeout
