@@ -18,11 +18,9 @@ public:
         : pinIN1(in1), pinIN2(in2), ch1(c1), ch2(c2), inverted(inv) {}
 
     void begin() {
-        // Hold IN pins LOW as plain GPIO first → no float, no kick.
+        // Hold IN pins LOW first — no float or kick on LEDC attach.
         pinMode(pinIN1, OUTPUT); digitalWrite(pinIN1, LOW);
         pinMode(pinIN2, OUTPUT); digitalWrite(pinIN2, LOW);
-        // Configure LEDC channels and force duty 0 BEFORE attaching to pins,
-        // so the moment pin switches to LEDC it stays LOW (no stale duty kick).
         ledcSetup(ch1, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_BITS);
         ledcSetup(ch2, MOTOR_PWM_FREQ_HZ, MOTOR_PWM_BITS);
         ledcWrite(ch1, 0);
@@ -39,8 +37,10 @@ public:
         else           { ledcSet(ch1, 0);     ledcSet(ch2, -speed); }
     }
 
-    void brake() { ledcSet(ch1, DRIVE_PWM); ledcSet(ch2, DRIVE_PWM); }
-    void coast() { ledcSet(ch1, 0);            ledcSet(ch2, 0);            }
+    // DRV8833 active brake: both IN pins HIGH = slow decay, max braking.
+    // max brake always make the robot stops in wrong direction so
+    void brake() { ledcSet(ch1, (MOTOR_PWM_MAX/2)); ledcSet(ch2, (MOTOR_PWM_MAX/2)); }
+    void coast() { ledcSet(ch1, 0);             ledcSet(ch2, 0); }
 };
 
 #endif

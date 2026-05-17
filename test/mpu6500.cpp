@@ -9,8 +9,9 @@
 //   Live IMU     — yaw + gz live
 //   Reset Yaw    — zero integration
 //
-// Pivot: left=+, right=- on left motor; mirrored on right. Brake at target,
-// no decel ramp. Coast residual ≈ a few degrees — tune TURN_OVERSHOOT_DEG.
+// Pivot: left=+, right=- on left motor; mirrored on right.
+// Closed-loop: trapezoidal ω profile + Kff + PID on integrated yaw.
+// Tune TURN_PEAK_OMEGA_DPS / TURN_ACCEL_DPS2 / TURN_KP/KD / TURN_KFF.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -19,10 +20,9 @@
 #include "MicromouseMotor.h"
 #include "MicromouseEncoder.h"
 
-// ── Turn overshoot tuning ────────────────────────────────────────────────────
-// Coast residual after brake. Measured per turn-angle.
-constexpr float TURN_OVERSHOOT_90  = 10.0f;
-constexpr float TURN_OVERSHOOT_180 = 20.0f;
+// ── Turn closed-loop tuning ──────────────────────────────────────────────────
+// Trapezoidal angular velocity profile + feedforward + PID on integrated yaw.
+// Surface-independent: PID closes the loop on actual yaw, profile shape
 
 // ── MPU-6500 ─────────────────────────────────────────────────────────────────
 #define MPU_ADDR          0x68
@@ -31,8 +31,10 @@ constexpr float TURN_OVERSHOOT_180 = 20.0f;
 #define REG_GYRO_CFG      0x1B
 #define REG_ACCEL_CFG     0x1C
 #define REG_ACCEL_XOUT_H  0x3B
-#define GYRO_SCALE        131.0f   // LSB/(°/s) at ±250°/s
-
+// Gyro full-scale: 0x00=±250(131), 0x08=±500(65.5), 0x10=±1000(32.8), 0x18=±2000(16.4)
+#define GYRO_FS_SEL       0x10     // ±1000 dps — must exceed TURN_PEAK_OMEGA_DPS
+#define GYRO_SCALE        32.8f    // LSB/(°/s) matched to GYRO_FS_SEL
+const int TURN_MIN_PWM = 200;
 struct RawData { int16_t ax, ay, az, temp, gx, gy, gz; };
 
 static float gyroBiasZ = 0.0f;
@@ -100,36 +102,119 @@ static bool buttonEdge() {
     return false;
 }
 
-// ── Turn logic ───────────────────────────────────────────────────────────────
-// Coast adds ~3-5° overshoot at TURN_PWM. Stop short by this amount.
-// Pick overshoot constant for target angle. Linear interp between 90/180
-// for intermediate values; extrapolated linearly outside.
-static inline float turnOvershootDeg(float target) {
-    float a = fabsf(target);
-    float slope = (TURN_OVERSHOOT_180 - TURN_OVERSHOOT_90) / 90.0f;
-    return TURN_OVERSHOOT_90 + slope * (a - 90.0f);
+// ── Turn logic (trapezoid + PID) ─────────────────────────────────────────────
+// Trapezoidal angular-velocity profile generator. Triangle if target small.
+struct TurnProfile {
+    float accel;    // deg/s^2, positive
+    float peak;     // deg/s, positive
+    float target;   // deg, positive
+    float t_acc, t_cru, t_tot;
+    float d_acc, d_cru;
+    int   sign;
+
+    void init(float targetDeg) {
+        sign   = (targetDeg >= 0) ? 1 : -1;
+        target = fabsf(targetDeg);
+        accel  = TURN_ACCEL_DPS2;
+        peak   = TURN_PEAK_OMEGA_DPS;
+        float d_full_acc = (peak * peak) / (2.0f * accel);
+        if (2.0f * d_full_acc >= target) {        // triangular
+            peak  = sqrtf(accel * target);
+            d_acc = target * 0.5f;
+            d_cru = 0;
+        } else {                                  // trapezoid
+            d_acc = d_full_acc;
+            d_cru = target - 2.0f * d_full_acc;
+        }
+        t_acc = peak / accel;
+        t_cru = (peak > 0) ? d_cru / peak : 0;
+        t_tot = 2.0f * t_acc + t_cru;
+    }
+
+    // Desired signed angle and omega at time t (seconds since start).
+    void at(float t, float& angle_des, float& omega_des) const {
+        float a, w;
+        if (t < t_acc) {
+            w = accel * t;
+            a = 0.5f * accel * t * t;
+        } else if (t < t_acc + t_cru) {
+            w = peak;
+            a = d_acc + peak * (t - t_acc);
+        } else if (t < t_tot) {
+            float tp = t - t_acc - t_cru;
+            w = peak - accel * tp;
+            a = d_acc + d_cru + peak * tp - 0.5f * accel * tp * tp;
+        } else {
+            w = 0;
+            a = target;
+        }
+        angle_des = sign * a;
+        omega_des = sign * w;
+    }
+};
+
+static void settle(unsigned long ms) {
+    unsigned long t0 = millis();
+    while (millis() - t0 < ms) { updateYaw(); }
 }
 
 static void doTurn(float targetDeg) {
     yaw = 0;
     lastUpdateUs = micros();
-    float overshoot = turnOvershootDeg(targetDeg);
-    float stopAt = (targetDeg > 0) ? (targetDeg - overshoot)
-                                   : (targetDeg + overshoot);
-    int dir = (targetDeg > 0) ? 1 : -1;
-    leftMotor.drive(-dir * TURN_PWM);
-    rightMotor.drive( dir * TURN_PWM);
+    TurnProfile prof; prof.init(targetDeg);
 
-    unsigned long t0 = millis();
+    unsigned long t0     = millis();
+    unsigned long lastUs = micros();
+    float prevErr  = 0;
+    float peakErr  = 0;
+    unsigned long inBandStart = 0;
+
     while (true) {
         updateYaw();
-        if (targetDeg > 0 ? yaw >= stopAt : yaw <= stopAt) break;
-        if (millis() - t0 > 3000) break;
+        unsigned long nowMs = millis();
+        unsigned long nowUs = micros();
+        float t  = (nowMs - t0) / 1000.0f;
+        float dt = (nowUs - lastUs) / 1.0e6f;
+        if (dt < 1.0e-4f) continue;                // skip ultra-fast iters
+        lastUs = nowUs;
+
+        float angle_des, omega_des;
+        prof.at(t, angle_des, omega_des);
+
+        float err  = angle_des - yaw;
+        float derr = (err - prevErr) / dt;
+        prevErr    = err;
+
+        float pwm = TURN_KFF_PWM_PER_DPS * omega_des
+                  + TURN_KP_PWM_PER_DEG  * err
+                  + TURN_KD_PWM_PER_DPS  * derr;
+
+        // Stiction floor only during hold phase — break it free, don't slam.
+        bool holding = (t >= prof.t_tot);
+        if (holding && fabsf(pwm) > 1.0f && fabsf(pwm) < TURN_MIN_PWM) {
+            pwm = (pwm > 0) ? TURN_MIN_PWM : -TURN_MIN_PWM;
+        }
+        if (pwm >  TURN_PWM) pwm =  TURN_PWM;
+        if (pwm < -TURN_PWM) pwm = -TURN_PWM;
+
+        leftMotor.drive(-(int)pwm);
+        rightMotor.drive( (int)pwm);
+
+        if (fabsf(err) > peakErr) peakErr = fabsf(err);
+
+        // Exit: in deadband continuously for HOLD_MS after profile end.
+        if (holding && fabsf(targetDeg - yaw) <= TURN_DEADBAND_DEG) {
+            if (inBandStart == 0) inBandStart = nowMs;
+            if (nowMs - inBandStart >= TURN_HOLD_MS) break;
+        } else {
+            inBandStart = 0;
+        }
+        if (nowMs - t0 > TURN_TIMEOUT_MS) break;
     }
     stopMotors();
-    // settle to capture coast
-    unsigned long settleStart = millis();
-    while (millis() - settleStart < 200) { updateYaw(); }
+    settle(TURN_SETTLE_MS);
+    Serial.printf("[TURN] target=%+.1f final=%+.2f err=%+.2f peakProfErr=%.2f\n",
+                  targetDeg, yaw, targetDeg - yaw, peakErr);
 }
 
 // ── Calibration ──────────────────────────────────────────────────────────────
@@ -256,7 +341,7 @@ void setup() {
     }
     snprintf(calStatus, sizeof(calStatus), "WHO=0x%02X", who);
     mpuWrite(REG_PWR_MGMT_1, 0x00); delay(50);
-    mpuWrite(REG_GYRO_CFG,   0x00);
+    mpuWrite(REG_GYRO_CFG,   GYRO_FS_SEL);
     mpuWrite(REG_ACCEL_CFG,  0x00);
     lastUpdateUs = micros();
 
