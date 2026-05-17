@@ -15,15 +15,22 @@ constexpr uint8_t ENC_L_B          = 39;
 constexpr uint8_t ENC_R_A          = 21;
 constexpr uint8_t ENC_R_B          = 14;
 
-constexpr uint8_t RX_L            = 10;
+// ── IR sensors ────────────────────────────────────────────────────────────────
+// Geometry: all 4 sensors point forward-outward at ~30° from straight-ahead.
+// Side sensors (L, R) thus partially face forward — they detect open lanes
+// earlier than perpendicular mounting would, AND they pick up the front wall
+// at close range, so front-only safety must use LF/RF.
+//   LF, RF : ~30° outboard, biased forward — front-wall detection
+//   L, R   : ~30° outboard, biased toward side — wall-follow centering
+constexpr uint8_t RX_L             = 10;
 constexpr uint8_t RX_LF            = 4;
 constexpr uint8_t RX_RF            = 1;
-constexpr uint8_t RX_R            = 7;
+constexpr uint8_t RX_R             = 7;
 
-constexpr uint8_t EMIT_L          = 47;
+constexpr uint8_t EMIT_L           = 47;
 constexpr uint8_t EMIT_LF          = 13;
 constexpr uint8_t EMIT_RF          = 46;
-constexpr uint8_t EMIT_R          = 11;
+constexpr uint8_t EMIT_R           = 11;
 
 constexpr uint8_t BUTTON_1         = 42;
 constexpr uint8_t BUZZER_PIN       = 40;
@@ -41,108 +48,108 @@ constexpr int     BUZZER_FREQ      = 4000;
 // to register one event. 50 ms = snappy but bounce-safe.
 constexpr unsigned long BUTTON_HOLD_MS = 50;
 
-
-// some importnat physical information,
-// robot weight is 161gramms with batteries,
-// we have 2s battery
-// 500rpm 1:30 n20 motor
-// we have side wall detecting sensors 50mm from axle wheel 
-// we have 40mm from wheel axle to rear bumper,
+// ── Hardware physical info (reference, not used as constants) ─────────────────
+// Robot weight ~161 g w/ batteries. 2S LiPo (7.4 V nominal).
+// N20 1:30 motor, 500 RPM @ 6 V.
+// Side IR sensor optical axis = 50 mm fwd of wheel axle.
+// Rear bumper = 40 mm aft of wheel axle.
 
 // ── Motor PWM (LEDC) ─────────────────────────────────────────────────────────
-// 500 Hz: audible whine but maximum torque — inductor fully charges each cycle,
-// switching losses ~0. Best choice for N20 on a heavy robot.
-constexpr int     MOTOR_PWM_FREQ_HZ = 500;
+// 200 Hz: empirically best torque on this DRV8833+N20+heavy chassis combo.
+// Audible whine but maximum stiction-breaking torque from each cycle's
+// peak current spike. Higher freq (10–20 kHz) produced weaker low-PWM
+// response. If you change this, re-run Calibrate on-device.
+constexpr int     MOTOR_PWM_FREQ_HZ = 200;
 constexpr int     MOTOR_PWM_BITS    = 10;
+constexpr int     MOTOR_PWM_MAX     = 1023;
 
 // ── Motor polarity ────────────────────────────────────────────────────────────
-// Both motors mounted back-to-back / wired reversed → invert PWM polarity.
-// Encoders must also be inverted to keep getTicks() positive for forward motion
-// (see MicromouseEncoder constructor in main.cpp).
 constexpr bool    MOTOR_L_INV      = true;
 constexpr bool    MOTOR_R_INV      = true;
 
 // ── Wheel / encoder physics ───────────────────────────────────────────────────
-// N20 1:30 500RPM @ 6V, running on 2S LiPo (7.4V).
-// ISR rising-edge on channel A: 14 PPR motor shaft × 30 gear = 420 ticks/output-rev.
-// Verify on hardware: TEST_ENC menu, spin output shaft one full revolution → ~420.
-constexpr float   WHEEL_DIAMETER   = 33.4f;   // mm, measured
-constexpr float   TICKS_PER_REV    = 205.0f;  // empirical: motor-driven half-quad ~720/cell → 420/rev
-constexpr float   WHEEL_TRACK_MM   = 74.0f;   // mm center-to-center, measured
-constexpr float   BAT_VDIV_MULT    = 3.1197f;
+// N20 1:30 500RPM @ 6V on 2S LiPo (7.4 V).
+// Encoder: single-channel rising-edge ISR with 200 µs filter.
+//   physical PPR ≈ 14 motor × 30 gear = 420/rev raw
+//   effective at running speed ≈ 205 (empirical)
+constexpr float   WHEEL_DIAMETER   = 33.4f;   // mm
+constexpr float   TICKS_PER_REV    = 205.0f;
+constexpr float   WHEEL_TRACK_MM   = 74.0f;
+// Battery voltage divider: V_bat → 100k → ADC → 39k → GND.
+// Theoretical multiplier: 1 / (39 / (39+100)) = 3.564.
+// Empirically calibrated 2026-05-17: actual 7.96V → raw read 6.62V with
+// old mult 3.1197 → new mult = 3.1197 × (7.96/6.62) = 3.751.
+// Delta from theoretical accounts for ADC ref offset + resistor tolerance.
+constexpr float   BAT_VDIV_MULT    = 3.751f;
+constexpr float   NOMINAL_VBAT     = 7.4f;    // 2S full-charge target for comp
 
-// Recalibrate empirically: spin each wheel one full rev, record L and R counts.
-constexpr float   RIGHT_ENC_SCALE  = 1.0f;    // empirical: L=R=360 per cell
+// ── Encoder L/R equalization ─────────────────────────────────────────────────
+// Calibrated 2026-05-17 via on-device auto-calibration.
+// Equalizes accumulated rTicks() against leftEnc.getTicks() for equal travel.
+constexpr float   RIGHT_ENC_SCALE  = 1.0135f;
 
 // ── Cell / turn geometry ─────────────────────────────────────────────────────
 constexpr float   CELL_MM          = 180.0f;
 constexpr float   MM_PER_TICK      = 3.14159265f * WHEEL_DIAMETER / TICKS_PER_REV;
-constexpr long    TICKS_PER_90     = (long)(WHEEL_TRACK_MM * TICKS_PER_REV / (4.0f * WHEEL_DIAMETER));
-constexpr long    TURN_TICKS_90_L  = 420;
-constexpr long    TURN_TICKS_90_R  = 410;
+constexpr long    TICKS_PER_CELL   = 350;     // empirical, validated by tape
 
-// ── Drive tuning ─────────────────────────────────────────────────────────────
-// Change DRIVE_PWM only — ramp zones and TICKS_PER_CELL auto-scale.
-constexpr int     MOTOR_PWM_MAX    = 1023;
-constexpr int     DRIVE_PWM        = 250;   // ← only change this (0–1023)
+// ── Drive base values ────────────────────────────────────────────────────────
+// DRIVE_PWM and TURN_PWM are saturation caps + diagnostic fallbacks; the
+// velocity PID computes per-loop PWM from target mm/s, kV, and FF — actual
+// running duty is determined by the controller, not these constants.
+constexpr int     DRIVE_PWM        = 250;
 constexpr int     TURN_PWM         = 200;
-constexpr int     DRIVE_PWM_MIN    = 100;   // 500Hz motors start at 10% duty reliably
-constexpr float   TURN_VERIFY_THRESH = 3.0f;  // degrees tolerance after pivot settle
-constexpr int     TURN_CORRECT_PWM   = DRIVE_PWM_MIN;
-constexpr float   BALANCE_KP       = 0.4f;
-constexpr int     TIMEOUT_MS       = 5000;
-constexpr int     CELL_PAUSE_MS    = 40;
-constexpr int     BASE_PWM         = DRIVE_PWM;
-constexpr int     STALL_TIME_MS    = 150;   // ms without encoder advance → stall
-constexpr int     STALL_BOOST_PWM  = (int)(DRIVE_PWM * 4.0f);  // capped to MOTOR_PWM_MAX at use
+constexpr int     DRIVE_PWM_MIN    = 100;     // 200 Hz motors reliably start
+                                              // around 10 % duty
 
-// Trapezoidal velocity profile (GreenYe pattern).
-// ACC_RATE / DEC_RATE: PWM units per encoder tick.
-// Larger value = shorter ramp zone. Recalibrate if robot jerks or overshoots.
-// At 500Hz: ACC_RATE=4 → ACCEL_TICKS=175, peaks at DRIVE_PWM at mid-cell (350/2).
-constexpr int     ACC_RATE         = 4;    // PWM per tick, ramp up
-constexpr int     DEC_RATE         = 4;    // PWM per tick, ramp down
-constexpr int     ACCEL_TICKS      = (DRIVE_PWM - DRIVE_PWM_MIN) / ACC_RATE;
-constexpr float   ACCEL_MM         = ACCEL_TICKS * MM_PER_TICK;
-constexpr int     DECEL_TICKS      = (DRIVE_PWM - DRIVE_PWM_MIN) / DEC_RATE;
-constexpr float   DECEL_MM         = DECEL_TICKS * MM_PER_TICK;
+// ── Cascaded velocity PID — SOTA, calibrated 2026-05-17 ──────────────────────
+// Inner loop runs at 1 / VPID_LOOP_US Hz. Cascade is:
+//   speed   PI on (vL+vR)/2 → target  → pidSpeed
+//   straight PI on (curL-curR) → 0    → pidStraight   (P on integral of dvel)
+//   pwmL = ffShared + pidSpeed − pidStraight + L_PWM_BIAS
+//   pwmR = ffShared + pidSpeed + pidStraight + R_PWM_BIAS
+// FF: pwm = target/kV_avg + off_avg, scaled by NOMINAL_VBAT / Vbat_measured.
+constexpr unsigned long VPID_LOOP_US = 5000;  // 200 Hz, matches one PWM period
 
-// Coast from DRIVE_PWM_MIN (end of decel ramp). v² model calibrated: 26mm at PWM=180.
-// DRIVE_PWM_MIN is fixed → coast is constant regardless of cruise speed.
-constexpr float   COAST_COMP_MM    = 26.0f * ((float)DRIVE_PWM_MIN / 180.0f) * ((float)DRIVE_PWM_MIN / 180.0f);
-constexpr int     COAST_COMP_TICKS = (int)(COAST_COMP_MM / MM_PER_TICK);
+constexpr float   VPID_LOOP_KP     = 1.00f;   // pwm per (mm/s) error
+constexpr float   VPID_LOOP_KI     = 1.50f;   // pwm per (mm·s)
+constexpr float   VPID_INTEG_LIM   = 800.0f;  // anti-windup
+constexpr float   VPID_EMA_ALPHA   = 0.50f;   // velocity low-pass
 
-// Hardcoded to 350 — tune up/down if stopping short/long after frequency change.
-// If stopping short/long, adjust this value directly.
-constexpr long    TICKS_PER_CELL   = 350;
+constexpr float   VPID_STRAIGHT_KP = 6.00f;   // pwm per tick of L-R mismatch
+constexpr int     VPID_STRAIGHT_MAX = 500;
 
-// ── IR thresholds (calibrated 2026-05-07, dead-end centered, all 4 walls) ─────
-// irRead() is ambient-subtracted: no-wall ~0, wall ~400–550. Threshold=50 is safe.
-constexpr int     L_CENTER         = 421;
-constexpr int     R_CENTER         = 504;
-constexpr int     L_THRESH         = 450;
-constexpr int     R_THRESH         = 450;
-constexpr int     LF_THRESH        = 450;
-constexpr int     RF_THRESH        = 450;
+constexpr int     L_PWM_BIAS       = 0;
+constexpr int     R_PWM_BIAS       = 0;
 
-// ── Velocity PID (closed-loop wheel speed) ───────────────────────────────────
-// CRUISE_RPM: measured output-shaft RPM at DRIVE_PWM. Calibrate via serial RPM log.
-// At DRIVE_PWM=400, 500Hz, N20 1:30 @ 7.4V: estimate ~150 RPM.
-constexpr float   CRUISE_RPM       = 150.0f;
-constexpr float   VEL_KP           = 0.8f;
-constexpr float   VEL_KI           = 0.05f;
+// Calibrated FF (mm/s per PWM unit) and dead-band offset, per wheel.
+constexpr float   KV_L             = 2.961f;
+constexpr float   KV_R             = 2.749f;
+constexpr float   OFF_L            = 0.0f;
+constexpr float   OFF_R            = 0.0f;
 
-// ── Wall-centering PID ────────────────────────────────────────────────────────
-constexpr float   WALL_KP          = 0.25f;
-constexpr float   WALL_KI          = 0.00f;
-constexpr float   WALL_KD          = 0.02f;
-constexpr int     WALL_MAX_CORR    = 200;
+// Default cell-cruise target mm/s. Recalibrate motors before raising.
+constexpr int     CELL_TARGET_MMS  = 300;
 
-// ── Encoder-balance PID ───────────────────────────────────────────────────────
-constexpr float   ENC_KP           = 6.0f;
-constexpr float   ENC_KI           = 0.00f;
-constexpr float   ENC_KD           = 0.2f;
-constexpr int     ENC_MAX_CORR     = 120;
+// ── Gyro turn (trapezoidal ω + PID on integrated yaw) ────────────────────────
+// Surface-independent. Peak/accel scaled for TURN_PWM cap above.
+constexpr float   TURN_PEAK_OMEGA_DPS  = 200.0f;
+constexpr float   TURN_ACCEL_DPS2      = 1200.0f;
+constexpr float   TURN_KFF_PWM_PER_DPS = 1.0f;
+constexpr float   TURN_KP_PWM_PER_DEG  = 12.0f;
+constexpr float   TURN_KD_PWM_PER_DPS  = 0.4f;
+constexpr int     TURN_MIN_HOLD_PWM    = 100; // stiction floor during hold
+constexpr float   TURN_DEADBAND_DEG    = 3.0f;
+constexpr unsigned long TURN_HOLD_MS    = 350;
+constexpr unsigned long TURN_TIMEOUT_MS = 4000;
+constexpr unsigned long TURN_SETTLE_MS  = 200;
+
+// ── Cell-boundary brake thresholds (drived from cal at runtime) ──────────────
+constexpr float   MID_BRAKE_FRAC   = 0.45f;
+constexpr float   TURN_CLEAR_FRAC  = 1.15f;
+
+// ── Drive loop misc ──────────────────────────────────────────────────────────
+constexpr int     TIMEOUT_MS       = 5000;    // per-cell drive timeout
 
 // ── Maze constants ────────────────────────────────────────────────────────────
 constexpr uint8_t MAZE_SIZE        = 16;
