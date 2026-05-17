@@ -23,17 +23,6 @@
 // ── Turn closed-loop tuning ──────────────────────────────────────────────────
 // Trapezoidal angular velocity profile + feedforward + PID on integrated yaw.
 // Surface-independent: PID closes the loop on actual yaw, profile shape
-// guarantees decel arrives at target with zero commanded ω.
-constexpr float TURN_PEAK_OMEGA_DPS  = 360.0f;   // peak angular vel
-constexpr float TURN_ACCEL_DPS2      = 1800.0f;  // ramp slope (0.2s to peak)
-constexpr float TURN_KFF_PWM_PER_DPS = 1.0f;     // feedforward: PWM per deg/s
-constexpr float TURN_KP_PWM_PER_DEG  = 12.0f;    // PID P
-constexpr float TURN_KD_PWM_PER_DPS  = 0.4f;     // PID D (on error)
-constexpr int   TURN_MIN_PWM         = 260;      // stiction floor during hold
-constexpr float TURN_DEADBAND_DEG    = 1.5f;
-constexpr unsigned long TURN_SETTLE_MS  = 200;
-constexpr unsigned long TURN_HOLD_MS    = 350;   // post-profile PID hold
-constexpr unsigned long TURN_TIMEOUT_MS = 4000;
 
 // ── MPU-6500 ─────────────────────────────────────────────────────────────────
 #define MPU_ADDR          0x68
@@ -45,7 +34,7 @@ constexpr unsigned long TURN_TIMEOUT_MS = 4000;
 // Gyro full-scale: 0x00=±250(131), 0x08=±500(65.5), 0x10=±1000(32.8), 0x18=±2000(16.4)
 #define GYRO_FS_SEL       0x10     // ±1000 dps — must exceed TURN_PEAK_OMEGA_DPS
 #define GYRO_SCALE        32.8f    // LSB/(°/s) matched to GYRO_FS_SEL
-
+const int TURN_MIN_PWM = 200;
 struct RawData { int16_t ax, ay, az, temp, gx, gy, gz; };
 
 static float gyroBiasZ = 0.0f;

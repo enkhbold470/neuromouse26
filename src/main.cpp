@@ -20,11 +20,48 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
+#include <Preferences.h>
 #include "PinConfig.h"
 #include "IRCalibration.h"
 #include "MicromouseMotor.h"
 #include "MicromouseEncoder.h"
 #include "MicromouseMaze.h"
+
+// ── Persistent maze (NVS) ────────────────────────────────────────────────────
+// Saves the 16x16 wall bitmask grid (256 bytes) under namespace "mm26".
+// GOAL screen → button = save. Menu "FAST" loads + runs without re-exploring.
+static Preferences prefs;
+static constexpr const char* NVS_NS         = "mm26";
+static constexpr const char* NVS_KEY_WALLS  = "walls";
+
+static bool hasSavedMaze() {
+    if (!prefs.begin(NVS_NS, true)) return false;
+    bool found = prefs.isKey(NVS_KEY_WALLS);
+    prefs.end();
+    return found;
+}
+static bool saveMazeFlash(const MicromouseMaze& m) {
+    if (!prefs.begin(NVS_NS, false)) return false;
+    size_t n = prefs.putBytes(NVS_KEY_WALLS, m.walls, sizeof(m.walls));
+    prefs.end();
+    return n == sizeof(m.walls);
+}
+static bool loadMazeFlash(MicromouseMaze& m) {
+    if (!prefs.begin(NVS_NS, true)) return false;
+    bool ok = false;
+    if (prefs.isKey(NVS_KEY_WALLS)) {
+        size_t n = prefs.getBytes(NVS_KEY_WALLS, m.walls, sizeof(m.walls));
+        ok = (n == sizeof(m.walls));
+    }
+    prefs.end();
+    return ok;
+}
+static bool clearSavedMaze() {
+    if (!prefs.begin(NVS_NS, false)) return false;
+    bool ok = prefs.remove(NVS_KEY_WALLS);
+    prefs.end();
+    return ok;
+}
 
 // ── OLED ─────────────────────────────────────────────────────────────────────
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
@@ -213,19 +250,14 @@ struct TurnProfile {
 void stopMotors()    { leftMotor.brake(); rightMotor.brake(); }
 void encodersReset() { leftEnc.reset(); rightEnc.reset(); }
 
+// Mirrors test/mpu6500.cpp doTurn() — same trapezoid+FF+PID structure that
+// converges cleanly in standalone test. Symmetric PWM (no kV scaling) and
+// holding-only min-PWM clamp; do not add an always-on clamp because it
+// overrides the accel ramp and induces oscillation.
 void doTurn(float targetDeg) {
     yaw = 0;
     lastImuUs = micros();
     TurnProfile prof; prof.init(targetDeg);
-
-    // Counter-rotation pivot — one wheel forward, other reverse, equal
-    // angular speed → pivot around robot center with zero translation.
-    // KV_L ≠ KV_R, so same PWM produces different wheel speeds and the
-    // pivot center drifts off-axis. Scale each wheel's PWM by kV_avg/kV_i
-    // so |vL| == |vR| at any commanded PWM.
-    constexpr float kV_avg     = 0.5f * (KV_L + KV_R);
-    constexpr float L_TURN_SCL = kV_avg / KV_L;   // >1 if L weaker
-    constexpr float R_TURN_SCL = kV_avg / KV_R;   // >1 if R weaker
 
     unsigned long t0     = millis();
     unsigned long lastUs = micros();
@@ -253,28 +285,16 @@ void doTurn(float targetDeg) {
                   + TURN_KP_PWM_PER_DEG  * err
                   + TURN_KD_PWM_PER_DPS  * derr;
 
-        bool holding    = (t >= prof.t_tot);
-        bool inDeadband = (fabsf(targetDeg - yaw) <= TURN_DEADBAND_DEG);
-
-        // Motor deadband fix — at small pwm magnitudes one wheel stalls
-        // (causes the "right turn but right wheel doesn't reverse" symptom
-        // during the trapezoid's accel ramp). If we want motion (not yet in
-        // deadband), force pwm to at least TURN_MIN_HOLD_PWM in the
-        // commanded direction. The commanded direction is targetDeg's sign
-        // (overall turn direction), not pwm's sign, so we never reverse the
-        // intended rotation when P/D briefly push the other way.
-        if (!inDeadband) {
-            int wantSign = (targetDeg >= 0) ? +1 : -1;
-            if (fabsf(pwm) < TURN_MIN_HOLD_PWM) {
-                pwm = wantSign * TURN_MIN_HOLD_PWM;
-            }
+        // Stiction floor only during hold phase — break it free, don't slam.
+        bool holding = (t >= prof.t_tot);
+        if (holding && fabsf(pwm) > 1.0f && fabsf(pwm) < TURN_MIN_HOLD_PWM) {
+            pwm = (pwm > 0) ? TURN_MIN_HOLD_PWM : -TURN_MIN_HOLD_PWM;
         }
-
         if (pwm >  TURN_PWM) pwm =  TURN_PWM;
         if (pwm < -TURN_PWM) pwm = -TURN_PWM;
 
-        leftMotor.drive(-(int)(pwm * L_TURN_SCL));
-        rightMotor.drive( (int)(pwm * R_TURN_SCL));
+        leftMotor.drive(-(int)pwm);
+        rightMotor.drive( (int)pwm);
 
         if (fabsf(err) > peakErr) peakErr = fabsf(err);
 
@@ -735,9 +755,14 @@ void driveChain() {
 enum State { IDLE, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL, CRASH };
 State robotState = IDLE;
 
-enum MenuItem { M_TEST_MOTOR = 0, M_TEST_ENC, M_TEST_IR, M_START, M_COUNT };
+enum MenuItem {
+    M_TEST_MOTOR = 0, M_TEST_ENC, M_TEST_IR,
+    M_START, M_FAST, M_CLEAR_SAVE,
+    M_COUNT
+};
 static const char* MENU_LABELS[M_COUNT] = {
-    "Test Motor", "Test Encoder", "Test IR", "START"
+    "Test Motor", "Test Encoder", "Test IR",
+    "START", "FAST (load)", "Clear Save"
 };
 static int  menuSel    = M_START;
 static long menuEncRef = 0;
@@ -942,6 +967,33 @@ void setupMaze() {
     maze.floodFill();
 }
 
+// FAST mode setup — load saved walls from NVS, clear visited/flood, re-flood.
+// Falls back to fresh setupMaze() if no save exists.
+bool setupMazeFast() {
+    if (!loadMazeFlash(maze)) {
+        setupMaze();
+        return false;
+    }
+    for (int r = 0; r < MAZE_SIZE; r++) {
+        for (int c = 0; c < MAZE_SIZE; c++) {
+            maze.flood[r][c]   = FLOOD_INFINITY;
+            maze.visited[r][c] = false;
+        }
+    }
+    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+    maze.floodFill();
+    return true;
+}
+
+// Tiny centered-text screen for save/load feedback.
+void oledShortMsg(const char* line) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_8x13B_tf);
+    int w = oled.getStrWidth(line);
+    oled.drawStr((128 - w) / 2, 38, line);
+    oled.sendBuffer();
+}
+
 void runMotorTest() {
     const int PWM = DRIVE_PWM;
     const int DUR = 350;
@@ -1018,6 +1070,25 @@ void loop() {
                                        setupMaze();
                                        oledRunStatus("go");
                                        robotState = RUN; break;
+                    case M_FAST: {
+                                       bool loaded = setupMazeFast();
+                                       oledShortMsg(loaded ? "LOADED" : "NO SAVE");
+                                       delay(700);
+                                       if (!loaded) { oledMenu(); break; }
+                                       for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(333); }
+                                       robotRow = 0; robotCol = 0; robotHeading = DIR_NORTH;
+                                       firstCellOfRun = true;
+                                       oledRunStatus("FAST");
+                                       robotState = RUN;
+                                       break;
+                                  }
+                    case M_CLEAR_SAVE: {
+                                       bool ok = clearSavedMaze();
+                                       oledShortMsg(ok ? "CLEARED" : "EMPTY");
+                                       delay(700);
+                                       oledMenu();
+                                       break;
+                                  }
                 }
             }
             break;
@@ -1102,8 +1173,13 @@ void loop() {
 
         case GOAL: {
             stopMotors();
-            oledRunStatus("GOAL");
+            static bool drawn = false;
+            if (!drawn) { oledRunStatus("GOAL btn=save"); drawn = true; }
             if (buttonEdge()) {
+                drawn = false;
+                bool ok = saveMazeFlash(maze);
+                oledShortMsg(ok ? "MAZE SAVED" : "SAVE FAIL");
+                delay(900);
                 menuEncRef = rightEnc.getTicks();
                 oledMenu();
                 robotState = IDLE;
