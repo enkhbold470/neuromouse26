@@ -75,16 +75,20 @@
     <div><span class="lbl">vL</span><br><span class="big" id="rtVL">--</span> <span style="font-size:11px;color:#888" id="rtPL">pw 0</span></div>
     <div><span class="lbl">vR</span><br><span class="big" id="rtVR">--</span> <span style="font-size:11px;color:#888" id="rtPR">pw 0</span></div>
     <div><span class="lbl">straight err (ticks)</span><br><span class="big" id="rtSE">--</span></div>
+    <div><span class="lbl">vbat (V)</span><br><span class="big" id="rtVB">--</span></div>
     <div><span class="lbl">L/R tape ratio</span><br><span class="big" id="rtRatio">--</span></div>
   </div>
 </div>
 
 <h2>Actions</h2>
 <div class="row">
-  <button class="ok" id="btnRun" disabled>RUN PID</button>
-  <button class="ok" id="btnTape" disabled>Tape test</button>
-  <button class="warn" id="btnChar" disabled>Characterize</button>
-  <button class="danger" id="btnStop" disabled>STOP</button>
+  <button class="primary" id="btnCal"  disabled>CALIBRATE (auto)</button>
+  <button class="ok"      id="btnRun"  disabled>RUN PID</button>
+  <button class="danger"  id="btnStop" disabled>STOP</button>
+</div>
+<div class="row">
+  <button id="btnTape" disabled>Tape only</button>
+  <button id="btnChar" disabled>Full CHAR sweep</button>
 </div>
 
 <h2>Targets &amp; calibration</h2>
@@ -175,7 +179,7 @@
     document.getElementById('btnSend').disabled       = !ok;
     document.getElementById('btnQuery').disabled      = !ok;
     document.getElementById('btnApplyAll').disabled   = !ok;
-    ['btnRun','btnTape','btnChar','btnStop'].forEach(id =>
+    ['btnCal','btnRun','btnTape','btnChar','btnStop'].forEach(id =>
       document.getElementById(id).disabled = !ok);
   }
 
@@ -244,6 +248,7 @@
       if (m.pL) document.getElementById('rtPL').textContent = 'pw '+m.pL;
       if (m.pR) document.getElementById('rtPR').textContent = 'pw '+m.pR;
       if (m.sE) document.getElementById('rtSE').textContent = m.sE;
+      if (m.vb) document.getElementById('rtVB').textContent = m.vb;
       return;
     }
     if (line.startsWith('run start')) {
@@ -252,6 +257,10 @@
     if (line.startsWith('tape done')) {
       const m = line.match(/ratio=([0-9.]+)/);
       if (m) document.getElementById('rtRatio').textContent = m[1];
+    }
+    // Auto-calibrate done: pull params so all inputs reflect new kV / rs.
+    if (line.startsWith('cal done')) {
+      setTimeout(() => send('?'), 200);
     }
     // Parse param dump: "p kp=1.00 ki=1.50 il=800 ..."
     if (line.startsWith('p ')) {
@@ -269,6 +278,7 @@
   document.getElementById('btnDisconnect').onclick = () => device?.gatt.connected && device.gatt.disconnect();
   document.getElementById('btnClear').onclick      = () => { terminal.innerHTML = ''; };
   document.getElementById('btnQuery').onclick      = () => send('?');
+  document.getElementById('btnCal').onclick        = () => send('cal');
   document.getElementById('btnRun').onclick        = () => send('run');
   document.getElementById('btnTape').onclick       = () => send('tape');
   document.getElementById('btnChar').onclick       = () => send('char');

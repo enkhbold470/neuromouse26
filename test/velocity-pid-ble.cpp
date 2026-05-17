@@ -586,9 +586,10 @@ static void doRunPid(bool fromBle) {
         }
         if (nowMs - lastBle >= BLE_TELEM_MS) {
             lastBle = nowMs;
-            blePrintf("rt t=%lu vL=%.0f vR=%.0f pL=%d pR=%d sE=%ld\n",
+            float vbatNow = readVbat();
+            blePrintf("rt t=%lu vL=%.0f vR=%.0f pL=%d pR=%d sE=%ld vb=%.2f\n",
                       nowMs - startMs, velL_ema, velR_ema,
-                      pwmL, pwmR, straightErr);
+                      pwmL, pwmR, straightErr, vbatNow);
         }
     }
 
@@ -783,9 +784,10 @@ void loop() {
     if (act != ACT_NONE) {
         bleAction = ACT_NONE;
         switch (act) {
-            case ACT_RUN:  doRunPid(true);       break;
-            case ACT_TAPE: doTapeTest(true);     break;
-            case ACT_CHAR: doCharacterize(true); break;
+            case ACT_RUN:  doRunPid(true);        break;
+            case ACT_CAL:  doAutoCalibrate(true); break;
+            case ACT_TAPE: doTapeTest(true);      break;
+            case ACT_CHAR: doCharacterize(true);  break;
             default: break;
         }
         drawMenu();
@@ -794,32 +796,17 @@ void loop() {
 
     // 3) OLED menu via right encoder wheel
     long delta = rightEnc.getTicks() - menuEncRef;
-    if (editingTarget) {
-        if (delta >= ENC_PER_STEP) {
-            targetMmS = constrain(targetMmS + TARG_STEP, TARG_MIN, TARG_MAX);
-            menuEncRef += ENC_PER_STEP;
-            drawMenu();
-            return;
-        }
-        if (delta <= -ENC_PER_STEP) {
-            targetMmS = constrain(targetMmS - TARG_STEP, TARG_MIN, TARG_MAX);
-            menuEncRef -= ENC_PER_STEP;
-            drawMenu();
-            return;
-        }
-    } else {
-        if (delta >= ENC_PER_STEP) {
-            menuSel = (menuSel + 1) % I_COUNT;
-            menuEncRef += ENC_PER_STEP;
-            drawMenu();
-            return;
-        }
-        if (delta <= -ENC_PER_STEP) {
-            menuSel = (menuSel - 1 + I_COUNT) % I_COUNT;
-            menuEncRef -= ENC_PER_STEP;
-            drawMenu();
-            return;
-        }
+    if (delta >= ENC_PER_STEP) {
+        menuSel = (menuSel + 1) % I_COUNT;
+        menuEncRef += ENC_PER_STEP;
+        drawMenu();
+        return;
+    }
+    if (delta <= -ENC_PER_STEP) {
+        menuSel = (menuSel - 1 + I_COUNT) % I_COUNT;
+        menuEncRef -= ENC_PER_STEP;
+        drawMenu();
+        return;
     }
 
     if (buttonEdge()) {
