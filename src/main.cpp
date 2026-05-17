@@ -254,16 +254,26 @@ void encodersReset() { leftEnc.reset(); rightEnc.reset(); }
 // converges cleanly in standalone test. Symmetric PWM (no kV scaling) and
 // holding-only min-PWM clamp; do not add an always-on clamp because it
 // overrides the accel ramp and induces oscillation.
-void doTurn(float targetDeg) {
+// Returns true if turn converged inside deadband and held; false on timeout
+// or final-error outside 2× deadband. Caller can flag this as a crash.
+bool doTurn(float targetDeg) {
     yaw = 0;
     lastImuUs = micros();
     TurnProfile prof; prof.init(targetDeg);
+
+    // Battery-compensated FF: low pack voltage means each PWM unit produces
+    // less torque/ω. Scale the feed-forward term so the trapezoid still hits
+    // the commanded peak ω as the battery sags. PID stays unscaled so it
+    // remains a stability-domain correction.
+    float vbat   = readVbat();
+    float vScale = (vbat > 5.5f) ? (NOMINAL_VBAT / vbat) : 1.0f;
 
     unsigned long t0     = millis();
     unsigned long lastUs = micros();
     float prevErr  = 0;
     float peakErr  = 0;
     unsigned long inBandStart = 0;
+    bool  converged = false;
 
     while (true) {
         updateYaw();
@@ -281,7 +291,7 @@ void doTurn(float targetDeg) {
         float derr = (err - prevErr) / dt;
         prevErr    = err;
 
-        float pwm = TURN_KFF_PWM_PER_DPS * omega_des
+        float pwm = TURN_KFF_PWM_PER_DPS * omega_des * vScale
                   + TURN_KP_PWM_PER_DEG  * err
                   + TURN_KD_PWM_PER_DPS  * derr;
 
@@ -300,7 +310,7 @@ void doTurn(float targetDeg) {
 
         if (holding && fabsf(targetDeg - yaw) <= TURN_DEADBAND_DEG) {
             if (inBandStart == 0) inBandStart = nowMs;
-            if (nowMs - inBandStart >= TURN_HOLD_MS) break;
+            if (nowMs - inBandStart >= TURN_HOLD_MS) { converged = true; break; }
         } else {
             inBandStart = 0;
         }
@@ -309,8 +319,11 @@ void doTurn(float targetDeg) {
     stopMotors();
     unsigned long settleStart = millis();
     while (millis() - settleStart < TURN_SETTLE_MS) { updateYaw(); }
-    Serial.printf("[TURN] tgt=%+.1f fin=%+.2f err=%+.2f peakProf=%.2f\n",
-                  targetDeg, yaw, targetDeg - yaw, peakErr);
+    bool ok = converged && fabsf(targetDeg - yaw) <= 2.0f * TURN_DEADBAND_DEG;
+    Serial.printf("[TURN] tgt=%+.1f fin=%+.2f err=%+.2f peakProf=%.2f %s\n",
+                  targetDeg, yaw, targetDeg - yaw, peakErr,
+                  ok ? "OK" : "FAIL");
+    return ok;
 }
 
 // ── Pro-technique helpers ────────────────────────────────────────────────────
@@ -377,17 +390,23 @@ static void squareToFrontWall(unsigned long timeoutMs = 1200) {
     lastImuUs = micros();
 }
 
-void turnRight() { quickGyroRecal();  doTurn(-90); }
-void turnLeft()  { quickGyroRecal();  doTurn(+90); }
+bool turnRight() { quickGyroRecal();  return doTurn(-90); }
+bool turnLeft()  { quickGyroRecal();  return doTurn(+90); }
 // 180° as two chained 90°s — single 180° doubles momentum/error budget and
 // is the least-reliable single move. Two 90°s with a brief settle between
 // gives independent error budgets and lets gyro re-zero mid-spin.
-void turnAround() {
+//
+// Carry residual from first 90° into the second 90°'s target so total =
+// -180° regardless of first-turn undershoot. Without this, two +2°
+// undershoots produce -176° → robot drives at 4° angle into wall.
+bool turnAround() {
     quickGyroRecal();
-    doTurn(-90);
+    bool ok1 = doTurn(-90);
+    float residual = -90.0f - yaw;          // captured BEFORE the re-zero
     delay(80);
-    quickGyroRecal();
-    doTurn(-90);
+    quickGyroRecal();                       // re-zeros bias AND yaw
+    bool ok2 = doTurn(-90.0f + residual);   // compensates first-turn error
+    return ok1 && ok2;
 }
 
 // ── Cascaded velocity PI — SOTA inner-loop drive ─────────────────────────────
@@ -511,30 +530,44 @@ void ensureFrontClearance() {
     int safeRF = min((int)(calRF * TURN_CLEAR_FRAC), 4090);
     sampleIR();
     if (irVal[0] < safeLF && irVal[3] < safeRF) return;
-    constexpr long BACKUP_LIMIT_TICKS = 40;
+    // 60 mm of backup room — old 40-tick (~20 mm) cap was below the
+    // actual dead-end clearance need. With cell-stop at front IR ~50 mm
+    // sensor-to-wall the pivot radius needs the robot moved back another
+    // ~30 mm for the front corners to clear during a 90°/180°.
+    constexpr long BACKUP_LIMIT_TICKS = 120;
     long startL = leftEnc.getTicks();
     long startR = rTicks();
     leftMotor.drive(-DRIVE_PWM_MIN);
     rightMotor.drive(-DRIVE_PWM_MIN);
     unsigned long t0 = millis();
-    while (millis() - t0 < 500) {
+    while (millis() - t0 < 900) {
         sampleIR();
         long dL = abs(leftEnc.getTicks() - startL);
         long dR = abs(rTicks() - startR);
         if ((dL + dR) / 2 >= BACKUP_LIMIT_TICKS) break;
+        // Exit only when BOTH front sensors drop well below the safe
+        // threshold (≥150 below). Previous AND-of-margin was fine but
+        // hit the tick cap first because of the 20 mm budget.
         if (irVal[0] < safeLF - 150 && irVal[3] < safeRF - 150) break;
     }
     stopMotors();
     delay(60);
 }
 
-void rotateToHeading(AbsDir target) {
+// Returns false if any underlying doTurn() failed to converge — caller
+// should NOT issue driveChain() in that case (heading is unreliable).
+// robotHeading is still advanced because the maze logic depends on it
+// matching the commanded direction; the crash handler will surface the
+// failure so the run can be aborted rather than silently driving askew.
+bool rotateToHeading(AbsDir target) {
     int diff = ((int)target - (int)robotHeading + 4) % 4;
-    if (diff == 0) return;
+    if (diff == 0) return true;
     ensureFrontClearance();
-    if      (diff == 1) { turnRight();  robotHeading = (AbsDir)(((int)robotHeading + 1) % 4); }
-    else if (diff == 3) { turnLeft();   robotHeading = (AbsDir)(((int)robotHeading + 3) % 4); }
-    else if (diff == 2) { turnAround(); robotHeading = (AbsDir)(((int)robotHeading + 2) % 4); }
+    bool ok = true;
+    if      (diff == 1) { ok = turnRight();  robotHeading = (AbsDir)(((int)robotHeading + 1) % 4); }
+    else if (diff == 3) { ok = turnLeft();   robotHeading = (AbsDir)(((int)robotHeading + 3) % 4); }
+    else if (diff == 2) { ok = turnAround(); robotHeading = (AbsDir)(((int)robotHeading + 2) % 4); }
+    return ok;
 }
 
 // ── Half-cell advance before pivot (cascade-driven) ──────────────────────────
@@ -683,9 +716,18 @@ void driveChain() {
             // both lateral pose and angle are calibrated for free. Pro
             // technique: front wall is the most reliable pose reference in
             // the maze.
+            //
+            // Skip squaring at very close range — under ~35 mm the 30°
+            // sensors saturate and LF-RF diff is noise, so pivoting on it
+            // INJECTS yaw error instead of correcting it. The next
+            // ensureFrontClearance() will back the robot up before the
+            // turn, removing the need.
             if (wallFront()) {
-                squareToFrontWall();
-                sampleIR();   // refresh after pivot
+                float fdMM = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+                if (fdMM > 35.0f && fdMM < 80.0f) {
+                    squareToFrontWall();
+                    sampleIR();   // refresh after pivot
+                }
             }
             // Front wall is sampled correctly at cell-center. Sides use
             // look-ahead data captured during the approach.
@@ -1165,7 +1207,20 @@ void loop() {
             if (best != robotHeading) {
                 advanceToCellCenter();
             }
-            rotateToHeading(best);
+            bool turnOk = rotateToHeading(best);
+            if (!turnOk) {
+                // Turn failed to converge — heading is unreliable. Abort
+                // the run rather than driving askew into a wall.
+                stopMotors();
+                crashFlag = true;
+                crashRow = robotRow; crashCol = robotCol;
+                crashHeading = robotHeading;
+                for (int i = 0; i < 4; i++) crashIR[i] = irVal[i];
+                crashReason = "turn fail";
+                crashDrawn = false;
+                robotState = CRASH;
+                break;
+            }
             driveChain();
             if (crashFlag) { crashDrawn = false; robotState = CRASH; }
             break;
