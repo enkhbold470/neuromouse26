@@ -52,8 +52,8 @@ constexpr uint32_t PWM_FREQ_HZ   = 200;
 constexpr int      PWM_BITS      = MOTOR_PWM_BITS;
 constexpr int      PWM_MAX       = MOTOR_PWM_MAX;
 
-constexpr float    NOMINAL_VBAT  = 7.4f;
 constexpr unsigned long LOOP_US  = 5000;        // 200 Hz control loop
+                                                // (NOMINAL_VBAT comes from PinConfig.h)
 
 constexpr int      CHAR_PWM_LO    = 100;
 constexpr int      CHAR_PWM_HI    = 1000;
@@ -77,15 +77,17 @@ constexpr unsigned long PRE_RUN_WAIT_MS = 1000;
 #define NUS_TX_UUID       "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 // ── Runtime-tunable state (BLE/OLED can update) ──────────────────────────────
-// Defaults from current rig CHAR + tape calibration:
-//   tape pass 1: 1.000 scale → L/R 1.067
-//   tape pass 2: 1.042 scale → L/R 0.981  → true ratio 1.042 × 0.981 = 1.022
-static float    R_SCALE     = 1.022f;
+// Defaults locked in from auto-calibration on 2026-05-17:
+//   sweep pwm 100/200/300 → kV_L=2.961, kV_R=2.749, R_SCALE=1.0135
+//   RUN at T=300 with these values converged cleanly for first 3 s.
+// Rerun the on-device Calibrate to refresh after a battery change, motor
+// swap, or surface change.
+static float    R_SCALE     = 1.0135f;
 
-static float    kV_L        = 4.06f;
-static float    kV_R        = 4.32f;
-static float    off_L       = 19.0f;
-static float    off_R       = 1.0f;
+static float    kV_L        = 2.961f;
+static float    kV_R        = 2.749f;
+static float    off_L       = 0.0f;
+static float    off_R       = 0.0f;
 static bool     charDone    = false;
 
 static float    LOOP_KP     = 1.00f;
@@ -96,8 +98,10 @@ static float    EMA_ALPHA   = 0.50f;
 static float    STRAIGHT_KP  = 6.00f;
 static int      STRAIGHT_MAX = 500;
 
-static int      L_PWM_BIAS  = 0;
-static int      R_PWM_BIAS  = 0;
+// Runtime overrides — shadow the constexpr PinConfig L_PWM_BIAS / R_PWM_BIAS
+// so BLE can tune them live. Same default as PinConfig.h.
+static int      lPwmBias    = 0;
+static int      rPwmBias    = 0;
 
 static int                targetMmS = 300;
 static unsigned long      RUN_MS    = 4000;
@@ -540,7 +544,7 @@ static void doRunPid(bool fromBle) {
     drawRunScreen((float)targetMmS, 0, 0, 0, 0, vbat, 0);
     blePrintf("run start T=%d ms=%lu kp=%.2f ki=%.2f str=%.2f lb=%d rb=%d kvl=%.2f kvr=%.2f\n",
               targetMmS, RUN_MS, LOOP_KP, LOOP_KI, STRAIGHT_KP,
-              L_PWM_BIAS, R_PWM_BIAS, kV_L, kV_R);
+              lPwmBias, rPwmBias, kV_L, kV_R);
 
     while (millis() - startMs < RUN_MS && !stopRequested) {
         while ((long)(micros() - nextUs) < 0) {}
@@ -571,8 +575,8 @@ static void doRunPid(bool fromBle) {
         int   ffBase  = feedforwardPwm(target, kV_avg, off_avg, vScale);
 
         int basePwm = ffBase + pidSpeed;
-        int pwmL = constrain(basePwm - pidStraight + L_PWM_BIAS, 0, PWM_MAX);
-        int pwmR = constrain(basePwm + pidStraight + R_PWM_BIAS, 0, PWM_MAX);
+        int pwmL = constrain(basePwm - pidStraight + lPwmBias, 0, PWM_MAX);
+        int pwmR = constrain(basePwm + pidStraight + rPwmBias, 0, PWM_MAX);
 
         leftMotor.drive(pwmL);
         rightMotor.drive(pwmR);
@@ -606,7 +610,7 @@ static void doRunPid(bool fromBle) {
 static void dumpParams() {
     blePrintf("p kp=%.2f ki=%.2f il=%.0f ema=%.2f\n", LOOP_KP, LOOP_KI, INTEG_LIMIT, EMA_ALPHA);
     blePrintf("p str=%.2f sm=%d\n", STRAIGHT_KP, STRAIGHT_MAX);
-    blePrintf("p lb=%d rb=%d\n", L_PWM_BIAS, R_PWM_BIAS);
+    blePrintf("p lb=%d rb=%d\n", lPwmBias, rPwmBias);
     blePrintf("p kvl=%.3f kvr=%.3f ofl=%.1f ofr=%.1f\n", kV_L, kV_R, off_L, off_R);
     blePrintf("p t=%d rs=%.4f runms=%lu\n", targetMmS, R_SCALE, RUN_MS);
 }
@@ -636,8 +640,8 @@ static void handleBleCommand(const char* cmd) {
     else if (!strcmp(key, "ema"))   EMA_ALPHA    = constrain(fv, 0.01f, 1.0f);
     else if (!strcmp(key, "str"))   STRAIGHT_KP  = fv;
     else if (!strcmp(key, "sm"))    STRAIGHT_MAX = iv;
-    else if (!strcmp(key, "lb"))    L_PWM_BIAS   = iv;
-    else if (!strcmp(key, "rb"))    R_PWM_BIAS   = iv;
+    else if (!strcmp(key, "lb"))    lPwmBias     = iv;
+    else if (!strcmp(key, "rb"))    rPwmBias     = iv;
     else if (!strcmp(key, "kvl"))   kV_L         = fv;
     else if (!strcmp(key, "kvr"))   kV_R         = fv;
     else if (!strcmp(key, "ofl"))   off_L        = fv;
