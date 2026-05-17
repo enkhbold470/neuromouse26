@@ -23,6 +23,7 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "PinConfig.h"
+#include "IRCalibration.h"
 #include "MicromouseMotor.h"
 #include "MicromouseEncoder.h"
 #include "MicromouseMaze.h"
@@ -71,14 +72,12 @@ static int readIR(const IRPair& p) {
 static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
 
 // IR calibration captured in dead-end (centered, all 4 walls present).
-static int calLF = 3300;
-static int calL  = 1800;
-static int calR  = 1800;
-static int calRF = 2500;
+// Defaults loaded from PinConfig.h; "Cal IR" menu or BLE-cal updates RAM copy.
+static int calLF = IR_CAL_LF;
+static int calL  = IR_CAL_L;
+static int calR  = IR_CAL_R;
+static int calRF = IR_CAL_RF;
 
-// Fixed wall-presence thresholds.
-constexpr int WALL_SIDE_THRESH  = 1000;
-constexpr int WALL_FRONT_THRESH = 1500;
 static inline bool wallFront() {
     return irVal[0] > WALL_FRONT_THRESH || irVal[3] > WALL_FRONT_THRESH;
 }
