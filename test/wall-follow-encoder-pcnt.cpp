@@ -131,11 +131,11 @@ struct Tuning {
     // INVARIANT: frictionZone <= holdBand. Otherwise robot stalls in the
     // dead zone (no stiction floor, but not inside settle band either).
     float    kp           = 0.20f;   // PWM per tick of position error
-    float    kd           = 0.08f;   // PWM per (tick/sec) of forward velocity (higher → brakes earlier, less coast)
+    float    kd           = 0.05f;   // PWM per (tick/sec) of forward velocity (lower → less brake jitter)
     int      maxPwm       = 200;     // lower cruise PWM → less momentum to dump at brake
-    int      stictionPwm  = 120;     // min PWM applied when |err| > frictionZone
-    int      frictionZone = 12;      // ticks; below this no stiction floor (must be ≤ hb)
-    int      holdBand     = 15;      // ticks; ±~2 mm settle band
+    int      stictionPwm  = 110;     // min PWM applied when |err| > frictionZone
+    int      frictionZone = 10;      // ticks; below this no stiction floor (must be ≤ hb)
+    int      holdBand     = 20;      // ticks; ±~2.5 mm settle band
     uint32_t settleMs     = 200;
     int      stopBias     = 0;       // ticks; added to target. + → robot overshoots target, − → undershoots
 
@@ -145,7 +145,8 @@ struct Tuning {
     int      stallErrMax  = 40;      // ticks; max err to accept stall settle (~5 mm)
 
     // Steering bias terms (added on top of throttle)
-    float    balanceKp    = 0.10f;   // (tL−tR) gain
+    float    balanceKp    = 0.03f;   // (tL−tR) gain — secondary; IMU heading hold is primary
+    float    yawHoldKp    = 5.0f;    // PWM per deg of heading drift during forward (IMU-based)
     float    centerKp     = 0.04f;   // IR centering proportional gain
     float    centerKi     = 0.0f;
     float    centerKd     = 0.0f;    // disabled; derivative kicks on noisy irErr
@@ -220,8 +221,8 @@ static int readIR(const IRPair& p) {
 static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
 
 // ── Calibration ──────────────────────────────────────────────────────────────
-static int calL = 800;
-static int calR = 800;
+static int calL = 1500;
+static int calR = 1500;
 
 // ── PID ──────────────────────────────────────────────────────────────────────
 // IR centering gains + clamp moved into the Tuning struct above (live-tunable).
@@ -275,11 +276,12 @@ bool buttonEdge() {
 }
 
 // ── State / menu ─────────────────────────────────────────────────────────────
-enum State { IDLE, CAL, RUN, LIVE, ENC_TEST };
+enum State { IDLE, CAL, RUN, LIVE, ENC_TEST, GYRO_CAL };
 State state = IDLE;
 
 enum MenuItem {
     M_ENC = 0,
+    M_GYRO_CAL,
     M_TURN_R,
     M_TURN_L,
     M_SEQ,
@@ -287,6 +289,7 @@ enum MenuItem {
 };
 static const char* MENU_LABELS[M_COUNT] = {
     "Encoder Test",
+    "Cal Gyro",
     "Turn Right",
     "Turn Left",
     "Sequence"
@@ -318,7 +321,7 @@ struct PhaseStep {
     TurnDir  dir;
 };
 
-constexpr int MAX_SCRIPT = 16;
+constexpr int MAX_SCRIPT = 20;
 static PhaseStep script[MAX_SCRIPT];
 static int       scriptLen   = 0;
 static int       scriptIdx   = 0;
@@ -397,6 +400,7 @@ void handleCmd(String s) {
     else if (cmd == "stms") { T.stallMs = (uint32_t)parseInt(arg, T.stallMs); serialDump(); }
     else if (cmd == "stem") { T.stallErrMax = parseInt(arg, T.stallErrMax); serialDump(); }
     else if (cmd == "bal")  { T.balanceKp = parseFloat(arg, T.balanceKp); serialDump(); }
+    else if (cmd == "yhkp") { T.yawHoldKp = parseFloat(arg, T.yawHoldKp); serialDump(); }
     else if (cmd == "ckp")  { T.centerKp = parseFloat(arg, T.centerKp); serialDump(); }
     else if (cmd == "cki")  { T.centerKi = parseFloat(arg, T.centerKi); serialDump(); }
     else if (cmd == "ckd")  { T.centerKd = parseFloat(arg, T.centerKd); serialDump(); }
@@ -564,6 +568,41 @@ void oledCountdown(int n) {
     oled.sendBuffer();
 }
 
+// ── Gyro-cal screen ──────────────────────────────────────────────────────────
+// Shows live IR vs IR_CAL targets so the user can square the robot to a wall
+// before triggering bias capture. The cal trigger itself is driven by
+// encoder + gyro stillness, NOT IR (IR is just the alignment aid).
+static int gcalSampleIRPair(uint8_t emit, uint8_t rx) {
+    digitalWrite(emit, LOW);
+    delayMicroseconds(80);
+    int amb = analogRead(rx);
+    digitalWrite(emit, HIGH);
+    delayMicroseconds(80);
+    int lit = analogRead(rx);
+    digitalWrite(emit, LOW);
+    int d = amb - lit;
+    return d < 0 ? 0 : d;
+}
+static void oledGyroCal(int irLF, int irRF, bool still, int stillMs, const char* msg) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "Cal Gyro");
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_5x7_tf);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "LF %4d / %4d", irLF, IR_CAL_LF);
+    oled.drawStr(0, 22, buf);
+    snprintf(buf, sizeof(buf), "RF %4d / %4d", irRF, IR_CAL_RF);
+    oled.drawStr(0, 32, buf);
+    snprintf(buf, sizeof(buf), "still=%d  hold=%d/100ms", still ? 1 : 0, stillMs);
+    oled.drawStr(0, 44, buf);
+    snprintf(buf, sizeof(buf), "yaw=%+.2f bias=%.3f", yawDeg, gyroBiasZ);
+    oled.drawStr(0, 54, buf);
+    oled.drawStr(0, 63, msg ? msg : "btn=exit");
+    oled.sendBuffer();
+}
+
 void oledEncTest() {
     long tL = leftEnc.getTicks();
     long tR = rightEnc.getTicks();   // raw, no RIGHT_ENC_SCALE
@@ -632,31 +671,38 @@ void scriptLoadTurn(TurnDir d, bool postTurn) {
 //   3. pivot right
 //   4. fwd 11 cm           (approach for turn 2, post-turn short)
 //   5. pivot right
-//   6. fwd 3 cells
+// 5.5. fwd 14 cm 
+//   6. fwd 2 cells
 //   7. spot 180°
-//   8. fwd 3 cells
+//   8. fwd 2 cells
+//   8.5. fwd 14 cm  
 //   9. pivot left
 //  10. fwd 11 cm
 //  11. pivot left
-//  12. fwd 3 cells
+// 11.5. fwd 14 cm  
+//  12. fwd 2 cells
 //  13. spot 180°
+// calibrate gyro
 void scriptLoadSequence() {
     scriptReset();
-    // First half (rights).
+    // First half (right pivots).
     scriptPushFwd(T.ticksPerCell * 2);
-    scriptPushFwd(T.turnForwardTicks);
+    scriptPushFwd(T.turnForwardTicks);          // step 2: pre-turn
     scriptPushPivot(TURN_RIGHT);
-    scriptPushFwd(T.turnForwardTicksAfter);
+    scriptPushFwd(T.turnForwardTicksAfter);     // step 4: chained
     scriptPushPivot(TURN_RIGHT);
-    scriptPushFwd(T.ticksPerCell * 3);
-    scriptPushSpot(TURN_RIGHT);
-    // Second half (lefts).
-    scriptPushFwd(T.ticksPerCell * 3);
+    scriptPushFwd(T.turnForwardTicks);          // step 5.5: finish-cell
+    scriptPushFwd(T.ticksPerCell * 2);          // step 6
+    scriptPushSpot(TURN_RIGHT);                 // step 7
+    // Second half (left pivots).
+    scriptPushFwd(T.ticksPerCell * 2);          // step 8
+    scriptPushFwd(T.turnForwardTicks);          // step 8.5: pre-turn
     scriptPushPivot(TURN_LEFT);
-    scriptPushFwd(T.turnForwardTicksAfter);
+    scriptPushFwd(T.turnForwardTicksAfter);     // step 10: chained
     scriptPushPivot(TURN_LEFT);
-    scriptPushFwd(T.ticksPerCell * 3);
-    scriptPushSpot(TURN_LEFT);
+    scriptPushFwd(T.turnForwardTicks);          // step 11.5: finish-cell
+    scriptPushFwd(T.ticksPerCell * 2);          // step 12
+    scriptPushSpot(TURN_LEFT);                  // step 13
 }
 
 // Activate the first step of the loaded script (resets encoders, primes PID).
@@ -734,6 +780,10 @@ void loop() {
                     lastWasTurn = false;            // re-align: assume cell-aligned start
                     oledEncTest();
                     state = ENC_TEST;
+                } else if (menuSel == M_GYRO_CAL) {
+                    leftEnc.reset(); rightEnc.reset();
+                    oledGyroCal(0, 0, false, 0, "btn=exit");
+                    state = GYRO_CAL;
                 } else if (menuSel == M_TURN_R || menuSel == M_TURN_L) {
                     TurnDir d = (menuSel == M_TURN_R) ? TURN_RIGHT : TURN_LEFT;
                     scriptLoadTurn(d, lastWasTurn);
@@ -764,6 +814,69 @@ void loop() {
                 menuEncRef = rightEnc.getTicks();
                 oledMenu();
                 state = IDLE;
+            }
+            break;
+        }
+
+        case GYRO_CAL: {
+            // Cal Gyro state. Robot is meant to be pressed against a wall;
+            // OLED shows IR LF/RF vs IR_CAL_LF/IR_CAL_RF as a visual aid.
+            // Bias capture only triggers once encoders + gyro have been still
+            // for STILL_HOLD_MS continuously (auto-detected, no extra button).
+            static uint32_t lastUiMs   = 0;
+            static uint32_t stillStart = 0;
+            static long     prevTL = 0, prevTR = 0;
+            constexpr uint32_t STILL_HOLD_MS    = 100;
+            constexpr float    STILL_GZ_LIMIT   = 1.0f;     // deg/s
+            constexpr long     STILL_TICK_LIMIT = 1;        // per refresh
+
+            if (buttonEdge()) {                              // manual exit
+                stopMotors();
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+                break;
+            }
+
+            if (millis() - lastUiMs > 50) {
+                lastUiMs = millis();
+                int irLF = gcalSampleIRPair(EMIT_LF, RX_LF);
+                int irRF = gcalSampleIRPair(EMIT_RF, RX_RF);
+                long tL  = leftEnc.getTicks();
+                long tR  = rTicks();
+                bool encStill = (labs(tL - prevTL) <= STILL_TICK_LIMIT)
+                             && (labs(tR - prevTR) <= STILL_TICK_LIMIT);
+                prevTL = tL; prevTR = tR;
+                bool gzStill = fabsf(gzFilt) < STILL_GZ_LIMIT;
+                bool still   = encStill && gzStill && imuReady;
+
+                if (still) {
+                    if (stillStart == 0) stillStart = millis();
+                } else {
+                    stillStart = 0;
+                }
+                uint32_t held = (stillStart == 0) ? 0 : (millis() - stillStart);
+                if (held > 500) held = 500;
+
+                if (stillStart && (millis() - stillStart) >= STILL_HOLD_MS) {
+                    oledGyroCal(irLF, irRF, true, (int)held, "calibrating...");
+                    delay(20);
+                    calibrateGyroBias(300, 2);
+                    yawDeg = 0.0f;
+                    Serial.printf("[GCAL] bias=%.4f deg/s\n", gyroBiasZ);
+                    oledGyroCal(irLF, irRF, true, (int)held, "DONE — btn=exit");
+                    // Wait for button to leave (or press again).
+                    while (digitalRead(BUTTON_1) == LOW) { delay(5); }
+                    delay(150);
+                    // Reset capture state for the next entry.
+                    stillStart = 0; prevTL = 0; prevTR = 0;
+                    menuEncRef = rightEnc.getTicks();
+                    oledMenu();
+                    state = IDLE;
+                    break;
+                }
+                oledGyroCal(irLF, irRF, still, (int)held,
+                            imuReady ? "btn=exit" : "no IMU");
             }
             break;
         }
@@ -876,13 +989,15 @@ void loop() {
                 resetPidState();
                 pid.reset();
 
-                // For IMU rotational phases: refresh bias during the brake
-                // window, then zero yaw so progress starts at 0.
+                // For rotational phases: refresh bias during the brake window
+                // to fight gyro temperature drift. For ALL phases (including
+                // forward), zero yaw so per-phase heading reference starts
+                // clean — used by forward heading-hold and by pivot/spot.
                 bool nextIsRot = (next.phase == PH_PIVOT || next.phase == PH_SPOT);
-                if (T.useImu && imuReady && nextIsRot) {
-                    if (T.yawRecalEachPhase) {
-                        delay(80);                 // let motor vibration die
-                        calibrateGyroBias(80, 1);  // ~80 ms still sample
+                if (T.useImu && imuReady) {
+                    if (nextIsRot && T.yawRecalEachPhase) {
+                        delay(80);
+                        calibrateGyroBias(80, 1);
                     }
                     yawDeg    = 0.0f;
                     gzFilt    = 0.0f;
@@ -960,8 +1075,18 @@ void loop() {
             // Motor drive: phase-dependent mixing.
             int pwmL, pwmR;
             if (runPhase == PH_FORWARD) {
+                // Heading correction sources (positive bias → steers LEFT,
+                // i.e. pwmR > pwmL).
+                //   IMU yaw drift × yawHoldKp  (primary, when imuReady)
+                //   (tL−tR)        × balanceKp (secondary, encoder symmetry)
+                //   IR centering corr          (if useIr)
+                // Yaw convention here: right rotation → yawDeg < 0 (matches
+                // pivot code that uses −yawDeg as right-turn progress). So a
+                // rightward drift gives yawDeg < 0, and we want positive bias
+                // to steer left → multiply by −1.
+                int yawBias    = (T.useImu && imuReady) ? (int)(-T.yawHoldKp * yawDeg) : 0;
                 int encBalance = (int)((tL - tR) * T.balanceKp);
-                int bias = (int)corr + encBalance;
+                int bias = (int)corr + encBalance + yawBias;
                 pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
                 pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
                 leftMotor.drive(pwmL);
