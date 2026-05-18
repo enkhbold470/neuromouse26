@@ -692,6 +692,17 @@ void setup() {
     oled.setI2CAddress(OLED_ADDR << 1);
     oled.begin();
 
+    // MPU-6500: init + initial bias capture (robot MUST be still at boot).
+    imuReady = mpuInit();
+    if (imuReady) {
+        Serial.println("[IMU] mpu6500 ok, calibrating bias (300 samples)... keep still");
+        calibrateGyroBias(300, 2);
+        yawDeg = 0.0f;
+        Serial.printf("[IMU] bias=%.4f deg/s\n", gyroBiasZ);
+    } else {
+        Serial.println("[IMU] mpu6500 NOT detected — pivot/spot will fall back to encoder ticks");
+    }
+
     menuEncRef = rightEnc.getTicks();
     oledMenu();
 
@@ -702,6 +713,7 @@ void setup() {
 
 // ── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
+    updateYaw();          // continuous yaw integration (no-op if IMU absent)
     serialPoll();
     switch (state) {
 
