@@ -223,8 +223,8 @@ static int readIR(const IRPair& p) {
 static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
 
 // ── Calibration ──────────────────────────────────────────────────────────────
-static int calL = 1500;
-static int calR = 1500;
+static int calL = IR_CAL_L;
+static int calR = IR_CAL_R;
 
 // ── PID ──────────────────────────────────────────────────────────────────────
 // IR centering gains + clamp moved into the Tuning struct above (live-tunable).
