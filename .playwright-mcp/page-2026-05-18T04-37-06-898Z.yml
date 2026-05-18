@@ -1,0 +1,174 @@
+- generic [ref=e2]:
+  - heading "Maze (6×3 active region)" [level=3] [ref=e4]
+  - generic [ref=e6]:
+    - heading "State … …" [level=3] [ref=e7]:
+      - text: State
+      - generic [ref=e8]: …
+      - generic [ref=e9]: …
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - generic [ref=e13]: vL (mm/s)
+          - generic [ref=e14]: "0"
+        - generic [ref=e16]:
+          - generic [ref=e17]: vR (mm/s)
+          - generic [ref=e18]: "0"
+        - generic [ref=e20]:
+          - generic [ref=e21]: target
+          - generic [ref=e22]: "0"
+        - separator [ref=e23]
+        - generic [ref=e24]:
+          - generic [ref=e25]: pwmL (0-1023)
+          - generic [ref=e26]: "0"
+        - generic [ref=e28]:
+          - generic [ref=e29]: pwmR
+          - generic [ref=e30]: "0"
+      - generic [ref=e32]:
+        - generic [ref=e33]:
+          - generic [ref=e34]: FF
+          - generic [ref=e35]: "0"
+        - generic [ref=e36]:
+          - generic [ref=e37]: speed-PI
+          - generic [ref=e38]: "0"
+        - generic [ref=e39]:
+          - generic [ref=e40]: straight-PI
+          - generic [ref=e41]: "0"
+        - generic [ref=e42]:
+          - generic [ref=e43]: lateral
+          - generic [ref=e44]: "0"
+        - generic [ref=e45]:
+          - generic [ref=e46]: int(speed)
+          - generic [ref=e47]: "0"
+        - generic [ref=e48]:
+          - generic [ref=e49]: straight err
+          - generic [ref=e50]: "0"
+        - separator [ref=e51]
+        - generic [ref=e52]:
+          - generic [ref=e53]: yaw (°)
+          - generic [ref=e54]: "0"
+        - generic [ref=e55]:
+          - generic [ref=e56]: vBat / vScale
+          - generic [ref=e57]: "0"
+        - generic [ref=e58]:
+          - generic [ref=e59]: ticks L/R
+          - generic [ref=e60]: "0"
+        - generic [ref=e61]:
+          - generic [ref=e62]: cell prog
+          - generic [ref=e63]: "0"
+        - generic [ref=e64]:
+          - generic [ref=e65]: front (mm)
+          - generic [ref=e66]: "0"
+        - generic [ref=e67]:
+          - generic [ref=e68]: pos err
+          - generic [ref=e69]: "0"
+        - generic [ref=e70]:
+          - generic [ref=e71]: loop Hz
+          - generic [ref=e72]: "0"
+        - generic [ref=e73]:
+          - generic [ref=e74]: trace n
+          - generic [ref=e75]: "0"
+        - generic [ref=e76]:
+          - generic [ref=e77]: walls F/L/R
+          - generic [ref=e78]: 0/0/0
+    - separator [ref=e79]
+    - heading "IR (LF L R RF)" [level=3] [ref=e80]
+    - separator [ref=e82]
+    - heading "Yaw + Turn" [level=3] [ref=e83]
+    - separator [ref=e85]
+    - heading "Recent Turns" [level=3] [ref=e86]
+    - table [ref=e87]:
+      - rowgroup [ref=e88]:
+        - row "tgt° fin° err° peak° ok" [ref=e89]:
+          - columnheader "tgt°" [ref=e90]
+          - columnheader "fin°" [ref=e91]
+          - columnheader "err°" [ref=e92]
+          - columnheader "peak°" [ref=e93]
+          - columnheader "ok" [ref=e94]
+      - rowgroup
+    - separator [ref=e95]
+    - heading "Gyro Cal" [level=3] [ref=e96]
+    - generic [ref=e97]:
+      - generic [ref=e98]: bias (dps)
+      - generic [ref=e99]: –
+    - generic [ref=e100]:
+      - generic [ref=e101]: sample std
+      - generic [ref=e102]: –
+  - generic [ref=e103]:
+    - heading "Control" [level=3] [ref=e104]: Control
+    - generic [ref=e105]:
+      - button "START" [ref=e106] [cursor=pointer]
+      - button "STOP" [ref=e107] [cursor=pointer]
+      - button "reset" [ref=e108] [cursor=pointer]
+      - button "clear crash" [ref=e109] [cursor=pointer]
+      - button "FAST" [ref=e110] [cursor=pointer]
+      - button "square front" [ref=e111] [cursor=pointer]
+      - button "clear save" [ref=e112] [cursor=pointer]
+    - heading "Tests" [level=3] [ref=e113]: Tests
+    - table [ref=e114]:
+      - rowgroup [ref=e115]:
+        - row "motor L 200 R 200 ms 500 run" [ref=e116]:
+          - cell "motor" [ref=e117]
+          - cell "L 200 R 200 ms 500" [ref=e118]:
+            - text: L
+            - textbox [ref=e119]: "200"
+            - text: R
+            - textbox [ref=e120]: "200"
+            - text: ms
+            - textbox [ref=e121]: "500"
+          - cell "run" [ref=e122]:
+            - button "run" [ref=e123] [cursor=pointer]
+        - row "turn deg 90 run L R 180" [ref=e124]:
+          - cell "turn" [ref=e125]
+          - cell "deg 90" [ref=e126]:
+            - text: deg
+            - textbox [ref=e127]: "90"
+          - cell "run L R 180" [ref=e128]:
+            - button "run" [ref=e129] [cursor=pointer]
+            - button "L" [ref=e130] [cursor=pointer]
+            - button "R" [ref=e131] [cursor=pointer]
+            - button "180" [ref=e132] [cursor=pointer]
+        - row "drive cells 1 run" [ref=e133]:
+          - cell "drive" [ref=e134]
+          - cell "cells 1" [ref=e135]:
+            - text: cells
+            - textbox [ref=e136]: "1"
+          - cell "run" [ref=e137]:
+            - button "run" [ref=e138] [cursor=pointer]
+        - row "velocity mm/s 200 ms 1500 run" [ref=e139]:
+          - cell "velocity" [ref=e140]
+          - cell "mm/s 200 ms 1500" [ref=e141]:
+            - text: mm/s
+            - textbox [ref=e142]: "200"
+            - text: ms
+            - textbox [ref=e143]: "1500"
+          - cell "run" [ref=e144]:
+            - button "run" [ref=e145] [cursor=pointer]
+        - row "IR cal place robot in dead-end → capture 32×" [ref=e146]:
+          - cell "IR cal" [ref=e147]
+          - cell "place robot in dead-end → capture 32×" [ref=e148]:
+            - text: place robot in dead-end →
+            - button "capture 32×" [ref=e149] [cursor=pointer]
+        - row "gyro standstill → recal bias" [ref=e150]:
+          - cell "gyro" [ref=e151]
+          - cell "standstill → recal bias" [ref=e152]:
+            - text: standstill →
+            - button "recal bias" [ref=e153] [cursor=pointer]
+        - row "buzzer f 2000 ms 200 beep" [ref=e154]:
+          - cell "buzzer" [ref=e155]
+          - cell "f 2000 ms 200" [ref=e156]:
+            - text: f
+            - textbox [ref=e157]: "2000"
+            - text: ms
+            - textbox [ref=e158]: "200"
+          - cell "beep" [ref=e159]:
+            - button "beep" [ref=e160] [cursor=pointer]
+    - separator [ref=e161]
+    - heading "Live Tune refresh" [level=3] [ref=e162]:
+      - text: Live Tune
+      - button "refresh" [ref=e163] [cursor=pointer]
+    - table
+    - separator [ref=e164]
+    - heading "Debug Bundle Copy for Claude" [level=3] [ref=e165]:
+      - text: Debug Bundle
+      - button "Copy for Claude" [ref=e166] [cursor=pointer]
+    - heading "Event Log" [level=3] [ref=e167]
