@@ -9,7 +9,9 @@
       "Read(//usr/local/bin/**)",
       "Bash(/Users/inky/.platformio/penv/bin/pio run *)",
       "Bash(python3 -c \"import cv2; print\\('cv2', cv2.__version__\\)\")",
-      "Bash(python3 -c \"import numpy; print\\('numpy', numpy.__version__\\)\")"
+      "Bash(python3 -c \"import numpy; print\\('numpy', numpy.__version__\\)\")",
+      "Read(//Users/elijah/.platformio/penv/bin/**)",
+      "mcp__playwright__browser_take_screenshot"
     ]
   }
 }
