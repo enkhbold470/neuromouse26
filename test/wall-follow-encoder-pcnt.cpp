@@ -41,17 +41,18 @@ struct Tuning {
     // INVARIANT: frictionZone <= holdBand. Otherwise robot stalls in the
     // dead zone (no stiction floor, but not inside settle band either).
     float    kp           = 0.20f;   // PWM per tick of position error
-    float    kd           = 0.04f;   // PWM per (tick/sec) of forward velocity (lower → keeps momentum into hb)
-    int      maxPwm       = 230;
-    int      stictionPwm  = 100;     // min PWM applied when |err| > frictionZone
-    int      frictionZone = 25;      // ticks; below this no stiction floor
-    int      holdBand     = 70;      // ticks; ±~9 mm tolerance (must be > fz, wider than wobble band)
-    uint32_t settleMs     = 250;
+    float    kd           = 0.08f;   // PWM per (tick/sec) of forward velocity (higher → brakes earlier, less coast)
+    int      maxPwm       = 200;     // lower cruise PWM → less momentum to dump at brake
+    int      stictionPwm  = 120;     // min PWM applied when |err| > frictionZone
+    int      frictionZone = 12;      // ticks; below this no stiction floor (must be ≤ hb)
+    int      holdBand     = 15;      // ticks; ±~2 mm settle band
+    uint32_t settleMs     = 200;
+    int      stopBias     = 0;       // ticks; added to target. + → robot overshoots target, − → undershoots
 
     // Stall-escape settle (handles "stuck just outside hb" case)
-    float    stallVel     = 40.0f;   // ticks/sec; below this considered stalled
+    float    stallVel     = 30.0f;   // ticks/sec; below this considered stalled
     uint32_t stallMs      = 200;     // how long stalled before accepting current pos
-    int      stallErrMax  = 130;     // ticks; max err to accept stall settle (~17 mm)
+    int      stallErrMax  = 40;      // ticks; max err to accept stall settle (~5 mm)
 
     // Steering bias terms (added on top of throttle)
     float    balanceKp    = 0.10f;   // (tL−tR) gain
@@ -63,6 +64,7 @@ struct Tuning {
     // Misc
     long     ticksPerCell = 1405;    // measured 2026-05-18 hand-roll 180 mm
     bool     telemetry    = true;    // CSV print during RUN (`tel 0` to silence)
+    bool     useIr        = false;   // encoder-only run when false (no IR sample, no centering, no front-wall stop)
 };
 static Tuning T;
 
@@ -188,15 +190,15 @@ static String rxBuf;
 void oledMenu();   // fwd decl — defined below in OLED screens section
 
 void serialDump() {
-    Serial.printf("kp=%.3f kd=%.3f max=%d stk=%d fz=%d hb=%d sms=%lu\n"
+    Serial.printf("kp=%.3f kd=%.3f max=%d stk=%d fz=%d hb=%d sms=%lu bias=%d\n"
                   "stallV=%.1f stallMs=%lu stallEmax=%d\n"
                   "bal=%.3f ckp=%.3f cki=%.3f ckd=%.3f cmax=%d\n"
-                  "tpc=%ld tel=%d\n",
+                  "tpc=%ld tel=%d ir=%d\n",
         T.kp, T.kd, T.maxPwm, T.stictionPwm, T.frictionZone,
-        T.holdBand, (unsigned long)T.settleMs,
+        T.holdBand, (unsigned long)T.settleMs, T.stopBias,
         T.stallVel, (unsigned long)T.stallMs, T.stallErrMax,
         T.balanceKp, T.centerKp, T.centerKi, T.centerKd, T.centerMax,
-        T.ticksPerCell, T.telemetry ? 1 : 0);
+        T.ticksPerCell, T.telemetry ? 1 : 0, T.useIr ? 1 : 0);
 }
 
 static int parseInt(const String& a, int dflt) {
@@ -216,10 +218,10 @@ void handleCmd(String s) {
 
     if (cmd == "?" || cmd == "show")        { serialDump(); }
     else if (cmd == "help") {
-        Serial.println("pos: kp kd max stk fz hb sms");
+        Serial.println("pos: kp kd max stk fz hb sms bias");
         Serial.println("stall: stv stms stem");
         Serial.println("steer: bal ckp cki ckd cmax");
-        Serial.println("misc: tpc tel run stop tick reset show");
+        Serial.println("misc: tpc tel ir run stop tick reset show");
     }
     else if (cmd == "kp")   { T.kp = parseFloat(arg, T.kp); serialDump(); }
     else if (cmd == "kd")   { T.kd = parseFloat(arg, T.kd); serialDump(); }
@@ -228,6 +230,7 @@ void handleCmd(String s) {
     else if (cmd == "fz")   { T.frictionZone = parseInt(arg, T.frictionZone); serialDump(); }
     else if (cmd == "hb")   { T.holdBand = parseInt(arg, T.holdBand); serialDump(); }
     else if (cmd == "sms")  { T.settleMs = (uint32_t)parseInt(arg, T.settleMs); serialDump(); }
+    else if (cmd == "bias") { T.stopBias = parseInt(arg, T.stopBias); serialDump(); }
     else if (cmd == "stv")  { T.stallVel = parseFloat(arg, T.stallVel); serialDump(); }
     else if (cmd == "stms") { T.stallMs = (uint32_t)parseInt(arg, T.stallMs); serialDump(); }
     else if (cmd == "stem") { T.stallErrMax = parseInt(arg, T.stallErrMax); serialDump(); }
@@ -238,6 +241,7 @@ void handleCmd(String s) {
     else if (cmd == "cmax") { T.centerMax = parseInt(arg, T.centerMax); serialDump(); }
     else if (cmd == "tpc")  { T.ticksPerCell = parseInt(arg, T.ticksPerCell); serialDump(); }
     else if (cmd == "tel")  { T.telemetry = parseInt(arg, T.telemetry ? 1 : 0) != 0; serialDump(); }
+    else if (cmd == "ir")   { T.useIr = parseInt(arg, T.useIr ? 1 : 0) != 0; serialDump(); }
     else if (cmd == "tick") {
         long tL = leftEnc.getTicks(), tR = rTicks();
         Serial.printf("tL=%ld tR=%ld avg=%ld\n", tL, tR, (tL + tR) / 2);
@@ -257,7 +261,7 @@ void handleCmd(String s) {
         if (n < 1) n = 1;
         if (n > 20) n = 20;
         runCells  = n;
-        runTarget = T.ticksPerCell * (long)runCells;
+        runTarget = T.ticksPerCell * (long)runCells + (long)T.stopBias;
         pid.reset();
         leftEnc.reset(); rightEnc.reset();
         state = RUN;
@@ -463,7 +467,7 @@ void loop() {
                     sampleIR(); oledBars(); state = LIVE;
                 } else {
                     runCells  = menuSel - M_RUN1 + 1;
-                    runTarget = T.ticksPerCell * (long)runCells;   // exact; PID converges
+                    runTarget = T.ticksPerCell * (long)runCells + (long)T.stopBias;
                     for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(1000); }
                     pid.reset();
                     leftEnc.reset(); rightEnc.reset();
@@ -591,26 +595,32 @@ void loop() {
             if (labs(posErr) > T.frictionZone && mag < T.stictionPwm) mag = T.stictionPwm;
             int throttle = (u >= 0) ? mag : -mag;
 
-            // Front wall: block forward only; reverse-to-converge still allowed.
-            sampleIR();
-            bool wL = irVal[1] > WALL_SIDE_PRESENT;
-            bool wR = irVal[2] > WALL_SIDE_PRESENT;
-            bool wF = irVal[0] > WALL_FRONT_STOP || irVal[3] > WALL_FRONT_STOP;
-            if (wF && throttle > 0) {
-                stopMotors();
-                menuEncRef = rightEnc.getTicks();
-                oledMenu();
-                state = IDLE;
-                break;
+            // IR pipeline (optional — encoder-only when T.useIr == false).
+            bool wL = false, wR = false, wF = false;
+            int  irErr = 0;
+            float corr = 0.0f;
+            if (T.useIr) {
+                sampleIR();
+                wL = irVal[1] > WALL_SIDE_PRESENT;
+                wR = irVal[2] > WALL_SIDE_PRESENT;
+                wF = irVal[0] > WALL_FRONT_STOP || irVal[3] > WALL_FRONT_STOP;
+                if (wF && throttle > 0) {
+                    stopMotors();
+                    Serial.printf("--- RUN END reason=WALL err=%+ld irLF=%d irRF=%d tL=%ld tR=%ld ---\n",
+                                  posErr, irVal[0], irVal[3], tL, tR);
+                    menuEncRef = rightEnc.getTicks();
+                    oledMenu();
+                    state = IDLE;
+                    break;
+                }
+                int errR = wR ? (irVal[2] - calR) : 0;
+                int errL = wL ? (irVal[1] - calL) : 0;
+                irErr = errR - errL;
+                corr = (wL || wR) ? pid.compute((float)irErr) : 0.0f;
             }
 
-            // ── Steering bias on top of throttle ────────────────────────────
-            int errR = wR ? (irVal[2] - calR) : 0;
-            int errL = wL ? (irVal[1] - calL) : 0;
-            int irErr = errR - errL;
-            float corr = (wL || wR) ? pid.compute((float)irErr) : 0.0f;
+            // Steering bias on top of throttle (encoder balance always on).
             int encBalance = (int)((tL - tR) * T.balanceKp);
-
             int bias = (int)corr + encBalance;
             int pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             int pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
