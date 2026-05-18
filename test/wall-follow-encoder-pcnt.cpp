@@ -324,6 +324,7 @@ struct PhaseStep {
 constexpr int MAX_SCRIPT = 20;
 static PhaseStep script[MAX_SCRIPT];
 static int       scriptLen   = 0;
+static bool      scriptAutoCalAtEnd = false;   // true → re-cal gyro bias when last step completes
 static int       scriptIdx   = 0;
 
 static TurnDir   runTurnDir  = TURN_NONE;
@@ -643,7 +644,7 @@ void oledBars() {
 }
 
 // ── Script construction ──────────────────────────────────────────────────────
-static void scriptReset() { scriptLen = 0; scriptIdx = 0; }
+static void scriptReset() { scriptLen = 0; scriptIdx = 0; scriptAutoCalAtEnd = false; }
 static void scriptPush(RunPhase ph, long target, TurnDir d = TURN_NONE) {
     if (scriptLen < MAX_SCRIPT) script[scriptLen++] = { ph, target, d };
 }
@@ -685,6 +686,7 @@ void scriptLoadTurn(TurnDir d, bool postTurn) {
 // calibrate gyro
 void scriptLoadSequence() {
     scriptReset();
+    scriptAutoCalAtEnd = true;                  // auto gyro recal when sequence done
     // First half (right pivots).
     scriptPushFwd(T.ticksPerCell * 2);
     scriptPushFwd(T.turnForwardTicks);          // step 2: pre-turn
@@ -970,6 +972,15 @@ void loop() {
                     RunPhase lastPh = script[scriptLen - 1].phase;
                     lastWasTurn = (lastPh == PH_PIVOT || lastPh == PH_SPOT);
                     Serial.printf("--- RUN END lastWasTurn=%d ---\n", lastWasTurn ? 1 : 0);
+                    // Auto gyro re-cal at sequence end. Robot is braked + still
+                    // here, so this is a clean window for bias capture.
+                    if (scriptAutoCalAtEnd && T.useImu && imuReady) {
+                        Serial.println("[GCAL] auto re-cal at sequence end (200 samples)");
+                        delay(150);                       // let motors fully settle
+                        calibrateGyroBias(200, 2);
+                        yawDeg = 0.0f;
+                        Serial.printf("[GCAL] bias=%.4f deg/s\n", gyroBiasZ);
+                    }
                     resetPidState();
                     runTurnDir = TURN_NONE;
                     menuEncRef = rightEnc.getTicks();
