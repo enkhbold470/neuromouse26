@@ -136,7 +136,7 @@ struct Tuning {
     int      stictionPwm  = 110;     // min PWM applied when |err| > frictionZone
     int      frictionZone = 10;      // ticks; below this no stiction floor (must be ≤ hb)
     int      holdBand     = 20;      // ticks; ±~2.5 mm settle band
-    uint32_t settleMs     = 200;
+    uint32_t settleMs     = 80;      // shortened: chain steps with no inter-phase delay
     int      stopBias     = 0;       // ticks; added to target. + → robot overshoots target, − → undershoots
 
     // Stall-escape settle (handles "stuck just outside hb" case)
@@ -169,11 +169,11 @@ struct Tuning {
     int      yawStictionPwm       = 130;   // overcome stiction in pivot/spot
     float    yawFrictionZone      = 3.0f;  // deg; no stiction floor inside this
     float    yawHoldBand          = 1.5f;  // deg; settle band
-    uint32_t yawSettleMs          = 200;
+    uint32_t yawSettleMs          = 80;    // shortened: chain pivots/spots with no inter-phase delay
     float    yawStallVel          = 5.0f;  // deg/s; below this considered stalled
     uint32_t yawStallMs           = 250;
     float    yawStallErrMax       = 4.0f;  // deg; max err to accept stall settle
-    bool     yawRecalEachPhase    = true;  // re-cal bias during each forward→pivot brake
+    bool     yawRecalEachPhase    = false; // skip per-phase recal so steps chain with no delay; boot + end-of-seq cal carry bias
     bool     telemetry       = true;  // CSV print during RUN (`tel 0` to silence)
     bool     useIr           = false; // encoder-only run when false (no IR sample, no centering, no front-wall stop)
 };
