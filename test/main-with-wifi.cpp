@@ -590,6 +590,11 @@ struct ImuRaw { int16_t ax, ay, az, temp, gx, gy, gz; };
 static float gyroBiasZ = 0.0f;
 static float yaw = 0.0f;
 static unsigned long lastImuUs = 0;
+// Diagnostic: read-back of REG_GYRO_CFG after init. Expected == GYRO_FS_SEL
+// (0x10 → ±1000 dps, matches GYRO_SCALE=32.8 LSB/dps). Any mismatch implies
+// the register write didn't take or chip is in a different FS mode → yaw
+// integration will be scaled wrong → turns over/under-shoot proportionally.
+static uint8_t gyroCfgReadback = 0xFF;
 
 static bool mpuWrite(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(MPU_ADDR);
@@ -1238,16 +1243,16 @@ void driveChain() {
 // ─────────────────────────────────────────────────────────────────────────────
 // State + menu (mirror src/main.cpp)
 // ─────────────────────────────────────────────────────────────────────────────
-enum State { IDLE, TEST_MOTOR, TEST_ENC, TEST_IR, RUN, GOAL, CRASH };
+enum State { IDLE, TEST_MOTOR, TEST_ENC, TEST_IR, TEST_YAW, RUN, GOAL, CRASH };
 State robotState = IDLE;
 
 enum MenuItem {
-    M_TEST_MOTOR = 0, M_TEST_ENC, M_TEST_IR,
+    M_TEST_MOTOR = 0, M_TEST_ENC, M_TEST_IR, M_TEST_YAW,
     M_START, M_FAST, M_CLEAR_SAVE,
     M_COUNT
 };
 static const char* MENU_LABELS[M_COUNT] = {
-    "Test Motor", "Test Encoder", "Test IR",
+    "Test Motor", "Test Encoder", "Test IR", "Test Yaw",
     "START", "FAST (load)", "Clear Save"
 };
 static int  menuSel    = M_START;
@@ -1431,6 +1436,27 @@ void oledBars() {
         if (h > 0) oled.drawBox(x, Y0 - h, W, h);
         oled.drawStr(x + (W - (int)oled.getStrWidth(lbl[i])) / 2, Y0 - H - 2, lbl[i]);
     }
+    oledSendBuffer();
+}
+// Live-yaw diagnostic screen. Hold robot still, rotate by hand exactly 90°,
+// read the YAW line: ~90 = scale correct, ~180 = ±500-dps FS (yaw integrates
+// 2× too fast, matches the "90° command → ~45° physical turn" bug),
+// ~45 = ±2000-dps FS, ~22 = ±250-dps FS.
+// CFG line is REG_GYRO_CFG read-back at boot: should be 0x10. If anything
+// else, the register write didn't stick → that is the bug.
+void oledYawLive() {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "Yaw Live"); drawBatteryHeader(8);
+    oled.drawHLine(0, 10, 128);
+    char buf[28];
+    float liveYaw = sensorTaskUp ? yawSnap() : yaw;
+    oled.setFont(u8g2_font_8x13B_tf);
+    snprintf(buf, sizeof(buf), "%+7.1f", liveYaw); oled.drawStr(0, 30, buf);
+    oled.setFont(u8g2_font_6x10_tf);
+    snprintf(buf, sizeof(buf), "bias %+5.2f dps", gyroBiasZ); oled.drawStr(0, 44, buf);
+    snprintf(buf, sizeof(buf), "CFG=0x%02X exp 0x10", gyroCfgReadback); oled.drawStr(0, 54, buf);
+    oled.setFont(u8g2_font_5x7_tf); oled.drawStr(0, 63, "btn=back  enc=zero");
     oledSendBuffer();
 }
 void oledRunStatus(const char* msg) {
@@ -2660,10 +2686,22 @@ void setup() {
     uint8_t who = 0;
     mpuRead(REG_WHO_AM_I, &who, 1);
     mpuWrite(REG_PWR_MGMT_1, 0x00); delay(50);
-    mpuWrite(REG_GYRO_CFG,   GYRO_FS_SEL);
+    // Write FS_SEL and verify it stuck. A silent write failure (or wrong
+    // chip variant defaulting to a different FS) leaves the integrator with
+    // a wrong LSB/dps scale — turns will over/under-shoot proportionally.
+    // Retry up to 3 times before giving up.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        mpuWrite(REG_GYRO_CFG, GYRO_FS_SEL);
+        delay(5);
+        gyroCfgReadback = 0xFF;
+        mpuRead(REG_GYRO_CFG, &gyroCfgReadback, 1);
+        if (gyroCfgReadback == GYRO_FS_SEL) break;
+    }
     mpuWrite(REG_ACCEL_CFG,  0x00);
     lastImuUs = micros();
-    Serial.printf("[INIT] MPU WHO=0x%02X\n", who);
+    Serial.printf("[INIT] MPU WHO=0x%02X GYRO_CFG=0x%02X (exp 0x%02X)%s\n",
+                  who, gyroCfgReadback, GYRO_FS_SEL,
+                  gyroCfgReadback == GYRO_FS_SEL ? "" : "  ***MISMATCH***");
 
     // Init telemetry struct.
     portENTER_CRITICAL(&teleMux);
@@ -2825,6 +2863,8 @@ void loop() {
                                        robotState = TEST_ENC; tele_set_state("TEST_ENC"); break;
                     case M_TEST_IR:    sampleIR(); oledBars();
                                        robotState = TEST_IR; tele_set_state("TEST_IR"); break;
+                    case M_TEST_YAW:   oledYawLive();
+                                       robotState = TEST_YAW; tele_set_state("TEST_YAW"); break;
                     case M_START:      for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(333); }
                                        robotRow = 0; robotCol = 0; robotHeading = DIR_NORTH;
                                        firstCellOfRun = true;
@@ -2889,6 +2929,26 @@ void loop() {
             }
             if (buttonEdge()) {
                 menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                robotState = IDLE; tele_set_state("IDLE");
+            }
+            break;
+        }
+
+        case TEST_YAW: {
+            static uint32_t last = 0;
+            static long     yawZeroRef = 0;
+            if (millis() - last > 80) { oledYawLive(); last = millis(); }
+            // Encoder twist zeroes yaw — lets you hand-rotate from a fresh
+            // baseline without rebooting.
+            long delta = rightEnc.getTicks() - yawZeroRef;
+            if (delta >= ENC_PER_MENU_STEP || delta <= -ENC_PER_MENU_STEP) {
+                yawReset(); yaw = 0; lastImuUs = micros();
+                yawZeroRef = rightEnc.getTicks();
+            }
+            if (buttonEdge()) {
+                menuEncRef = rightEnc.getTicks();
+                yawZeroRef = rightEnc.getTicks();
                 oledMenu();
                 robotState = IDLE; tele_set_state("IDLE");
             }
