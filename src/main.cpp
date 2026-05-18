@@ -23,6 +23,7 @@
 #include "MicromouseMotor.h"
 #include "MicromouseEncoderPCNT.h"
 #include "MicromouseMaze.h"
+#include "IRCalibration.h"
 
 // ── MPU-6500 ─────────────────────────────────────────────────────────────────
 #define MPU_ADDR        0x68
@@ -172,6 +173,24 @@ struct Tuning {
     long     turnPivotTicks  = 900;
     long     spot180Ticks    = 906;
 
+    // Position-in-cell offset.  Robot starts pressed against the back wall;
+    // its center sits ~4.5 cm forward of that wall (i.e. ~4.5 cm BEHIND the
+    // cell-(0,0) center).  The first forward leg must compensate by 4.5 cm
+    // extra so the robot lands at cell-(1,0) center.  The same offset is
+    // re-established after every 180° wall-bump re-anchor.
+    //   4.5 cm × ~78.06 ticks/cm  ≈ 351 ticks.
+    long     startOffsetTicks      = 351;
+    // After a 180° spot turn, robot reverses until its back bumps the wall
+    // behind. Distance to reverse = (front IR estimated distance) + this
+    // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
+    // back of the robot.  Net effect: robot's rear physically against the
+    // wall, robot center at the same "-4.5 cm" reference as start.
+    float    backupOffsetMm        = 15.0f;
+    // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
+    // primitive in case it's wanted later).
+    float    wallTouchDistMm       = 35.0f;
+    long     fwdToWallMaxTicks     = 1600;
+
     bool     useImu          = true;
     float    pivot90Deg      = 90.0f;
     float    spot180Deg      = 180.0f;
@@ -243,6 +262,13 @@ static uint8_t plannedHeading = DIR_NORTH;
 static bool    exploreMode = false;
 static bool    fastRunMode = false;
 
+// Ticks to add to the NEXT forward leg so the robot lands at the next
+// cell-center even though it currently sits at "−4.5 cm offset" from the
+// current cell center (back-against-wall reference pose). Set to
+// `T.startOffsetTicks` at Explore start and after every 180° wall re-anchor;
+// reset to 0 once consumed by a forward leg.
+static long    pendingOffsetTicks = 0;
+
 static void setupMaze() {
     maze.reset();
     for (int c = 0; c < MAZE_COLS; c++) {
@@ -280,7 +306,16 @@ static void nvsClearWalls() {
 
 // ── Phase script ────────────────────────────────────────────────────────────
 enum TurnDir   { TURN_NONE, TURN_RIGHT, TURN_LEFT };
-enum RunPhase  { PH_FORWARD, PH_PIVOT, PH_SPOT };
+//   PH_FORWARD          — tick-target forward (signed, supports reverse)
+//   PH_PIVOT            — single-wheel pivot (yaw-degree or tick target)
+//   PH_SPOT             — both-wheels-opposite spot rotation (yaw-deg/tick)
+//   PH_FWD_TO_WALL      — open-loop slow forward, stops on IR-distance ≤ threshold
+//   PH_REVERSE_TO_BACK  — used after 180°. At phase entry, robot reads front
+//                         IR distance and computes a reverse target of
+//                         (frontMm + backupOffsetMm) so the rear bumps the
+//                         wall behind. Then PID handles it as a reverse
+//                         forward-phase (target is negative ticks).
+enum RunPhase  { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_FWD_TO_WALL, PH_REVERSE_TO_BACK };
 
 struct PhaseStep {
     RunPhase phase;
@@ -288,7 +323,7 @@ struct PhaseStep {
     TurnDir  dir;
 };
 
-constexpr int MAX_SCRIPT = 6;
+constexpr int MAX_SCRIPT = 8;
 static PhaseStep script[MAX_SCRIPT];
 static int       scriptLen = 0;
 static int       scriptIdx = 0;
@@ -307,6 +342,31 @@ static void scriptPushFwd(long ticks) {
 static void scriptPushSpot(TurnDir d, float deg) {
     long target = T.useImu ? (long)(deg + 0.5f) : T.spot180Ticks;
     scriptPush(PH_SPOT, target, d);
+}
+static void scriptPushFwdToWall() {
+    scriptPush(PH_FWD_TO_WALL, T.fwdToWallMaxTicks, TURN_NONE);
+}
+// Reverse-to-back-wall. Target is set at phase activation (front IR sample).
+static void scriptPushReverseToBack() {
+    scriptPush(PH_REVERSE_TO_BACK, 0, TURN_NONE);
+}
+
+// Called when a new script step is activated (kick or advance). Computes
+// any deferred targets (e.g. PH_REVERSE_TO_BACK reads front IR right here).
+// If the phase is re-classified into PH_FORWARD below, the standard PID
+// path takes over from the very next loop iteration.
+static void onPhaseActivate() {
+    if (runPhase == PH_REVERSE_TO_BACK) {
+        sampleIR();
+        float frontMm   = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+        float distMm    = frontMm + T.backupOffsetMm;
+        float ticksPerMm = (float)T.ticksPerCell / 180.0f;
+        long  ticks      = -(long)(distMm * ticksPerMm + 0.5f);
+        Serial.printf("[BACKUP] frontMm=%.1f offsetMm=%.1f → target=%ld ticks (reverse)\n",
+                      frontMm, T.backupOffsetMm, ticks);
+        runTarget = ticks;
+        runPhase  = PH_FORWARD;    // hand off to standard PID (handles negative target)
+    }
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -482,13 +542,33 @@ static void senseAndStoreWalls() {
                   irVal[0], irVal[3], irVal[1], irVal[2]);
 }
 
+// Build a one-cell-move script: optional spot turn, then forward 1 cell.
+// Two refinements baked in:
+//   * `pendingOffsetTicks` is added to the forward target, then cleared.
+//     Lets the first forward leg from start (or after a 180° re-anchor)
+//     compensate for the −4.5 cm position offset.
+//   * 180° turn (diff==2) is followed by an automatic wall re-anchor:
+//     spot 180 → drive to wall → back up 1.5 cm → forward (cellTicks + offset).
+//     After the re-anchor the robot is at "−4.5 cm" relative to the cell
+//     it's about to leave, so the forward leg gets the full offset added.
 static void buildMoveScript(AbsDir bestDir) {
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
-    if      (diff == 1) scriptPushSpot(TURN_RIGHT, 90.0f);
-    else if (diff == 2) scriptPushSpot(TURN_RIGHT, 180.0f);
-    else if (diff == 3) scriptPushSpot(TURN_LEFT, 90.0f);
-    scriptPushFwd(T.ticksPerCell);
+    if (diff == 1) {
+        scriptPushSpot(TURN_RIGHT, 90.0f);
+    } else if (diff == 3) {
+        scriptPushSpot(TURN_LEFT, 90.0f);
+    } else if (diff == 2) {
+        // 180° re-anchor: spot, then reverse until rear bumps the wall now
+        // behind. PH_REVERSE_TO_BACK measures front IR at activation time
+        // and computes its own (negative) tick target = frontMm + 1.5 cm.
+        scriptPushSpot(TURN_RIGHT, 180.0f);
+        scriptPushReverseToBack();
+        pendingOffsetTicks = T.startOffsetTicks;     // next fwd lands at next cell center
+    }
+    long fwd = T.ticksPerCell + pendingOffsetTicks;
+    pendingOffsetTicks = 0;
+    scriptPushFwd(fwd);
 
     plannedHeading = bestDir;
     plannedRow     = robotRow + DIR_DR[bestDir];
@@ -506,6 +586,7 @@ static void scriptKick() {
     if (T.useImu && imuReady) {
         yawDeg = 0.0f; gzFilt = 0.0f; lastYawUs = micros();
     }
+    onPhaseActivate();
 }
 
 // ── Setup ───────────────────────────────────────────────────────────────────
@@ -568,6 +649,7 @@ void loop() {
             case M_EXPLORE:
                 setupMaze();
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
+                pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = true; fastRunMode = false;
                 Serial.println("--- EXPLORE START ---");
                 state = EXPLORE_THINK;
@@ -581,6 +663,7 @@ void loop() {
                     break;
                 }
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
+                pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = false; fastRunMode = true;
                 Serial.println("--- FAST RUN START ---");
                 state = EXPLORE_THINK;
@@ -726,6 +809,73 @@ void loop() {
 
         long tL = leftEnc.getTicks();
         long tR = rTicks();
+
+        // ── PH_FWD_TO_WALL: open-loop slow forward, IR-stop. ─────────────
+        // Used after 180° to re-anchor on the new front wall. Stops as soon
+        // as the IR-estimated front distance drops below `wallTouchDistMm`.
+        // Falls through to standard PID/end on safety cap.
+        if (runPhase == PH_FWD_TO_WALL) {
+            sampleIR();
+            float frontMm = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+            long  avgTicks = (tL + tR) / 2;
+            static long     posAvgPrev_w = 0;
+            static uint32_t posPrevUs_w  = 0;
+            static uint32_t settleStart_w = 0;
+            // End conditions: wall touch, or safety travel cap.
+            auto endNow = [&](const char* reason) {
+                stopMotors();
+                Serial.printf("--- STEP END idx=%d/%d ph=FWD_TO_WALL reason=%s avg=%ld frontMm=%.1f tL=%ld tR=%ld ---\n",
+                              scriptIdx + 1, scriptLen, reason, avgTicks, frontMm, tL, tR);
+                posAvgPrev_w = 0; posPrevUs_w = 0; settleStart_w = 0;
+                if (scriptIdx + 1 >= scriptLen) {
+                    robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
+                    runTurnDir = TURN_NONE;
+                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
+                                  robotRow, robotCol, "NESW"[robotHeading]);
+                    if (exploreMode || fastRunMode) state = EXPLORE_THINK;
+                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
+                    return;
+                }
+                scriptIdx++;
+                PhaseStep& next = script[scriptIdx];
+                runPhase   = next.phase;
+                runTarget  = next.target;
+                runTurnDir = next.dir;
+                leftEnc.reset(); rightEnc.reset();
+                pid.reset();
+                if (T.useImu && imuReady) {
+                    yawDeg = 0.0f; gzFilt = 0.0f; lastYawUs = micros();
+                }
+                onPhaseActivate();
+            };
+
+            if (frontMm <= T.wallTouchDistMm) { endNow("WALL_TOUCH"); break; }
+            if (avgTicks >= runTarget)        { endNow("NO_WALL_CAP"); break; }
+
+            // Drive forward gently with yaw hold.
+            int throttle = T.stictionPwm;
+            int yawBias  = (T.useImu && imuReady) ? (int)(-T.yawHoldKp * yawDeg) : 0;
+            int pwmL = constrain(throttle - yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            int pwmR = constrain(throttle + yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            leftMotor.drive(pwmL);
+            rightMotor.drive(pwmR);
+
+            static uint32_t lastOled = 0;
+            if (millis() - lastOled > 150) {
+                oledRun(avgTicks, runTarget, tL, tR);
+                lastOled = millis();
+            }
+            if (T.telemetry) {
+                static uint32_t lastTel = 0;
+                if (millis() - lastTel > 80) {
+                    Serial.printf("t=%lu ph=FWD2WALL avg=%ld frontMm=%.1f thr=%d yaw=%+.2f tL=%ld tR=%ld\n",
+                                  (unsigned long)millis(), avgTicks, frontMm, throttle, yawDeg, tL, tR);
+                    lastTel = millis();
+                }
+            }
+            break;
+        }
+
         bool imuMode = T.useImu && imuReady && (runPhase != PH_FORWARD);
 
         float avg;
@@ -796,6 +946,7 @@ void loop() {
             if (T.useImu && imuReady) {
                 yawDeg = 0.0f; gzFilt = 0.0f; lastYawUs = micros();
             }
+            onPhaseActivate();
         };
 
         if (fabsf(posErr) < effHb) {
