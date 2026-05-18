@@ -352,7 +352,43 @@ static int readIR(const IRPair& p) {
     int d = amb - lit;
     return d < 0 ? 0 : d;
 }
-static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
+// Parallel-pipeline shared state (full doc near sensorTask). Declared early
+// because sampleIR/updateYaw/readVbat all gate on sensorTaskUp.
+static SemaphoreHandle_t i2cMutex     = nullptr;
+static volatile int      irShared[4]  = {0,0,0,0};
+static portMUX_TYPE      yawMux       = portMUX_INITIALIZER_UNLOCKED;
+static volatile float    yawShared    = 0.0f;
+static volatile float    vbatShared   = 7.4f;
+static volatile uint32_t sensorTaskHz = 0;
+static volatile bool     sensorTaskUp = false;
+
+static inline void yawReset() {
+    portENTER_CRITICAL(&yawMux);
+    yawShared = 0.0f;
+    portEXIT_CRITICAL(&yawMux);
+}
+static inline void yawSet(float v) {
+    portENTER_CRITICAL(&yawMux);
+    yawShared = v;
+    portEXIT_CRITICAL(&yawMux);
+}
+static inline float yawSnap() {
+    portENTER_CRITICAL(&yawMux);
+    float v = yawShared;
+    portEXIT_CRITICAL(&yawMux);
+    return v;
+}
+static void oledSendBuffer();    // wraps oled.sendBuffer in i2cMutex
+
+// Before sensorTask spawns (boot-time cal), sample directly. After sensorTask
+// spawns it owns the ADC1; main loop reads the cache instead.
+static void sampleIR() {
+    if (sensorTaskUp) {
+        for (int i = 0; i < 4; i++) irVal[i] = irShared[i];
+    } else {
+        for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]);
+    }
+}
 
 static int calLF = IR_CAL_LF;
 static int calL  = IR_CAL_L;
@@ -362,6 +398,32 @@ static int calRF = IR_CAL_RF;
 static inline bool wallFront() { return irVal[0] > WALL_FRONT_THRESH || irVal[3] > WALL_FRONT_THRESH; }
 static inline bool wallLeft()  { return irVal[1] > WALL_SIDE_THRESH; }
 static inline bool wallRight() { return irVal[2] > WALL_SIDE_THRESH; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// True parallel sensor pipeline (Core 0 task) — answers "is everything
+// running in parallel?". Yes, after this:
+//
+//   • Encoders L/R     → hardware interrupts on GPIO 38/21 (always parallel,
+//                        zero CPU cost in main path)
+//   • IR sensors       → dedicated sensorTask on Core 0 at 400 Hz, ADC1
+//                        reads, no CPU cost on Core 1
+//   • MPU-6500 gyro    → same sensorTask, I2C reads at 400 Hz, mutex-locked
+//                        against OLED writes
+//   • VBat             → sensorTask, ADC1, 10 Hz
+//   • Algorithm + PID  → Core 1 main loop, ONLY reads cached values; never
+//                        touches I2C, never blocks on ADC
+//   • HTTP / WiFi      → wifiTask on Core 0 at priority 1 (below sensor's 2)
+//
+// Sync primitives:
+//   i2cMutex (FreeRTOS mutex w/ priority inheritance): held by sensorTask
+//   during gyro read, and by main thread during oledSendBuffer(). OLED writes
+//   only happen between motion phases, so contention is rare.
+//   yawMux (portMUX spinlock, ~10 ns): protects yawShared float against
+//   simultaneous integrate (sensorTask) and reset/snapshot (main).
+// ─────────────────────────────────────────────────────────────────────────────
+// (i2cMutex, irShared, yawShared, yawMux, vbatShared, sensorTaskHz,
+//  sensorTaskUp, yawReset/Set/Snap and oledSendBuffer forward decl moved
+//  above sampleIR.)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sensor fusion — IR + gyro + encoders. No single sensor is trusted alone.
@@ -554,7 +616,13 @@ static bool imuReadAll(ImuRaw& d) {
     d.gx=imu_to16(b[8],b[9]); d.gy=imu_to16(b[10],b[11]); d.gz=imu_to16(b[12],b[13]);
     return true;
 }
+// Before sensorTask spawns, integrate locally (boot-time cal). After, the
+// task owns the gyro and main thread just snapshots the shared value.
 static void updateYaw() {
+    if (sensorTaskUp) {
+        yaw = yawSnap();
+        return;
+    }
     ImuRaw d;
     if (!imuReadAll(d)) return;
     unsigned long now = micros();
@@ -567,6 +635,7 @@ static void updateYaw() {
 }
 
 static float readVbat() {
+    if (sensorTaskUp) return vbatShared;
     int raw = analogRead(BAT_V_SENSE);
     return (raw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
 }
@@ -635,6 +704,7 @@ static inline void tele_push_turn(float target, float a_des, float w_des, float 
 bool doTurn(float targetDeg) {
     tele_set_phase("turn");
     logEvent("turn start tgt=%+0.1f", targetDeg);
+    yawReset();
     yaw = 0;
     lastImuUs = micros();
     TurnProfile prof; prof.init(targetDeg);
@@ -704,6 +774,13 @@ bool doTurn(float targetDeg) {
 
 static void quickGyroRecal(unsigned ms = 80) {
     stopMotors();
+    // Hold I2C exclusively for the cal sweep so sensorTask can't interleave
+    // gyro reads. Robot is stopped so the brief sensorTask pause is OK.
+    bool tookMutex = false;
+    if (sensorTaskUp && i2cMutex) {
+        tookMutex = (xSemaphoreTake(i2cMutex, 300/portTICK_PERIOD_MS) == pdTRUE);
+        if (!tookMutex) { yawReset(); yaw = 0; lastImuUs = micros(); return; }
+    }
     unsigned long t0 = millis();
     float sum = 0;
     int   n   = 0;
@@ -713,6 +790,8 @@ static void quickGyroRecal(unsigned ms = 80) {
         delayMicroseconds(500);
     }
     if (n > 0) gyroBiasZ = sum / n;
+    if (tookMutex) xSemaphoreGive(i2cMutex);
+    yawReset();
     yaw = 0;
     lastImuUs = micros();
 }
@@ -750,6 +829,7 @@ static void squareToFrontWall(unsigned long timeoutMs = 1200) {
         delay(8);
     }
     stopMotors();
+    yawReset();
     yaw = 0;
     lastImuUs = micros();
 }
@@ -932,7 +1012,7 @@ void advanceToCellCenter() {
     tele_set_phase("advance");
     leftEnc.reset(); rightEnc.reset();
     long refL = leftEnc.getTicks(), refR = rTicks();
-    yaw = 0; lastImuUs = micros();
+    yawReset(); yaw = 0; lastImuUs = micros();
 
     VpidState st; st.reset(readVbat());
     unsigned long nextUs = micros();
@@ -1001,7 +1081,7 @@ void driveChain() {
     tele_set_phase("drive");
     leftEnc.reset(); rightEnc.reset();
     long refL = leftEnc.getTicks(), refR = rTicks();
-    yaw = 0; lastImuUs = micros();
+    yawReset(); yaw = 0; lastImuUs = micros();
     sideLook.reset();
 
     VpidState st; st.reset(readVbat());
@@ -1090,7 +1170,7 @@ void driveChain() {
             refL = leftEnc.getTicks();
             refR = rTicks();
             cellBoundary = TICKS_PER_CELL;
-            yaw          = seed;
+            yawSet(seed); yaw = seed;
             lastImuUs    = micros();
             st.reset(readVbat());
             st.prevL = curL; st.prevR = curR;
@@ -1231,7 +1311,7 @@ void oledMenu() {
             oled.drawStr(3, y + 8, MENU_LABELS[idx]);
         }
     }
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void oledGyroCal(int prog, int total) {
     oled.clearBuffer();
@@ -1240,7 +1320,7 @@ void oledGyroCal(int prog, int total) {
     oled.setFont(u8g2_font_8x13B_tf); oled.drawStr(0, 32, "STILL");
     char buf[24]; snprintf(buf, sizeof(buf), "%d/%d", prog, total);
     oled.drawStr(0, 50, buf);
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 // Two-stage cal:
 //   1) Warm-up: drain ~400 ms of samples without summing (MPU-6500 needs
@@ -1325,7 +1405,7 @@ void oledEncoderTest() {
     snprintf(buf, sizeof(buf), "L %ld", (long)leftEnc.getTicks()); oled.drawStr(0, 32, buf);
     snprintf(buf, sizeof(buf), "R %ld", (long)rightEnc.getTicks()); oled.drawStr(0, 50, buf);
     oled.setFont(u8g2_font_5x7_tf); oled.drawStr(0, 62, "btn = back");
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void oledMotorMsg(const char* line1, const char* line2) {
     oled.clearBuffer();
@@ -1334,7 +1414,7 @@ void oledMotorMsg(const char* line1, const char* line2) {
     oled.setFont(u8g2_font_8x13B_tf);
     oled.drawStr(0, 32, line1);
     if (line2) oled.drawStr(0, 50, line2);
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void oledBars() {
     static const uint8_t order[4] = { 1, 0, 3, 2 };
@@ -1351,7 +1431,7 @@ void oledBars() {
         if (h > 0) oled.drawBox(x, Y0 - h, W, h);
         oled.drawStr(x + (W - (int)oled.getStrWidth(lbl[i])) / 2, Y0 - H - 2, lbl[i]);
     }
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void oledRunStatus(const char* msg) {
     oled.clearBuffer();
@@ -1362,7 +1442,7 @@ void oledRunStatus(const char* msg) {
     snprintf(buf, sizeof(buf), "r%u c%u", robotRow, robotCol); oled.drawStr(0, 28, buf);
     snprintf(buf, sizeof(buf), "h%d d%u", (int)robotHeading, maze.flood[robotRow][robotCol]); oled.drawStr(0, 44, buf);
     if (msg) oled.drawStr(0, 62, msg);
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void oledCrash() {
     oled.clearBuffer();
@@ -1374,7 +1454,7 @@ void oledCrash() {
     snprintf(buf, sizeof(buf), "LF%4d L%4d", crashIR[0], crashIR[1]); oled.drawStr(0, 30, buf);
     snprintf(buf, sizeof(buf), "RF%4d R%4d", crashIR[3], crashIR[2]); oled.drawStr(0, 40, buf);
     oled.setFont(u8g2_font_5x7_tf); oled.drawStr(0, 63, "btn=back");
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void oledCountdown(int n) {
     oled.clearBuffer();
@@ -1383,7 +1463,7 @@ void oledCountdown(int n) {
     char buf[4]; snprintf(buf, sizeof(buf), "%d", n);
     int w = oled.getStrWidth(buf);
     oled.drawStr((128 - w) / 2, 60, buf);
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void setupMaze() {
     maze.reset();
@@ -1408,7 +1488,7 @@ void oledShortMsg(const char* line) {
     oled.setFont(u8g2_font_8x13B_tf);
     int w = oled.getStrWidth(line);
     oled.drawStr((128 - w) / 2, 38, line);
-    oled.sendBuffer();
+    oledSendBuffer();
 }
 void runMotorTest() {
     const int PWM = DRIVE_PWM, DUR = 350;
@@ -2232,6 +2312,7 @@ static void handleState() {
     out += ",\"gyro_warn\":";     out += t.gyro_bias_warn ? 1 : 0;
     out += ",\"no_path\":";       out += t.no_path_retries;
     out += ",\"loop_hz\":";       out += (uint32_t)loopHzMeasured;
+    out += ",\"sensor_hz\":";     out += (uint32_t)sensorTaskHz;
     out += ",\"trace_n\":";       out += traceCount;
     out += ",\"ir_layout\":[\"L\",\"LF\",\"RF\",\"R\"]";
     out += ",\"ir_phys\":[";      // re-ordered to physical L,LF,RF,R
@@ -2417,6 +2498,77 @@ static void copyMazeIntoTele() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Sensor task (Core 0, priority 2 — above wifi's 1). Owns ADC1 and gyro I2C
+// reads. Main loop (Core 1) only reads cached values; this is what makes
+// IR + gyro + algorithm truly parallel. Encoders are already parallel via HW
+// interrupt. VBat read also lives here so ADC1 has a single owner.
+// ─────────────────────────────────────────────────────────────────────────────
+static void sensorTask(void*) {
+    unsigned long nextUs       = micros();
+    unsigned long lastVbatMs   = 0;
+    unsigned long winStart     = millis();
+    uint32_t      ticks        = 0;
+    unsigned long lastGyroUs   = 0;
+    constexpr unsigned long PERIOD_US = 2500;   // 400 Hz
+
+    sensorTaskUp = true;
+    for (;;) {
+        while ((long)(micros() - nextUs) < 0) { vTaskDelay(1); }
+        nextUs += PERIOD_US;
+
+        // Gyro — locked against OLED. Mutex has priority inheritance so if
+        // main thread holds it for an OLED redraw, this task's effective
+        // priority is boosted so it doesn't starve indefinitely.
+        if (i2cMutex && xSemaphoreTake(i2cMutex, 30 / portTICK_PERIOD_MS) == pdTRUE) {
+            ImuRaw d;
+            if (imuReadAll(d)) {
+                unsigned long now = micros();
+                float dt = (lastGyroUs == 0) ? 0.001f
+                          : (now - lastGyroUs) / 1e6f;
+                if (dt > 0.05f) dt = 0.05f;
+                lastGyroUs = now;
+                float gz = d.gz / GYRO_SCALE - gyroBiasZ;
+                if (fabsf(gz) < 0.05f) gz = 0;
+                portENTER_CRITICAL(&yawMux);
+                yawShared += gz * dt;
+                portEXIT_CRITICAL(&yawMux);
+            }
+            xSemaphoreGive(i2cMutex);
+        }
+
+        // IR — ADC1 only, no I2C. Main thread no longer reads ADC1 directly
+        // after sensorTaskUp=true (sampleIR / readVbat / oledBars).
+        int tmp[4];
+        for (int i = 0; i < 4; i++) tmp[i] = readIR(PAIRS[i]);
+        for (int i = 0; i < 4; i++) irShared[i] = tmp[i];
+
+        // VBat at 10 Hz.
+        unsigned long nowMs = millis();
+        if (nowMs - lastVbatMs > 100) {
+            int raw = analogRead(BAT_V_SENSE);
+            vbatShared = (raw / 4095.0f) * 3.3f * BAT_VDIV_MULT;
+            lastVbatMs = nowMs;
+        }
+        ticks++;
+        if (nowMs - winStart >= 1000) {
+            sensorTaskHz = ticks; ticks = 0; winStart = nowMs;
+        }
+    }
+}
+
+// Mutex-wrapped OLED commit. OLED writes only happen between motion phases
+// (menu, test screens, GOAL/CRASH/start). Sending a full SSD1306 frame over
+// 400 kHz I2C ≈ 26 ms — sensorTask gyro samples skip for that window, which
+// is fine because the robot is stationary during these screens.
+static void oledSendBuffer() {
+    if (i2cMutex == nullptr) { oled.sendBuffer(); return; }
+    if (xSemaphoreTake(i2cMutex, 100 / portTICK_PERIOD_MS) == pdTRUE) {
+        oled.sendBuffer();
+        xSemaphoreGive(i2cMutex);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WiFi task (Core 0)
 // ─────────────────────────────────────────────────────────────────────────────
 static void wifiTask(void*) {
@@ -2520,6 +2672,8 @@ void setup() {
     tele.phase = "init";
     portEXIT_CRITICAL(&teleMux);
 
+    // Boot-time gyro cal runs synchronously here (NO sensorTask yet, so it
+    // owns the I2C bus exclusively). Same for IR sampling and ADC reads.
     calibrateGyro();
     setupMaze();
     copyMazeIntoTele();
@@ -2527,7 +2681,15 @@ void setup() {
     oledMenu();
     Serial.println("[INIT] ready");
 
-    // WiFi/HTTP task pinned to Core 0. Stack 8 KB, priority 1 (above idle).
+    // I2C mutex must exist BEFORE sensorTask + wifiTask spawn. FreeRTOS
+    // mutexes (created via xSemaphoreCreateMutex) have priority inheritance.
+    i2cMutex = xSemaphoreCreateMutex();
+
+    // Sensor task pinned to Core 0, priority 2 (above wifiTask's 1 so a busy
+    // HTTP client can't starve the 400 Hz gyro/IR pipeline). Stack 4 KB.
+    xTaskCreatePinnedToCore(sensorTask, "sensor", 4096, NULL, 2, NULL, 0);
+
+    // WiFi/HTTP task pinned to Core 0. Stack 8 KB, priority 1.
     xTaskCreatePinnedToCore(wifiTask, "wifi", 8192, NULL, 1, NULL, 0);
 
     tele_set_state("IDLE");
