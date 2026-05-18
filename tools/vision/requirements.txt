@@ -1,0 +1,4 @@
+opencv-contrib-python>=4.8
+numpy>=1.24
+flask>=3.0
+requests>=2.31
