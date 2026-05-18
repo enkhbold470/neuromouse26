@@ -11,7 +11,8 @@
       "Bash(python3 -c \"import cv2; print\\('cv2', cv2.__version__\\)\")",
       "Bash(python3 -c \"import numpy; print\\('numpy', numpy.__version__\\)\")",
       "Read(//Users/elijah/.platformio/penv/bin/**)",
-      "mcp__playwright__browser_take_screenshot"
+      "mcp__playwright__browser_take_screenshot",
+      "Bash(/Users/elijah/.platformio/penv/bin/pio run *)"
     ]
   }
 }
