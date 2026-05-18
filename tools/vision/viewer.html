@@ -1,0 +1,299 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>MM26 ground-truth tracker</title>
+<style>
+  :root{--bg:#0b0b0c;--panel:#141417;--ink:#ddd;--muted:#888;--ok:#3ecf6a;--bad:#ff5252;--warn:#ffae42;--cam:#3ecf6a;--fw:#3aa0ff;}
+  body{font-family:system-ui;background:var(--bg);color:var(--ink);margin:0;padding:14px}
+  h1{font-size:13px;margin:0 0 8px 0;color:#aaa;font-weight:500;letter-spacing:.5px}
+  .row{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}
+  .panel{background:var(--panel);border:1px solid #222;padding:8px;border-radius:6px}
+  canvas{background:#000;display:block}
+  .lbl{font-size:11px;color:var(--muted);margin-bottom:4px}
+  pre{background:#000;color:#9f9;padding:8px;font-size:10px;margin:0;border:1px solid #222;border-radius:4px}
+  input{background:#1c1c20;color:var(--ink);border:1px solid #333;padding:4px 6px;font-family:inherit;border-radius:3px}
+  button{background:#23232a;color:var(--ink);border:1px solid #444;padding:4px 10px;cursor:pointer;border-radius:3px}
+  .kv{font-size:11px;line-height:1.6}
+  .kv b{color:#fff;font-weight:500}
+  .kv .v{color:#9cf}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+  .legend{font-size:10px;color:#999;margin-top:6px}
+  .legend .sw{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:middle;border-radius:2px}
+</style></head>
+<body>
+<h1>MM26 — physical (camera) vs claimed (firmware)</h1>
+<div style="margin-bottom:8px">
+  Source: <input id="src" value="map.json" size="14">
+  Poll ms: <input id="ms" type="number" value="200" style="width:60px">
+  <button onclick="loop()">restart</button>
+  <span id="status" style="margin-left:14px"></span>
+</div>
+<div style="margin-bottom:10px;padding:6px;background:#141417;border:1px solid #222;border-radius:6px">
+  <b style="font-size:11px;color:#888">control</b>
+  <button onclick="fwCmd('start')" style="background:#1f4d2a;color:#cfc">START</button>
+  <button onclick="fwCmd('stop')" style="background:#5a2a2a;color:#fcc">STOP</button>
+  <button onclick="fwCmd('reset')">reset</button>
+  <button onclick="fwCmd('clear_crash')">clear crash</button>
+  <button onclick="fwCmd('fast')">FAST</button>
+  <button onclick="fwCmd('clear_save')">clear save</button>
+  <button onclick="teleportToCam()" style="background:#234d5e;color:#cef">teleport→cam</button>
+  <button onclick="pushCamWalls()" style="background:#3d3a1f;color:#ffd">push cam walls</button>
+  <button onclick="fwCmd('square')">square front</button>
+  <button onclick="captureBg()" style="background:#3a234d;color:#dcf">capture bg (clear maze!)</button>
+  <span id="cmdResult" style="margin-left:14px;font-size:11px;color:#9cf"></span>
+</div>
+
+<div class="row">
+  <div class="panel">
+    <div class="lbl">arena (north up) — green wall = match · red wall = diff · green dot = CAM robot · blue ring = FW claim</div>
+    <canvas id="cArena" width="360" height="720"></canvas>
+    <div class="legend">
+      <span class="sw" style="background:var(--cam)"></span>camera robot
+      <span class="sw" style="background:var(--fw);margin-left:10px"></span>firmware claim
+      <span class="sw" style="background:var(--bad);margin-left:10px"></span>wall mismatch
+    </div>
+  </div>
+
+  <div class="panel" style="min-width:260px">
+    <div class="lbl">diff vs firmware</div>
+    <div class="kv" id="diff">—</div>
+    <div class="lbl" style="margin-top:10px">camera robot</div>
+    <div class="kv" id="cam">—</div>
+    <div class="lbl" style="margin-top:10px">firmware /state</div>
+    <div class="kv" id="fw">—</div>
+  </div>
+
+  <div class="panel" style="min-width:320px">
+    <div class="lbl">live tune (enter→apply, then push)</div>
+    <table id="tuneTable" style="font-size:11px;width:100%;border-collapse:collapse"></table>
+    <div class="lbl" style="margin-top:8px">IR (live, raw — sampled every loop tick)</div>
+    <div id="irBars"></div>
+  </div>
+
+  <div class="panel">
+    <div class="lbl">raw map.json</div>
+    <pre id="raw" style="width:340px;height:680px;overflow:auto">—</pre>
+  </div>
+</div>
+
+<script>
+const ROWS=6, COLS=3, CELL=60;
+const N=1,E=2,S=4,W=8;
+const COL_CAM="#3ecf6a", COL_FW="#3aa0ff", COL_OK="#5e5", COL_BAD="#f33", COL_GRID="#222";
+const ARROWS=["↑","→","↓","←"];
+
+function cellTopLeft(r,c){ return [c*CELL, (ROWS-1-r)*CELL]; }
+
+function drawArena(ctx, m){
+  const W=ctx.canvas.width, H=ctx.canvas.height;
+  ctx.fillStyle="#000"; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=COL_GRID; ctx.lineWidth=1;
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    const [x,y]=cellTopLeft(r,c); ctx.strokeRect(x,y,CELL,CELL);
+    ctx.fillStyle="#333"; ctx.font="9px monospace"; ctx.fillText(`${r},${c}`,x+3,y+10);
+  }
+  const camW = m?.camera?.walls;
+  const wd   = m?.diff?.wall_diff;
+  if(camW){
+    ctx.lineWidth=4;
+    for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+      const wm=camW[r][c]||0, mism=(wd?wd[r][c]:0)|0;
+      const [x,y]=cellTopLeft(r,c);
+      const col=(side)=>(mism&side)?COL_BAD:COL_OK;
+      if(wm&N){ctx.strokeStyle=col(N); line(ctx,x,y,x+CELL,y);}
+      if(wm&S){ctx.strokeStyle=col(S); line(ctx,x,y+CELL,x+CELL,y+CELL);}
+      if(wm&W){ctx.strokeStyle=col(W); line(ctx,x,y,x,y+CELL);}
+      if(wm&E){ctx.strokeStyle=col(E); line(ctx,x+CELL,y,x+CELL,y+CELL);}
+    }
+  }
+  // firmware pose (blue ring at cell center)
+  const fw=m?.firmware;
+  if(fw && fw.row!=null && fw.col!=null){
+    const [x,y]=cellTopLeft(fw.row, fw.col);
+    const cx=x+CELL/2, cy=y+CELL/2;
+    ctx.strokeStyle=COL_FW; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.arc(cx,cy,CELL*0.32,0,Math.PI*2); ctx.stroke();
+    // heading arrow
+    const h=(fw.heading|0);
+    const dx=[0,1,0,-1][h], dy=[-1,0,1,0][h];
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+dx*CELL*0.4, cy+dy*CELL*0.4);
+    ctx.stroke();
+  }
+  // camera pose (green dot + arrow at exact mm)
+  const cam=m?.camera?.robot;
+  if(cam && cam.detected){
+    const pxPerMm = CELL / m.cell_mm;
+    const cx=cam.x_mm*pxPerMm;
+    const cy=H - cam.y_mm*pxPerMm;
+    const bearing = cam.heading_deg * Math.PI/180;
+    const dx=Math.sin(bearing), dy=-Math.cos(bearing);
+    ctx.fillStyle=COL_CAM; ctx.beginPath(); ctx.arc(cx,cy,7,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=COL_CAM; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+dx*22,cy+dy*22); ctx.stroke();
+  }
+}
+function line(ctx,a,b,c,d){ctx.beginPath();ctx.moveTo(a,b);ctx.lineTo(c,d);ctx.stroke();}
+
+function renderDiff(d){
+  if(!d || d.cell_match==null && d.pose_error_mm==null) return "<span class='warn'>no firmware data</span>";
+  const cm=d.cell_match;
+  const cellTag = cm===true?"<span class='ok'>MATCH</span>":cm===false?"<span class='bad'>OFF</span>":"—";
+  const pe=d.pose_error_mm, de=d.pose_error_deg, wm=d.wall_mismatches;
+  const peTag = pe==null?"—":(pe<30?`<span class='ok'>${pe} mm</span>`:pe<90?`<span class='warn'>${pe} mm</span>`:`<span class='bad'>${pe} mm</span>`);
+  const deTag = de==null?"—":(Math.abs(de)<10?`<span class='ok'>${de}°</span>`:Math.abs(de)<30?`<span class='warn'>${de}°</span>`:`<span class='bad'>${de}°</span>`);
+  const wmTag = wm==null?"—":(wm===0?`<span class='ok'>0</span>`:`<span class='bad'>${wm}</span>`);
+  return `<b>cell</b> <span class='v'>${cellTag}</span><br>
+          <b>pose error</b> <span class='v'>${peTag}</span><br>
+          <b>heading error</b> <span class='v'>${deTag}</span><br>
+          <b>wall mismatches</b> <span class='v'>${wmTag}</span>`;
+}
+function renderCam(r){
+  if(!r||!r.detected) return "<span class='bad'>robot not detected</span> <span class='warn'>(no ArUco, no green blob)</span>";
+  const src = r.source==="aruco" ? "<span class='ok'>ArUco</span>" : "<span class='warn'>green blob"+(r.heading_uncertain?" — heading uncertain":"")+"</span>";
+  return `<b>source</b> <span class='v'>${src}</span><br>
+          <b>cell</b> <span class='v'>r${r.row} c${r.col}</span><br>
+          <b>pos</b>  <span class='v'>${r.x_mm} mm E, ${r.y_mm} mm N</span><br>
+          <b>heading</b> <span class='v'>${r.heading_deg}° (${r.heading_name})</span>`;
+}
+function renderFw(fw){
+  if(!fw) return "—";
+  if(!fw.online) return `<span class='bad'>offline</span> ${fw.url||""}<br><span class='warn'>${fw.error||""}</span>`;
+  const age = fw.last_fetch_age_s!=null ? fw.last_fetch_age_s.toFixed(2)+"s" : "—";
+  return `<b>cell</b> <span class='v'>r${fw.row} c${fw.col}</span> <b>heading</b> <span class='v'>${ARROWS[fw.heading|0]} (${fw.heading})</span><br>
+          <b>state</b> <span class='v'>${fw.state||"?"}</span> · <b>phase</b> <span class='v'>${fw.phase||"?"}</span><br>
+          <b>yaw</b> <span class='v'>${fw.yaw_deg}°</span> · <b>vbat</b> <span class='v'>${fw.vbat}V</span><br>
+          <b>vL/vR</b> <span class='v'>${fw.vL}/${fw.vR} mm/s</span> · <b>front</b> <span class='v'>${fw.frontMM} mm</span><br>
+          <b>fetch age</b> <span class='v'>${age}</span>${fw.crash?" · <span class='bad'>CRASH</span>":""}`;
+}
+
+let lastMap=null;
+async function fwCmd(name, params){
+  const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+  try{
+    const r = await fetch(`/fw/cmd/${name}${qs}`);
+    const t = await r.text();
+    document.getElementById("cmdResult").innerHTML = `<span class='${r.ok?'ok':'bad'}'>${name}${qs}: ${r.status} ${t}</span>`;
+  }catch(e){
+    document.getElementById("cmdResult").innerHTML = `<span class='bad'>${name}: ${e.message}</span>`;
+  }
+}
+function teleportToCam(){
+  const r = lastMap?.camera?.robot;
+  if(!r || !r.detected){ document.getElementById("cmdResult").innerHTML = "<span class='bad'>no camera robot pose</span>"; return; }
+  fwCmd("teleport", {row: r.row, col: r.col, heading: r.heading_dir});
+}
+function pushCamWalls(){
+  const w = lastMap?.camera?.walls;
+  if(!w){ document.getElementById("cmdResult").innerHTML = "<span class='bad'>no camera walls</span>"; return; }
+  const hex = w.flat().map(b => (b & 0xF).toString(16).padStart(2,"0")).join("");
+  fwCmd("walls", {w: hex});
+}
+async function captureBg(){
+  try{
+    const r = await fetch("/capture_bg", {method:"POST"});
+    const t = await r.text();
+    document.getElementById("cmdResult").innerHTML = `<span class='${r.ok?'ok':'bad'}'>capture_bg: ${r.status} ${t}</span>`;
+  }catch(e){
+    document.getElementById("cmdResult").innerHTML = `<span class='bad'>${e.message}</span>`;
+  }
+}
+const TUNE_KEYS = [
+  ["turn_kp", "Turn KP (P gain on yaw err)"],
+  ["turn_kd", "Turn KD (damping; raise to kill overshoot)"],
+  ["turn_peak", "Turn peak ω (deg/s) — lower = gentler"],
+  ["turn_accel", "Turn accel (deg/s²)"],
+  ["turn_kff", "Turn KFF (PWM per deg/s)"],
+  ["turn_pwm_sat", "Turn PWM cap"],
+  ["turn_min_hold_pwm", "Turn min hold PWM (stiction floor)"],
+  ["turn_deadband_deg", "Turn deadband (deg)"],
+  ["turn_hold_ms", "Turn hold time (ms — longer settles better)"],
+  ["turn_timeout_ms", "Turn timeout (ms)"],
+  ["turn_settle_ms", "Turn settle (ms)"],
+  ["lateral_ema", "Lateral bias EMA α"],
+  ["cell_target_mms", "Cell target mm/s"],
+  ["wall_side_thresh", "Side wall IR threshold"],
+  ["wall_front_thresh", "Front wall IR threshold"],
+  ["cell_anchor_mm", "Cell-anchor stop dist (mm)"],
+  ["crash_brake_mm", "Crash brake dist (mm)"],
+  ["pos_kp_pwm", "Lateral pos KP (PWM/IR-err)"],
+  ["yaw_kp_pwm", "Yaw KP (PWM/deg)"],
+  ["right_enc_scale", "Right encoder scale"],
+];
+let tuneRendered = false;
+function renderTunePanel(tune){
+  const tbl = document.getElementById("tuneTable");
+  if (!tune) { tbl.innerHTML = "<tr><td style='color:#888;padding:6px'>firmware offline — tune unavailable</td></tr>"; tuneRendered=false; return; }
+  if (!tuneRendered) {
+    let html = "";
+    for(const [k,desc] of TUNE_KEYS){
+      const v = tune[k];
+      html += `<tr><td style='padding:2px 4px;color:#9cf' title='${desc}'>${k}</td>
+                <td style='padding:2px'><input id='tune_${k}' value='${v ?? ""}' size='8' style='font-size:11px'></td>
+                <td style='padding:2px'><button onclick="applyTune('${k}')" style='padding:2px 6px;font-size:10px'>set</button></td>
+                <td id='live_${k}' style='padding:2px;color:#888'>${v}</td></tr>`;
+    }
+    tbl.innerHTML = html;
+    tuneRendered = true;
+  } else {
+    for(const [k] of TUNE_KEYS){
+      const el = document.getElementById("live_" + k);
+      if (el) el.textContent = (tune[k] != null) ? tune[k] : "—";
+    }
+  }
+}
+async function applyTune(k){
+  const v = document.getElementById("tune_" + k).value;
+  await fwCmd("set", {k, v});
+}
+function renderIrBars(fw){
+  const div = document.getElementById("irBars");
+  const labels = fw?.ir_layout || ["L","LF","RF","R"];
+  const vals   = fw?.ir || [];
+  const cal    = fw?.cal || [];
+  const thS    = fw?.tune?.wall_side_thresh ?? 900;
+  const thF    = fw?.tune?.wall_front_thresh ?? 1400;
+  // ir_layout describes the order of fw.ir (default L,LF,RF,R per firmware)
+  let html = "<div style='font-size:10px;font-family:monospace'>";
+  for(let i=0;i<4;i++){
+    const label = labels[i]||("S"+i);
+    const v = vals[i] ?? 0;
+    const th = (label==="LF"||label==="RF") ? thF : thS;
+    const pct = Math.min(100, Math.round(v/4095*100));
+    const color = v >= th ? "#f55" : "#5cf";
+    html += `<div style='margin:2px 0'><span style='display:inline-block;width:24px'>${label}</span>
+             <span style='display:inline-block;width:160px;background:#222;border:1px solid #333;height:10px;vertical-align:middle'>
+               <span style='display:block;width:${pct}%;height:100%;background:${color}'></span>
+             </span>
+             <span style='margin-left:6px'>${v}</span> <span style='color:#666'>th=${th}</span></div>`;
+  }
+  html += "</div>";
+  div.innerHTML = html;
+}
+let timer=null;
+async function tick(){
+  const url=document.getElementById("src").value;
+  let m=null, err=null;
+  try{ m=await(await fetch(url+"?t="+Date.now())).json(); lastMap=m; }
+  catch(e){ err=e.message; }
+  drawArena(document.getElementById("cArena").getContext("2d"), m);
+  document.getElementById("diff").innerHTML = renderDiff(m?.diff);
+  document.getElementById("cam").innerHTML  = renderCam(m?.camera?.robot);
+  document.getElementById("fw").innerHTML   = renderFw(m?.firmware);
+  renderTunePanel(m?.firmware?.tune);
+  renderIrBars(m?.firmware);
+  document.getElementById("raw").textContent = m? JSON.stringify(m,null,2) : (err||"no data");
+  const s=document.getElementById("status");
+  if(err){ s.innerHTML="<span class='bad'>fetch error: "+err+"</span>"; return; }
+  const cam = m?.camera?.robot?.detected;
+  const fw  = m?.firmware?.online;
+  s.innerHTML = (cam?"<span class='ok'>CAM ✓</span>":"<span class='bad'>CAM ✗</span>")
+              + " · " +
+                (fw ?"<span class='ok'>FW ✓</span>":"<span class='warn'>FW ✗</span>");
+}
+function loop(){
+  if(timer) clearInterval(timer);
+  tick();
+  timer=setInterval(tick, parseInt(document.getElementById("ms").value)||200);
+}
+loop();
+</script>
+</body></html>

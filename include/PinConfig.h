@@ -177,7 +177,7 @@ constexpr int     TIMEOUT_MS       = 5000;    // per-cell drive timeout
 // Pause after the cell-boundary stopMotors() before pose update / sensing.
 // 0 = no pause (max speed). >0 helps if motors coast past the boundary or
 // the chassis rocks at brake. Original value before tuning was 80 ms.
-constexpr unsigned long CELL_STOP_DELAY_MS = 100;
+constexpr unsigned long CELL_STOP_DELAY_MS = 0;
 
 // ── Maze constants ────────────────────────────────────────────────────────────
 constexpr uint8_t MAZE_SIZE        = 16;
