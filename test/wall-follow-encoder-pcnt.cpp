@@ -46,6 +46,8 @@
 // DLPF_CFG=3 → 41 Hz BW, 5.9 ms group delay. Filters out high-freq motor noise.
 #define DLPF_CFG_VAL    0x03
 
+int coundown_delay = 500;
+
 static float    gyroBiasZ   = 0.0f;
 static float    yawDeg      = 0.0f;
 static float    gzFilt      = 0.0f;     // low-passed gz, deg/s
@@ -789,7 +791,7 @@ void loop() {
                 } else if (menuSel == M_TURN_R || menuSel == M_TURN_L) {
                     TurnDir d = (menuSel == M_TURN_R) ? TURN_RIGHT : TURN_LEFT;
                     scriptLoadTurn(d, lastWasTurn);
-                    for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(1000); }
+                    for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(coundown_delay); }
                     Serial.printf("--- RUN START kind=TURN dir=%s (%s) ---\n",
                                   d == TURN_RIGHT ? "RIGHT" : "LEFT",
                                   lastWasTurn ? "POST-TURN, short" : "STANDALONE");
@@ -798,7 +800,7 @@ void loop() {
                     state = RUN;
                 } else if (menuSel == M_SEQ) {
                     scriptLoadSequence();
-                    for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(1000); }
+                    for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(coundown_delay); }
                     Serial.println("--- RUN START kind=SEQUENCE (2 cells, R, R-short, 3 cells, 180) ---");
                     serialDump();
                     scriptKick();
@@ -1059,13 +1061,23 @@ void loop() {
             if (fabsf(posErr) > effFz && mag < effStkPwm) mag = effStkPwm;
             int throttle = (u >= 0) ? mag : -mag;
 
-            // IR centering (forward phase only; pivot ignores IR).
+            // IR centering (forward phase only; pivot/spot ignore IR).
+            //
+            //  Threshold-based wall detection causes a discontinuous handoff
+            //  when a wall fades in/out — corr term snaps on and off and the
+            //  robot yaws. Instead: keep raw IR, EMA-smooth, weight each side
+            //  by continuous "wall confidence" 0..1:
+            //      < IR_CONF_LO  → 0    (clearly no wall)
+            //      LO ≤ x ≤ HI   → linear
+            //      > IR_CONF_HI  → 1    (clearly wall present)
+            //  Centering err = cR·(irR−calR) − cL·(irL−calL). At wall edges
+            //  the contribution decays smoothly — no snap, no yaw kick.
+            //
+            //  EMA derivative fires one-shot "wall opened"/"appeared" events.
             int  irErr = 0;
             float corr = 0.0f;
             if (runPhase == PH_FORWARD && T.useIr) {
                 sampleIR();
-                bool wL = irVal[1] > WALL_SIDE_PRESENT;
-                bool wR = irVal[2] > WALL_SIDE_PRESENT;
                 bool wF = irVal[0] > WALL_FRONT_STOP || irVal[3] > WALL_FRONT_STOP;
                 if (wF && throttle > 0) {
                     stopMotors();
@@ -1077,10 +1089,44 @@ void loop() {
                     state = IDLE;
                     break;
                 }
-                int errR = wR ? (irVal[2] - calR) : 0;
-                int errL = wL ? (irVal[1] - calL) : 0;
-                irErr = errR - errL;
-                corr = (wL || wR) ? pid.compute((float)irErr) : 0.0f;
+
+                constexpr float IR_CONF_LO    = 200.0f;
+                constexpr float IR_CONF_HI    = 800.0f;
+                constexpr float IR_EDGE_DELTA = 300.0f;
+
+                static float irLSm = 0.0f, irRSm = 0.0f;
+                static float irLPrev = 0.0f, irRPrev = 0.0f;
+                static bool  irFirstSample = true;
+                if (irFirstSample) {
+                    irLSm = irVal[1]; irRSm = irVal[2];
+                    irLPrev = irLSm;  irRPrev = irRSm;
+                    irFirstSample = false;
+                }
+                irLSm = 0.7f * irLSm + 0.3f * irVal[1];
+                irRSm = 0.7f * irRSm + 0.3f * irVal[2];
+
+                float dL = irLSm - irLPrev;
+                float dR = irRSm - irRPrev;
+                irLPrev = irLSm;
+                irRPrev = irRSm;
+                if (dL < -IR_EDGE_DELTA) Serial.println("[EVENT] L wall opened");
+                if (dR < -IR_EDGE_DELTA) Serial.println("[EVENT] R wall opened");
+                if (dL >  IR_EDGE_DELTA) Serial.println("[EVENT] L wall appeared");
+                if (dR >  IR_EDGE_DELTA) Serial.println("[EVENT] R wall appeared");
+
+                auto wallConf = [](float v) -> float {
+                    if (v < IR_CONF_LO) return 0.0f;
+                    if (v > IR_CONF_HI) return 1.0f;
+                    return (v - IR_CONF_LO) / (IR_CONF_HI - IR_CONF_LO);
+                };
+                float cL = wallConf(irLSm);
+                float cR = wallConf(irRSm);
+
+                float fErrL = cL * (irLSm - (float)calL);
+                float fErrR = cR * (irRSm - (float)calR);
+                float fErr  = fErrR - fErrL;
+                irErr = (int)fErr;
+                corr  = (cL > 0.05f || cR > 0.05f) ? pid.compute(fErr) : 0.0f;
             }
 
             // Motor drive: phase-dependent mixing.
