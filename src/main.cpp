@@ -386,8 +386,19 @@ static void scriptPushFwdToWall() {
     scriptPush(PH_FWD_TO_WALL, T.fwdToWallMaxTicks, TURN_NONE);
 }
 // Reverse-to-back-wall. Target is set at phase activation (front IR sample).
+// Legacy: no longer called by buildMoveScript. Kept compiled in case the
+// blind-reverse strategy is wanted later.
 static void scriptPushReverseToBack() {
     scriptPush(PH_REVERSE_TO_BACK, 0, TURN_NONE);
+}
+// Forward-to-front-wall via raw IR threshold. Used by the 180° anchor to
+// land the robot against a known geometric reference (front wall).
+static void scriptPushFwdToBump() {
+    scriptPush(PH_FWD_TO_BUMP, T.fwdToBumpMaxTicks, TURN_NONE);
+}
+// Dead-end gyro re-cal. No target — exits on stillness-held or timeout.
+static void scriptPushDeadendRecal() {
+    scriptPush(PH_DEADEND_RECAL, 0, TURN_NONE);
 }
 
 // Called when a new script step is activated (kick or advance). Computes
