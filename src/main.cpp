@@ -658,12 +658,19 @@ static void buildMoveScript(AbsDir bestDir) {
     } else if (diff == 3) {
         scriptPushSpot(TURN_LEFT, 90.0f);
     } else if (diff == 2) {
-        // 180° re-anchor: spot, then reverse until rear bumps the wall now
-        // behind. PH_REVERSE_TO_BACK measures front IR at activation time
-        // and computes its own (negative) tick target = frontMm + 1.5 cm.
+        // 180° front-bump re-anchor:
+        //   1. SPOT 180         — rotate to face what is now the front wall.
+        //   2. FWD_TO_BUMP      — slow forward until raw IR saturates.
+        //   3. FWD(-startOff)   — reverse exactly 45 mm so robot center
+        //                          coincides with cell-center.
+        //   4. DEADEND_RECAL    — re-zero gyro bias during the natural
+        //                          stillness window after the reverse settles.
+        //   5. FWD(cellTicks)   — proceed to next cell, no pending offset.
         scriptPushSpot(TURN_RIGHT, 180.0f);
-        scriptPushReverseToBack();
-        pendingOffsetTicks = T.startOffsetTicks;     // next fwd lands at next cell center
+        scriptPushFwdToBump();
+        scriptPushFwd(-T.startOffsetTicks);
+        scriptPushDeadendRecal();
+        pendingOffsetTicks = 0;                       // robot at cell-center already
     }
     long fwd = T.ticksPerCell + pendingOffsetTicks;
     pendingOffsetTicks = 0;
