@@ -353,7 +353,8 @@ enum TurnDir   { TURN_NONE, TURN_RIGHT, TURN_LEFT };
 //                         (frontMm + backupOffsetMm) so the rear bumps the
 //                         wall behind. Then PID handles it as a reverse
 //                         forward-phase (target is negative ticks).
-enum RunPhase  { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_FWD_TO_WALL, PH_REVERSE_TO_BACK };
+enum RunPhase  { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_FWD_TO_WALL, PH_REVERSE_TO_BACK,
+                 PH_FWD_TO_BUMP, PH_DEADEND_RECAL };
 
 struct PhaseStep {
     RunPhase phase;
