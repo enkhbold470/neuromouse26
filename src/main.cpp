@@ -370,7 +370,7 @@ static void onPhaseActivate() {
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
-enum State { IDLE, ENC_TEST, GYRO_CAL, EXPLORE_THINK, RUN, GOAL, CRASH };
+enum State { IDLE, ENC_TEST, IR_TEST, GYRO_CAL, EXPLORE_THINK, RUN, GOAL, CRASH };
 static State state = IDLE;
 
 // ── OLED screens ────────────────────────────────────────────────────────────
@@ -394,8 +394,7 @@ enum MenuItem {
     M_FAST,
     M_CAL_GYRO,
     M_ENC,
-    M_TURN_R,
-    M_TURN_L,
+    M_IR_TEST,
     M_NVS_CLR,
     M_COUNT
 };
@@ -404,13 +403,13 @@ static const char* MENU_LABELS[M_COUNT] = {
     "Fast Run",
     "Cal Gyro",
     "Encoder Test",
-    "Turn R 90",
-    "Turn L 90",
+    "IR Test",
     "Clear NVS"
 };
 static int  menuSel    = M_EXPLORE;
 static long menuEncRef = 0;
 constexpr long ENC_PER_STEP = 80;
+constexpr uint32_t COUNTDOWN_DELAY_MS = 500;
 
 void oledMenu() {
     const int VIS = 5;
@@ -505,6 +504,39 @@ void oledEncTest() {
     oled.sendBuffer();
 }
 
+void oledIrTest() {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "IR Test");
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_6x10_tf);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "LF %4d  RF %4d", irVal[0], irVal[3]);
+    oled.drawStr(0, 24, buf);
+    snprintf(buf, sizeof(buf), "L  %4d  R  %4d", irVal[1], irVal[2]);
+    oled.drawStr(0, 36, buf);
+    float frontMm = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+    snprintf(buf, sizeof(buf), "front %.0f mm", frontMm);
+    oled.drawStr(0, 48, buf);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 63, "btn=back");
+    oled.sendBuffer();
+}
+
+void oledCountdown(int n) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "STARTING");
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_logisoso42_tn);
+    char buf[4]; snprintf(buf, sizeof(buf), "%d", n);
+    int w = oled.getStrWidth(buf);
+    oled.drawStr((128 - w) / 2, 60, buf);
+    oled.sendBuffer();
+}
+
 void oledGyroCal(int irLF, int irRF, bool still, int holdMs, const char* msg) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
@@ -573,6 +605,38 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedHeading = bestDir;
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
+
+    // ── Fast-run straight-chain extension ────────────────────────────────────
+    // In FAST mode the maze is fully known and we want unbroken motion. After
+    // the normal single-cell FWD is queued, walk the path forward while the
+    // flood gradient keeps pointing in the same heading and there's no wall
+    // ahead. Each extra cell adds T.ticksPerCell to the last step's target so
+    // the robot covers the whole straight in one PID phase — no per-cell
+    // EXPLORE_THINK / scriptKick gap to coast through.
+    if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
+        int rr = plannedRow, cc = plannedCol;
+        AbsDir hh = (AbsDir)plannedHeading;
+        int extraCells = 0;
+        while (extraCells < (MAZE_ROWS * MAZE_COLS)) {
+            if (rr == GOAL_ROW && cc == GOAL_COL) break;
+            if (maze.hasWall(rr, cc, hh)) break;
+            int nr = rr + DIR_DR[hh];
+            int nc = cc + DIR_DC[hh];
+            if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
+            uint8_t d;
+            AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
+            if (d == FLOOD_INFINITY || next != hh) break;
+            rr = nr; cc = nc;
+            extraCells++;
+        }
+        if (extraCells > 0) {
+            script[scriptLen - 1].target += (long)extraCells * T.ticksPerCell;
+            plannedRow = rr;
+            plannedCol = cc;
+            Serial.printf("[FAST] chained +%d straight cells -> (%d,%d) target=%ld\n",
+                          extraCells, rr, cc, (long)script[scriptLen - 1].target);
+        }
+    }
 }
 
 static void scriptKick() {
@@ -651,6 +715,7 @@ void loop() {
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = true; fastRunMode = false;
+                for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- EXPLORE START ---");
                 state = EXPLORE_THINK;
                 break;
@@ -665,6 +730,7 @@ void loop() {
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = false; fastRunMode = true;
+                for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- FAST RUN START ---");
                 state = EXPLORE_THINK;
                 break;
@@ -677,18 +743,10 @@ void loop() {
                 state = ENC_TEST;
                 oledEncTest();
                 break;
-            case M_TURN_R:
-            case M_TURN_L:
-                scriptReset();
-                scriptPushSpot(menuSel == M_TURN_R ? TURN_RIGHT : TURN_LEFT, 90.0f);
-                plannedRow = robotRow; plannedCol = robotCol;
-                plannedHeading = (menuSel == M_TURN_R)
-                                 ? (AbsDir)((robotHeading + 1) % 4)
-                                 : (AbsDir)((robotHeading + 3) % 4);
-                exploreMode = false; fastRunMode = false;
-                Serial.printf("--- TURN %s ---\n", menuSel == M_TURN_R ? "R" : "L");
-                scriptKick();
-                state = RUN;
+            case M_IR_TEST:
+                sampleIR();
+                state = IR_TEST;
+                oledIrTest();
                 break;
             case M_NVS_CLR:
                 nvsClearWalls();
@@ -706,6 +764,24 @@ void loop() {
         if (millis() - last > 100) { oledEncTest(); last = millis(); }
         if (buttonEdge()) {
             leftEnc.reset(); rightEnc.reset();
+            menuEncRef = rightEnc.getTicks();
+            oledMenu();
+            state = IDLE;
+        }
+        break;
+    }
+
+    case IR_TEST: {
+        static uint32_t last = 0;
+        if (millis() - last > 100) {
+            sampleIR();
+            oledIrTest();
+            Serial.printf("[IR] LF=%d L=%d R=%d RF=%d frontMm=%.1f\n",
+                          irVal[0], irVal[1], irVal[2], irVal[3],
+                          IRCal::estimateFrontDistMM(irVal[0], irVal[3]));
+            last = millis();
+        }
+        if (buttonEdge()) {
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
@@ -913,8 +989,14 @@ void loop() {
             settleStart = 0; stallStart = 0;
         };
 
+        // Fast-run continuous-roll flag: while we're inside a FWD phase of a
+        // FAST RUN, skip stopMotors at SETTLED transitions so wheels don't
+        // brake on every cell boundary. Stall/timeout exits still stop.
+        bool fastFwdRoll = fastRunMode && runPhase == PH_FORWARD;
+
         auto endPhase = [&](const char* reason) {
-            stopMotors();
+            bool isSettle = (reason && reason[0] == 'S' && reason[1] == 'E');  // "SETTLED"
+            if (!(fastFwdRoll && isSettle)) stopMotors();
             const char* phN = (runPhase == PH_FORWARD) ? "FWD"
                             : (runPhase == PH_PIVOT)   ? "PIV" : "SPOT";
             Serial.printf("--- STEP END idx=%d/%d ph=%s reason=%s err=%+.2f tL=%ld tR=%ld yaw=%+.2f ---\n",
@@ -950,6 +1032,13 @@ void loop() {
         };
 
         if (fabsf(posErr) < effHb) {
+            if (fastFwdRoll) {
+                // Fast run: no brake, no settle dwell — end the phase
+                // immediately so the next cell's script kicks in without a
+                // visible pause at the cell boundary.
+                endPhase("SETTLED");
+                break;
+            }
             stopMotors();
             if (settleStart == 0) settleStart = millis();
             if (millis() - settleStart > effSettleMs) {

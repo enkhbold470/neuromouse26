@@ -82,7 +82,7 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **`TICKS_PER_CELL=350` is tape-validated**, not derived. Re-measure with a tape against an actual cell rather than recomputing from `MM_PER_TICK`.
 - **Right-encoder scaling:** `RIGHT_ENC_SCALE=1.0135f` (re-enabled 2026-05-17, value from on-device auto-cal). All distance reads must go through `rTicks()` wrapper.
 - **Turn convergence:** `doTurn()` reports `OK`/`FAIL` via Serial; main.cpp sets `crashFlag` on FAIL and refuses to issue further `driveChain()` until reset. Hold phase is the only place `TURN_MIN_HOLD_PWM=260` is applied — do not turn it into an always-on stiction floor (fights the ramp).
-- **IR side cone catches front wall at close range:** at `frontMM < 60 mm`, side sensors pick up the front wall via their 30° forward-bias cone. `driveChain()` filters these samples out of the look-ahead. Don't re-enable side-wall sensing at cell-center stop — the geometry guarantees wrong-cell reads.
+- **L/R perpendicular geometry (changed 2026-05-19):** L and R now aim ~90° sideways, not 30° forward-bias. Side reads no longer pick up the front wall at close range, so the old `driveChain()` "filter side samples when `frontMM < 60`" workaround is obsolete — side reads are valid all the way to cell-center stop. LF/RF still 30° forward-outward and remain the only front-detect path. Re-calibrate `IR_CAL_L` / `IR_CAL_R` against an adjacent side wall (not a dead-end front wall) since their geometry changed; `IR_CAL_LF` / `IR_CAL_RF` unchanged.
 
 ---
 
@@ -113,7 +113,7 @@ You are working on a **16×16 micromouse robot**. Assume this hardware unless to
 | **Motor Driver** | DRV8833 dual H-bridge — one driver per motor (IN1/IN2 per channel, PWM on both pins for speed + brake) |
 | **Motors** | N20 brushed DC gear motors — **1:30 gear ratio, 500 RPM @ 6V**, running on 2S LiPo (7.4V nominal) |
 | **Encoders** | Single-channel magnetic encoders on motor shaft (~14 PPR × 30 = ~420 raw ticks/output-rev). Rising-edge ISR samples pin-B level for direction. Effective `TICKS_PER_REV=205` at running speed (200µs noise filter halves count). Right encoder scaled by `RIGHT_ENC_SCALE=1.0135f` via `rTicks()` wrapper. |
-| **IR Sensors** | 4-sensor array: LF, L, R, RF (all ~30° forward-outward). Ambient-subtracted differential reads in `readIR()`. Side walls sensed by look-ahead during cell traversal, not at stop. |
+| **IR Sensors** | 4-sensor array: LF, L, R, RF. **LF/RF aim ~30° forward-outward (front-detect + look-ahead); L/R aim perpendicular (~90° sideways) for true side-wall reads — changed 2026-05-19 from prior 30° forward-bias.** Ambient-subtracted differential reads in `readIR()`. |
 | **Navigation** | 16×16 flood-fill BFS (`MicromouseMaze`); active maze region is 6×3 with goal `(5,2)`. NVS-persisted walls under namespace `mm26`, key `walls`. |
 | **LEDs** | WS2812B RGB on `WS2812_DATA=GPIO3` (unused by main firmware; test in `test/ws2812b.cpp`). |
 | **UI** | Single tactile button (`BUTTON_1=GPIO42`) + buzzer (`BUZZER_PIN=GPIO40`) + 128×64 SSD1306 OLED on I2C (`OLED_SDA=GPIO8`, `OLED_SCL=GPIO9`, addr `0x3C`). |
@@ -223,7 +223,7 @@ struct PID {
 
 ## IR Sensor Patterns
 
-`readIR(pair)` in `main.cpp` reads **ambient − lit** (note: emitter pulse pulls the photodiode lower; signed delta inverted), clamped to ≥ 0. Result: no-wall ≈ 0, wall present ≈ 1500–3500 raw counts at the current optics + 12-bit ADC range. The 4 sensors are LF, L, R, RF — all aimed ~30° forward-outward.
+`readIR(pair)` in `main.cpp` reads **ambient − lit** (note: emitter pulse pulls the photodiode lower; signed delta inverted), clamped to ≥ 0. Result: no-wall ≈ 0, wall present ≈ 1500–3500 raw counts at the current optics + 12-bit ADC range. The 4 sensors are LF, L, R, RF — **LF/RF aimed ~30° forward-outward, L/R aimed ~90° perpendicular (changed 2026-05-19).** Existing `IR_CAL_L` / `IR_CAL_R` values were captured under the old 30° geometry and need re-capture against a side wall.
 
 **Calibrated dead-end values (2026-05-17, all 4 walls present, 32-sample mean — `IR_CAL_*` in PinConfig.h):**
 

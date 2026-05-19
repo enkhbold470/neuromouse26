@@ -76,7 +76,7 @@ Forward velocity damping uses `(Δavg)/dt` LPF. IMU velocity damping uses `gzFil
 
 `pwmL = throttle − bias`, `pwmR = throttle + bias`, with `bias` = sum of:
 1. **IMU yaw hold** — `−T.yawHoldKp × yawDeg`. Primary heading reference. Yaw is reset to 0 at every phase boundary, so each leg has its own "straight ahead".
-2. **IR centering** — confidence-weighted `cR·(irR − calR) − cL·(irL − calL)`. The `conf` ramp 200…800 raw counts replaces threshold-based wall detection so there's no on/off snap when a wall fades in/out. Edge events (`dL/dR > ±300`) print one-shot `[EVENT] L wall opened` etc.
+2. **IR centering** — confidence-weighted `cR·(irR − calR) − cL·(irL − calL)`. The `conf` ramp 200…800 raw counts replaces threshold-based wall detection so there's no on/off snap when a wall fades in/out. Edge events (`dL/dR > ±300`) print one-shot `[EVENT] L wall opened` etc. **Sensor geometry (changed 2026-05-19):** L/R aim ~90° perpendicular (true side reads); LF/RF still ~30° forward-outward (front-detect only). `IR_CAL_L` / `IR_CAL_R` must be re-captured against an adjacent side wall — prior values were taken under the old 30° forward-bias geometry and are stale. The old "side cone catches front wall at `frontMm < 60`" caveat no longer applies.
 3. **Encoder balance** — `(tL − tR) × T.balanceKp`. Secondary symmetry trim.
 
 Pivot and spot phases skip IR and balance — they're rotational, no lateral position to correct.

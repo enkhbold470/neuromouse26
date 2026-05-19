@@ -159,8 +159,8 @@ constexpr float   TURN_CLEAR_FRAC  = 1.15f;
 // change, or surface-reflectivity change. Each value = differential
 // ambient-subtracted reading (no-wall ~0, wall present 1500–3500).
 constexpr int     IR_CAL_LF        = 3483;
-constexpr int     IR_CAL_L         = 1491;
-constexpr int     IR_CAL_R         = 1648;
+constexpr int     IR_CAL_L         = 1800;
+constexpr int     IR_CAL_R         = 2000;
 constexpr int     IR_CAL_RF        = 2702;
 
 // Wall-presence thresholds.
