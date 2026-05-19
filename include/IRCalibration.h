@@ -8,11 +8,14 @@
 // Robot placed nose-toward front wall in corridor (side walls also
 // present, hence non-zero L/R columns). 32-sample mean per cell.
 //
-// Use IR_DIST_FRONT_AVG[N-1] for "(LF+RF)/2 expected when front wall is
-// at N cm". Use IR_DIST_TABLE for per-sensor raw values.
+// LF (col 0) and RF (col 3) columns are monotonically decreasing in raw
+// count vs distance — usable for piecewise-linear interp. L (col 1) and
+// R (col 2) columns are NOT monotonic (sensor was at ~30° forward-bias
+// during capture and geometry changed 2026-05-19 to ~90° perpendicular;
+// columns are stale anyway).
 //
 // Front sensors saturate near 3900 at d<3cm — interpolation reliable
-// from ~3 cm out. Below 3 cm treat as "very close".
+// from ~3 cm out. Below 3 cm treat as "very close" (clamp 10mm).
 
 namespace IRCal {
 
@@ -33,30 +36,34 @@ constexpr int IR_DIST_TABLE[IR_DIST_ROWS][4] = {
     /* 9 cm */ { 1719, 1421, 1500, 1504 },
 };
 
-// Pre-averaged front pair (LF+RF)/2 per cm — what wallFront() effectively
-// integrates over its OR threshold.
-constexpr int IR_DIST_FRONT_AVG[IR_DIST_ROWS] = {
-    3914, 3854, 3670, 3138, 2552, 2193, 1939, 1751, 1612
-};
-
-// Convert measured (lf+rf)/2 -> distance in mm via piecewise-linear
-// interpolation on IR_DIST_FRONT_AVG. Monotonically decreasing table,
-// so reading above table[0] -> clamp 10mm, below table[last] -> clamp 90mm.
-// Returns mm, not cm, so caller can do arithmetic without rescale.
-inline float estimateFrontDistMM(int lf, int rf) {
-    float avg = 0.5f * (lf + rf);
-    if (avg >= IR_DIST_FRONT_AVG[0])                return 10.0f;
-    if (avg <= IR_DIST_FRONT_AVG[IR_DIST_ROWS - 1]) return 90.0f;
+// Interp a single front-sensor raw reading -> mm via piecewise-linear
+// lookup on its own column of IR_DIST_TABLE. sensorIdx MUST be 0 (LF)
+// or 3 (RF); L/R columns are non-monotonic and unsafe to interp.
+inline float interpFrontSensorMM(int raw, int sensorIdx) {
+    int top = IR_DIST_TABLE[0][sensorIdx];
+    int bot = IR_DIST_TABLE[IR_DIST_ROWS - 1][sensorIdx];
+    if (raw >= top) return 10.0f;
+    if (raw <= bot) return 90.0f;
     for (int i = 0; i < IR_DIST_ROWS - 1; i++) {
-        int hi = IR_DIST_FRONT_AVG[i];
-        int lo = IR_DIST_FRONT_AVG[i + 1];
-        if (avg <= hi && avg >= lo) {
-            float frac = (float)(hi - avg) / (float)(hi - lo);
+        int hi = IR_DIST_TABLE[i][sensorIdx];
+        int lo = IR_DIST_TABLE[i + 1][sensorIdx];
+        if (raw <= hi && raw >= lo) {
+            float frac = (float)(hi - raw) / (float)(hi - lo);
             float cm   = (IR_DIST_MIN_CM + i) + frac;
             return cm * 10.0f;
         }
     }
     return 90.0f;
+}
+
+// Per-sensor interp of LF and RF, fused as min — closer sensor wins.
+// Handles off-axis approach (one sensor saturated, other not) and skewed
+// front walls (returns nearest-corner mm, safer for crash brake than mean).
+// Returns mm so callers can do arithmetic without rescale.
+inline float estimateFrontDistMM(int lf, int rf) {
+    float lfMm = interpFrontSensorMM(lf, 0);
+    float rfMm = interpFrontSensorMM(rf, 3);
+    return (lfMm < rfMm) ? lfMm : rfMm;
 }
 
 } // namespace IRCal
