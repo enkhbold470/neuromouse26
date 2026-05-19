@@ -216,18 +216,6 @@ struct Tuning {
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
     long     fwdToWallMaxTicks     = 1600;
-    // PH_FWD_TO_BUMP — front-wall bump detection by raw IR (LF+RF)/2.
-    // 3500 ≈ ≤ 3 cm per IRCal::IR_DIST_FRONT_AVG. Tighten to ~3800 for ≤ 2 cm.
-    int      wallBumpRaw           = 3500;
-    long     fwdToBumpMaxTicks     = 1600;
-    // PH_DEADEND_RECAL — gyro bias re-cal during stillness window after the
-    // front-bump anchor lands the robot at cell-center.
-    uint32_t recalStillHoldMs      = 100;
-    long     recalStillTicks       = 1;
-    float    recalStillGz          = 1.0f;
-    int      recalSamples          = 300;
-    int      recalSampleDelayMs    = 2;
-    uint32_t recalTimeoutMs        = 500;
 
     bool     useImu          = true;
     float    pivot90Deg      = 90.0f;
@@ -353,8 +341,7 @@ enum TurnDir   { TURN_NONE, TURN_RIGHT, TURN_LEFT };
 //                         (frontMm + backupOffsetMm) so the rear bumps the
 //                         wall behind. Then PID handles it as a reverse
 //                         forward-phase (target is negative ticks).
-enum RunPhase  { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_FWD_TO_WALL, PH_REVERSE_TO_BACK,
-                 PH_FWD_TO_BUMP, PH_DEADEND_RECAL };
+enum RunPhase  { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_FWD_TO_WALL, PH_REVERSE_TO_BACK };
 
 struct PhaseStep {
     RunPhase phase;
@@ -386,19 +373,8 @@ static void scriptPushFwdToWall() {
     scriptPush(PH_FWD_TO_WALL, T.fwdToWallMaxTicks, TURN_NONE);
 }
 // Reverse-to-back-wall. Target is set at phase activation (front IR sample).
-// Legacy: no longer called by buildMoveScript. Kept compiled in case the
-// blind-reverse strategy is wanted later.
 static void scriptPushReverseToBack() {
     scriptPush(PH_REVERSE_TO_BACK, 0, TURN_NONE);
-}
-// Forward-to-front-wall via raw IR threshold. Used by the 180° anchor to
-// land the robot against a known geometric reference (front wall).
-static void scriptPushFwdToBump() {
-    scriptPush(PH_FWD_TO_BUMP, T.fwdToBumpMaxTicks, TURN_NONE);
-}
-// Dead-end gyro re-cal. No target — exits on stillness-held or timeout.
-static void scriptPushDeadendRecal() {
-    scriptPush(PH_DEADEND_RECAL, 0, TURN_NONE);
 }
 
 // Called when a new script step is activated (kick or advance). Computes
@@ -658,19 +634,12 @@ static void buildMoveScript(AbsDir bestDir) {
     } else if (diff == 3) {
         scriptPushSpot(TURN_LEFT, 90.0f);
     } else if (diff == 2) {
-        // 180° front-bump re-anchor:
-        //   1. SPOT 180         — rotate to face what is now the front wall.
-        //   2. FWD_TO_BUMP      — slow forward until raw IR saturates.
-        //   3. FWD(-startOff)   — reverse exactly 45 mm so robot center
-        //                          coincides with cell-center.
-        //   4. DEADEND_RECAL    — re-zero gyro bias during the natural
-        //                          stillness window after the reverse settles.
-        //   5. FWD(cellTicks)   — proceed to next cell, no pending offset.
+        // 180° re-anchor: spot, then reverse until rear bumps the wall now
+        // behind. PH_REVERSE_TO_BACK measures front IR at activation time
+        // and computes its own (negative) tick target = frontMm + 1.5 cm.
         scriptPushSpot(TURN_RIGHT, 180.0f);
-        scriptPushFwdToBump();
-        scriptPushFwd(-T.startOffsetTicks);
-        scriptPushDeadendRecal();
-        pendingOffsetTicks = 0;                       // robot at cell-center already
+        scriptPushReverseToBack();
+        pendingOffsetTicks = T.startOffsetTicks;     // next fwd lands at next cell center
     }
     long fwd = T.ticksPerCell + pendingOffsetTicks;
     pendingOffsetTicks = 0;
@@ -1022,136 +991,6 @@ void loop() {
                                   (unsigned long)millis(), avgTicks, frontMm, throttle, yawDeg, tL, tR);
                     lastTel = millis();
                 }
-            }
-            break;
-        }
-
-        // ── PH_FWD_TO_BUMP: slow forward, raw IR (LF+RF)/2 threshold stop. ──
-        // Used by the 180° anchor to land the robot against the (now) front
-        // wall. Uses raw IR instead of estimateFrontDistMM because the LUT
-        // clamps to 10 mm minimum; raw values keep rising past that point.
-        if (runPhase == PH_FWD_TO_BUMP) {
-            sampleIR();
-            int  lfRaw    = irVal[0];
-            int  rfRaw    = irVal[3];
-            int  frontAvg = (lfRaw + rfRaw) / 2;
-            long avgTicks = (tL + tR) / 2;
-
-            auto endNow = [&](const char* reason) {
-                stopMotors();
-                Serial.printf("--- STEP END idx=%d/%d ph=FWD_TO_BUMP reason=%s avg=%ld frontRaw=%d tL=%ld tR=%ld ---\n",
-                              scriptIdx + 1, scriptLen, reason, avgTicks, frontAvg, tL, tR);
-                if (scriptIdx + 1 >= scriptLen) {
-                    robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
-                    runTurnDir = TURN_NONE;
-                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
-                                  robotRow, robotCol, "NESW"[robotHeading]);
-                    if (exploreMode || fastRunMode) state = EXPLORE_THINK;
-                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
-                    return;
-                }
-                scriptIdx++;
-                PhaseStep& next = script[scriptIdx];
-                runPhase   = next.phase;
-                runTarget  = next.target;
-                runTurnDir = next.dir;
-                pid.reset();
-                phaseEnter();
-            };
-
-            if (frontAvg >= T.wallBumpRaw) { endNow("BUMP");        break; }
-            if (avgTicks >= runTarget)     { endNow("NO_BUMP_CAP"); break; }
-
-            int throttle = T.stictionPwm;
-            int yawBias  = (T.useImu && imuReady)
-                            ? (int)(-T.yawHoldKp * (yawDeg - yawTargetDeg)) : 0;
-            int pwmL = constrain(throttle - yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
-            int pwmR = constrain(throttle + yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
-            leftMotor.drive(pwmL);
-            rightMotor.drive(pwmR);
-
-            static uint32_t lastOled_b = 0;
-            if (millis() - lastOled_b > 150) {
-                oledRun(avgTicks, runTarget, tL, tR);
-                lastOled_b = millis();
-            }
-            if (T.telemetry) {
-                static uint32_t lastTel_b = 0;
-                if (millis() - lastTel_b > 80) {
-                    Serial.printf("t=%lu ph=FWD2BUMP avg=%ld frontRaw=%d thr=%d yaw=%+.2f tL=%ld tR=%ld\n",
-                                  (unsigned long)millis(), avgTicks, frontAvg, throttle, yawDeg, tL, tR);
-                    lastTel_b = millis();
-                }
-            }
-            break;
-        }
-
-        // ── PH_DEADEND_RECAL: motors coast, wait for stillness, re-zero
-        // gyro bias via calibrateGyroBias(). Falls through to next script
-        // step on success OR on timeout (yaw zeroed either way so the next
-        // PH_FORWARD has a fresh heading reference).
-        if (runPhase == PH_DEADEND_RECAL) {
-            static long     recal_prevTL      = 0;
-            static long     recal_prevTR      = 0;
-            static uint32_t recal_stillStart  = 0;
-            static uint32_t recal_phaseStart  = 0;
-            static bool     recal_firstEntry  = true;
-
-            if (recal_firstEntry) {
-                stopMotors();
-                recal_phaseStart = millis();
-                recal_prevTL     = leftEnc.getTicks();
-                recal_prevTR     = rTicks();
-                recal_stillStart = 0;
-                recal_firstEntry = false;
-            }
-
-            long tLnow = leftEnc.getTicks();
-            long tRnow = rTicks();
-            bool encStill = (labs(tLnow - recal_prevTL) <= T.recalStillTicks)
-                         && (labs(tRnow - recal_prevTR) <= T.recalStillTicks);
-            recal_prevTL = tLnow; recal_prevTR = tRnow;
-            bool gzStill = fabsf(gzFilt) < T.recalStillGz;
-            bool still   = encStill && gzStill && imuReady;
-
-            if (still) { if (recal_stillStart == 0) recal_stillStart = millis(); }
-            else       { recal_stillStart = 0; }
-
-            bool stillHeld = recal_stillStart
-                          && (millis() - recal_stillStart) >= T.recalStillHoldMs;
-            bool timedOut  = (millis() - recal_phaseStart) >= T.recalTimeoutMs;
-
-            if (stillHeld || timedOut) {
-                if (stillHeld) {
-                    calibrateGyroBias(T.recalSamples, T.recalSampleDelayMs);
-                    Serial.printf("[DEADEND] cal OK bias=%.4f deg/s (stillness held)\n",
-                                  gyroBiasZ);
-                } else {
-                    Serial.printf("[DEADEND] cal SKIP (timeout) — yaw zeroed anyway\n");
-                }
-                yawDeg       = 0.0f;
-                yawTargetDeg = 0.0f;
-                recal_firstEntry = true;
-
-                Serial.printf("--- STEP END idx=%d/%d ph=DEADEND_RECAL reason=%s ---\n",
-                              scriptIdx + 1, scriptLen, stillHeld ? "CAL_OK" : "TIMEOUT");
-
-                if (scriptIdx + 1 >= scriptLen) {
-                    robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
-                    runTurnDir = TURN_NONE;
-                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
-                                  robotRow, robotCol, "NESW"[robotHeading]);
-                    if (exploreMode || fastRunMode) state = EXPLORE_THINK;
-                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
-                    break;
-                }
-                scriptIdx++;
-                PhaseStep& next = script[scriptIdx];
-                runPhase   = next.phase;
-                runTarget  = next.target;
-                runTurnDir = next.dir;
-                pid.reset();
-                phaseEnter();
             }
             break;
         }
