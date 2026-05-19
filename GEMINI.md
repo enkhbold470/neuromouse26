@@ -60,7 +60,7 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - `WHEEL_TRACK_MM`: 74.0mm
 - PWM is 10-bit (0-1023). `MOTOR_PWM_MAX` = 1023, `MOTOR_PWM_FREQ_HZ` = 200.
 - `BAT_VDIV_MULT` = 3.751f (calibrated 2026-05-17; divider 39k / (39k+100k)).
-- IR cal defaults (PinConfig.h, dead-end 32-sample mean 2026-05-17): `IR_CAL_LF=3483`, `IR_CAL_L=1491`, `IR_CAL_R=1648`, `IR_CAL_RF=2702`.
+- IR cal defaults (PinConfig.h): `IR_CAL_LF=3483`, `IR_CAL_RF=2702` (dead-end 32-sample mean 2026-05-17); `IR_CAL_L=1800`, `IR_CAL_R=2000` (centered-in-cell, 4.5 cm to each side wall, 2026-05-19).
 - Wall thresholds: `WALL_SIDE_THRESH=900`, `WALL_FRONT_THRESH=1400`.
 
 ---
@@ -82,7 +82,7 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **`TICKS_PER_CELL=350` is tape-validated**, not derived. Re-measure with a tape against an actual cell rather than recomputing from `MM_PER_TICK`.
 - **Right-encoder scaling:** `RIGHT_ENC_SCALE=1.0135f` (re-enabled 2026-05-17, value from on-device auto-cal). All distance reads must go through `rTicks()` wrapper.
 - **Turn convergence:** `doTurn()` reports `OK`/`FAIL` via Serial; main.cpp sets `crashFlag` on FAIL and refuses to issue further `driveChain()` until reset. Hold phase is the only place `TURN_MIN_HOLD_PWM=260` is applied — do not turn it into an always-on stiction floor (fights the ramp).
-- **L/R perpendicular geometry (changed 2026-05-19):** L and R now aim ~90° sideways, not 30° forward-bias. Side reads no longer pick up the front wall at close range, so the old `driveChain()` "filter side samples when `frontMM < 60`" workaround is obsolete — side reads are valid all the way to cell-center stop. LF/RF still 30° forward-outward and remain the only front-detect path. Re-calibrate `IR_CAL_L` / `IR_CAL_R` against an adjacent side wall (not a dead-end front wall) since their geometry changed; `IR_CAL_LF` / `IR_CAL_RF` unchanged.
+- **L/R perpendicular geometry (changed 2026-05-19):** L and R now aim ~90° sideways, not 30° forward-bias. Side reads no longer pick up the front wall at close range, so the old `driveChain()` "filter side samples when `frontMM < 60`" workaround is obsolete — side reads are valid all the way to cell-center stop. LF/RF still 30° forward-outward and remain the only front-detect path. `IR_CAL_L=1800` / `IR_CAL_R=2000` re-captured 2026-05-19 against centered-in-cell pose; `IR_CAL_LF` / `IR_CAL_RF` unchanged.
 
 ---
 
@@ -223,16 +223,16 @@ struct PID {
 
 ## IR Sensor Patterns
 
-`readIR(pair)` in `main.cpp` reads **ambient − lit** (note: emitter pulse pulls the photodiode lower; signed delta inverted), clamped to ≥ 0. Result: no-wall ≈ 0, wall present ≈ 1500–3500 raw counts at the current optics + 12-bit ADC range. The 4 sensors are LF, L, R, RF — **LF/RF aimed ~30° forward-outward, L/R aimed ~90° perpendicular (changed 2026-05-19).** Existing `IR_CAL_L` / `IR_CAL_R` values were captured under the old 30° geometry and need re-capture against a side wall.
+`readIR(pair)` in `main.cpp` reads **ambient − lit** (note: emitter pulse pulls the photodiode lower; signed delta inverted), clamped to ≥ 0. Result: no-wall ≈ 0, wall present ≈ 1500–3500 raw counts at the current optics + 12-bit ADC range. The 4 sensors are LF, L, R, RF — **LF/RF aimed ~30° forward-outward, L/R aimed ~90° perpendicular (changed 2026-05-19).**
 
-**Calibrated dead-end values (2026-05-17, all 4 walls present, 32-sample mean — `IR_CAL_*` in PinConfig.h):**
+**Calibrated values (`IR_CAL_*` in PinConfig.h):**
 
-| Sensor | Cal value | Threshold use |
-|--------|-----------|---------------|
-| LF     | 3483      | front (`WALL_FRONT_THRESH=1400`) |
-| L      | 1491      | side (`WALL_SIDE_THRESH=900`) + centering center |
-| R      | 1648      | side (`WALL_SIDE_THRESH=900`) + centering center |
-| RF     | 2702      | front (`WALL_FRONT_THRESH=1400`) |
+| Sensor | Cal value | Capture pose                              | Threshold use |
+|--------|-----------|-------------------------------------------|---------------|
+| LF     | 3483      | dead-end front wall, 2026-05-17           | front (`WALL_FRONT_THRESH=1400`) |
+| L      | 1800      | centered in cell, 4.5 cm to L wall, 2026-05-19 | side (`WALL_SIDE_THRESH=900`) + centering center |
+| R      | 2000      | centered in cell, 4.5 cm to R wall, 2026-05-19 | side (`WALL_SIDE_THRESH=900`) + centering center |
+| RF     | 2702      | dead-end front wall, 2026-05-17           | front (`WALL_FRONT_THRESH=1400`) |
 
 ```cpp
 // irVal[] is filled by sampleIR() every control loop.
