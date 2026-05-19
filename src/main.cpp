@@ -25,6 +25,15 @@
 #include "MicromouseMaze.h"
 #include "IRCalibration.h"
 
+// ── Maze + robot state ──────────────────────────────────────────────────────
+constexpr uint8_t MAZE_ROWS = 6;
+constexpr uint8_t MAZE_COLS = 3;
+constexpr uint8_t START_ROW = 0;
+constexpr uint8_t START_COL = 0;
+constexpr uint8_t GOAL_ROW  = 0;
+constexpr uint8_t GOAL_COL  = 2;
+
+
 // ── MPU-6500 ─────────────────────────────────────────────────────────────────
 #define MPU_ADDR        0x68
 #define REG_WHO_AM_I    0x75
@@ -168,7 +177,7 @@ static int batPct() {
 
 // ── Live tuning ──────────────────────────────────────────────────────────────
 struct Tuning {
-    float    kp           = 0.20f;
+    float    kp           = 0.80f;
     float    kd           = 0.05f;
     int      maxPwm       = 200;
     int      stictionPwm  = 110;
@@ -211,7 +220,7 @@ struct Tuning {
     // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
     // back of the robot.  Net effect: robot's rear physically against the
     // wall, robot center at the same "-4.5 cm" reference as start.
-    float    backupOffsetMm        = 10.0f;
+    float    backupOffsetMm        = 7.0f;
     // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
@@ -268,13 +277,6 @@ bool buttonEdge() {
     return false;
 }
 
-// ── Maze + robot state ──────────────────────────────────────────────────────
-constexpr uint8_t MAZE_ROWS = 6;
-constexpr uint8_t MAZE_COLS = 3;
-constexpr uint8_t START_ROW = 0;
-constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 5;
-constexpr uint8_t GOAL_COL  = 2;
 
 static MicromouseMaze maze;
 static uint8_t robotRow    = START_ROW;
