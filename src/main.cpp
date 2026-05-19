@@ -25,6 +25,15 @@
 #include "MicromouseMaze.h"
 #include "IRCalibration.h"
 
+// ── Maze + robot state ──────────────────────────────────────────────────────
+constexpr uint8_t MAZE_ROWS = 6;
+constexpr uint8_t MAZE_COLS = 3;
+constexpr uint8_t START_ROW = 0;
+constexpr uint8_t START_COL = 0;
+constexpr uint8_t GOAL_ROW  = 0;
+constexpr uint8_t GOAL_COL  = 2;
+
+
 // ── MPU-6500 ─────────────────────────────────────────────────────────────────
 #define MPU_ADDR        0x68
 #define REG_WHO_AM_I    0x75
@@ -41,6 +50,25 @@ static float    yawDeg    = 0.0f;
 static float    gzFilt    = 0.0f;
 static uint32_t lastYawUs = 0;
 static bool     imuReady  = false;
+
+// Continuous-yaw bookkeeping. `yawDeg` is no longer reset at phase boundaries;
+// each turn phase advances `yawTargetDeg` by its signed degree target, and
+// each phase snapshots its starting yaw for progress calculation.
+static float    yawTargetDeg     = 0.0f;
+static float    phaseStartYawDeg = 0.0f;
+
+// Per-phase encoder offsets. Replace `leftEnc.reset()/rightEnc.reset()` between
+// phases so the PCNT hardware counter stays continuous and we just compute
+// (tL - phaseStartTL) inside the PID.
+static long     phaseStartTL = 0;
+static long     phaseStartTR = 0;
+
+// IR centering EMA state — pulled out of the loop's static-inside-block so
+// scriptKick() can flip `irFirstSample = true` and re-seed the EMA at the
+// start of every new script.
+static float    irLSm     = 0.0f, irRSm   = 0.0f;
+static float    irLPrev   = 0.0f, irRPrev = 0.0f;
+static bool     irFirstSample = true;
 
 static bool mpuWrite(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(MPU_ADDR);
@@ -149,7 +177,7 @@ static int batPct() {
 
 // ── Live tuning ──────────────────────────────────────────────────────────────
 struct Tuning {
-    float    kp           = 0.20f;
+    float    kp           = 0.80f;
     float    kd           = 0.05f;
     int      maxPwm       = 200;
     int      stictionPwm  = 110;
@@ -161,6 +189,13 @@ struct Tuning {
     float    stallVel     = 30.0f;
     uint32_t stallMs      = 200;
     int      stallErrMax  = 40;
+
+    // Soft stiction band: above |posErr| > frictionZone, the stiction floor
+    // ramps linearly 0 → stictionPwm over the next `stkSoftBand` ticks (or
+    // degrees for yaw). Replaces the prior bang-on floor that snapped a
+    // visible PWM step into the wheels.
+    int      stkSoftBand     = 30;
+    float    yawStkSoftBand  = 2.0f;
 
     float    balanceKp    = 0.03f;
     float    yawHoldKp    = 5.0f;
@@ -185,7 +220,7 @@ struct Tuning {
     // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
     // back of the robot.  Net effect: robot's rear physically against the
     // wall, robot center at the same "-4.5 cm" reference as start.
-    float    backupOffsetMm        = 15.0f;
+    float    backupOffsetMm        = 7.0f;
     // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
@@ -242,13 +277,6 @@ bool buttonEdge() {
     return false;
 }
 
-// ── Maze + robot state ──────────────────────────────────────────────────────
-constexpr uint8_t MAZE_ROWS = 6;
-constexpr uint8_t MAZE_COLS = 3;
-constexpr uint8_t START_ROW = 0;
-constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 5;
-constexpr uint8_t GOAL_COL  = 2;
 
 static MicromouseMaze maze;
 static uint8_t robotRow    = START_ROW;
@@ -369,8 +397,25 @@ static void onPhaseActivate() {
     }
 }
 
+// Phase-entry snapshot. Replaces the prior "reset encoders + reset yawDeg"
+// pattern. Encoders stay continuous and we just remember where the phase
+// started; turn phases advance the commanded heading `yawTargetDeg` by their
+// signed degree target so forward phases that follow can hold against the
+// new heading instead of against a freshly-zeroed yaw.
+static void phaseEnter() {
+    phaseStartTL     = leftEnc.getTicks();
+    phaseStartTR     = rTicks();
+    phaseStartYawDeg = yawDeg;
+    if (runPhase == PH_SPOT || runPhase == PH_PIVOT) {
+        float deg = (float)runTarget;             // turn phases store degrees in runTarget when useImu
+        float signedDeg = (runTurnDir == TURN_RIGHT) ? -deg : +deg;
+        yawTargetDeg += signedDeg;
+    }
+    onPhaseActivate();                            // handles PH_REVERSE_TO_BACK target computation
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
-enum State { IDLE, ENC_TEST, GYRO_CAL, EXPLORE_THINK, RUN, GOAL, CRASH };
+enum State { IDLE, ENC_TEST, IR_TEST, GYRO_CAL, EXPLORE_THINK, RUN, GOAL, CRASH };
 static State state = IDLE;
 
 // ── OLED screens ────────────────────────────────────────────────────────────
@@ -394,8 +439,7 @@ enum MenuItem {
     M_FAST,
     M_CAL_GYRO,
     M_ENC,
-    M_TURN_R,
-    M_TURN_L,
+    M_IR_TEST,
     M_NVS_CLR,
     M_COUNT
 };
@@ -404,13 +448,13 @@ static const char* MENU_LABELS[M_COUNT] = {
     "Fast Run",
     "Cal Gyro",
     "Encoder Test",
-    "Turn R 90",
-    "Turn L 90",
+    "IR Test",
     "Clear NVS"
 };
 static int  menuSel    = M_EXPLORE;
 static long menuEncRef = 0;
 constexpr long ENC_PER_STEP = 80;
+constexpr uint32_t COUNTDOWN_DELAY_MS = 500;
 
 void oledMenu() {
     const int VIS = 5;
@@ -505,6 +549,39 @@ void oledEncTest() {
     oled.sendBuffer();
 }
 
+void oledIrTest() {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "IR Test");
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_6x10_tf);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "LF %4d  RF %4d", irVal[0], irVal[3]);
+    oled.drawStr(0, 24, buf);
+    snprintf(buf, sizeof(buf), "L  %4d  R  %4d", irVal[1], irVal[2]);
+    oled.drawStr(0, 36, buf);
+    float frontMm = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+    snprintf(buf, sizeof(buf), "front %.0f mm", frontMm);
+    oled.drawStr(0, 48, buf);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 63, "btn=back");
+    oled.sendBuffer();
+}
+
+void oledCountdown(int n) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "STARTING");
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_logisoso42_tn);
+    char buf[4]; snprintf(buf, sizeof(buf), "%d", n);
+    int w = oled.getStrWidth(buf);
+    oled.drawStr((128 - w) / 2, 60, buf);
+    oled.sendBuffer();
+}
+
 void oledGyroCal(int irLF, int irRF, bool still, int holdMs, const char* msg) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
@@ -573,6 +650,38 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedHeading = bestDir;
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
+
+    // ── Fast-run straight-chain extension ────────────────────────────────────
+    // In FAST mode the maze is fully known and we want unbroken motion. After
+    // the normal single-cell FWD is queued, walk the path forward while the
+    // flood gradient keeps pointing in the same heading and there's no wall
+    // ahead. Each extra cell adds T.ticksPerCell to the last step's target so
+    // the robot covers the whole straight in one PID phase — no per-cell
+    // EXPLORE_THINK / scriptKick gap to coast through.
+    if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
+        int rr = plannedRow, cc = plannedCol;
+        AbsDir hh = (AbsDir)plannedHeading;
+        int extraCells = 0;
+        while (extraCells < (MAZE_ROWS * MAZE_COLS)) {
+            if (rr == GOAL_ROW && cc == GOAL_COL) break;
+            if (maze.hasWall(rr, cc, hh)) break;
+            int nr = rr + DIR_DR[hh];
+            int nc = cc + DIR_DC[hh];
+            if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
+            uint8_t d;
+            AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
+            if (d == FLOOD_INFINITY || next != hh) break;
+            rr = nr; cc = nc;
+            extraCells++;
+        }
+        if (extraCells > 0) {
+            script[scriptLen - 1].target += (long)extraCells * T.ticksPerCell;
+            plannedRow = rr;
+            plannedCol = cc;
+            Serial.printf("[FAST] chained +%d straight cells -> (%d,%d) target=%ld\n",
+                          extraCells, rr, cc, (long)script[scriptLen - 1].target);
+        }
+    }
 }
 
 static void scriptKick() {
@@ -581,12 +690,9 @@ static void scriptKick() {
     runPhase   = script[0].phase;
     runTarget  = script[0].target;
     runTurnDir = script[0].dir;
-    leftEnc.reset(); rightEnc.reset();
     pid.reset();
-    if (T.useImu && imuReady) {
-        yawDeg = 0.0f; gzFilt = 0.0f; lastYawUs = micros();
-    }
-    onPhaseActivate();
+    irFirstSample = true;       // re-seed IR centering EMA on each new script
+    phaseEnter();
 }
 
 // ── Setup ───────────────────────────────────────────────────────────────────
@@ -612,7 +718,8 @@ void setup() {
     if (imuReady) {
         Serial.println("[IMU] mpu6500 ok, calibrating bias... keep still");
         calibrateGyroBias(300, 2);
-        yawDeg = 0.0f;
+        yawDeg       = 0.0f;
+        yawTargetDeg = 0.0f;
         Serial.printf("[IMU] bias=%.4f deg/s\n", gyroBiasZ);
     } else {
         Serial.println("[IMU] mpu6500 NOT detected");
@@ -651,6 +758,7 @@ void loop() {
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = true; fastRunMode = false;
+                for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- EXPLORE START ---");
                 state = EXPLORE_THINK;
                 break;
@@ -665,6 +773,7 @@ void loop() {
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = false; fastRunMode = true;
+                for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- FAST RUN START ---");
                 state = EXPLORE_THINK;
                 break;
@@ -677,18 +786,10 @@ void loop() {
                 state = ENC_TEST;
                 oledEncTest();
                 break;
-            case M_TURN_R:
-            case M_TURN_L:
-                scriptReset();
-                scriptPushSpot(menuSel == M_TURN_R ? TURN_RIGHT : TURN_LEFT, 90.0f);
-                plannedRow = robotRow; plannedCol = robotCol;
-                plannedHeading = (menuSel == M_TURN_R)
-                                 ? (AbsDir)((robotHeading + 1) % 4)
-                                 : (AbsDir)((robotHeading + 3) % 4);
-                exploreMode = false; fastRunMode = false;
-                Serial.printf("--- TURN %s ---\n", menuSel == M_TURN_R ? "R" : "L");
-                scriptKick();
-                state = RUN;
+            case M_IR_TEST:
+                sampleIR();
+                state = IR_TEST;
+                oledIrTest();
                 break;
             case M_NVS_CLR:
                 nvsClearWalls();
@@ -706,6 +807,24 @@ void loop() {
         if (millis() - last > 100) { oledEncTest(); last = millis(); }
         if (buttonEdge()) {
             leftEnc.reset(); rightEnc.reset();
+            menuEncRef = rightEnc.getTicks();
+            oledMenu();
+            state = IDLE;
+        }
+        break;
+    }
+
+    case IR_TEST: {
+        static uint32_t last = 0;
+        if (millis() - last > 100) {
+            sampleIR();
+            oledIrTest();
+            Serial.printf("[IR] LF=%d L=%d R=%d RF=%d frontMm=%.1f\n",
+                          irVal[0], irVal[1], irVal[2], irVal[3],
+                          IRCal::estimateFrontDistMM(irVal[0], irVal[3]));
+            last = millis();
+        }
+        if (buttonEdge()) {
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
@@ -745,7 +864,8 @@ void loop() {
                 oledGyroCal(irLF, irRF, true, (int)held, "calibrating...");
                 delay(20);
                 calibrateGyroBias(300, 2);
-                yawDeg = 0.0f;
+                yawDeg       = 0.0f;
+                yawTargetDeg = 0.0f;
                 Serial.printf("[GCAL] bias=%.4f deg/s\n", gyroBiasZ);
                 oledGyroCal(irLF, irRF, true, (int)held, "DONE — btn=exit");
                 while (digitalRead(BUTTON_1) == LOW) { delay(5); }
@@ -807,8 +927,12 @@ void loop() {
             break;
         }
 
-        long tL = leftEnc.getTicks();
-        long tR = rTicks();
+        // Encoders run continuously; phaseEnter() captured the absolute count
+        // at activation, so the phase-local "tL/tR" is the delta against that.
+        long tLAbs = leftEnc.getTicks();
+        long tRAbs = rTicks();
+        long tL = tLAbs - phaseStartTL;
+        long tR = tRAbs - phaseStartTR;
 
         // ── PH_FWD_TO_WALL: open-loop slow forward, IR-stop. ─────────────
         // Used after 180° to re-anchor on the new front wall. Stops as soon
@@ -841,20 +965,17 @@ void loop() {
                 runPhase   = next.phase;
                 runTarget  = next.target;
                 runTurnDir = next.dir;
-                leftEnc.reset(); rightEnc.reset();
                 pid.reset();
-                if (T.useImu && imuReady) {
-                    yawDeg = 0.0f; gzFilt = 0.0f; lastYawUs = micros();
-                }
-                onPhaseActivate();
+                phaseEnter();
             };
 
             if (frontMm <= T.wallTouchDistMm) { endNow("WALL_TOUCH"); break; }
             if (avgTicks >= runTarget)        { endNow("NO_WALL_CAP"); break; }
 
-            // Drive forward gently with yaw hold.
+            // Drive forward gently with yaw hold against the commanded heading.
             int throttle = T.stictionPwm;
-            int yawBias  = (T.useImu && imuReady) ? (int)(-T.yawHoldKp * yawDeg) : 0;
+            int yawBias  = (T.useImu && imuReady)
+                            ? (int)(-T.yawHoldKp * (yawDeg - yawTargetDeg)) : 0;
             int pwmL = constrain(throttle - yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             int pwmR = constrain(throttle + yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             leftMotor.drive(pwmL);
@@ -882,7 +1003,10 @@ void loop() {
         if (runPhase == PH_FORWARD) {
             avg = (float)((tL + tR) / 2);
         } else if (imuMode) {
-            avg = (runTurnDir == TURN_RIGHT) ? -yawDeg : +yawDeg;
+            // Yaw is no longer reset between phases; measure progress against
+            // the snapshot taken at phaseEnter() instead of against absolute 0.
+            float dy = yawDeg - phaseStartYawDeg;
+            avg = (runTurnDir == TURN_RIGHT) ? -dy : +dy;
         } else if (runPhase == PH_PIVOT) {
             avg = (float)((runTurnDir == TURN_RIGHT) ? tL : tR);
         } else {
@@ -899,6 +1023,7 @@ void loop() {
         float    effStallVel  = imuMode ? T.yawStallVel     : T.stallVel;
         uint32_t effStallMs   = imuMode ? T.yawStallMs      : T.stallMs;
         float    effStallEmax = imuMode ? T.yawStallErrMax  : (float)T.stallErrMax;
+        float    effStkSoft   = imuMode ? T.yawStkSoftBand  : (float)T.stkSoftBand;
 
         static float    posAvgPrev = 0.0f;
         static uint32_t posPrevUs  = 0;
@@ -913,8 +1038,14 @@ void loop() {
             settleStart = 0; stallStart = 0;
         };
 
+        // Fast-run continuous-roll flag: while we're inside a FWD phase of a
+        // FAST RUN, skip stopMotors at SETTLED transitions so wheels don't
+        // brake on every cell boundary. Stall/timeout exits still stop.
+        bool fastFwdRoll = fastRunMode && runPhase == PH_FORWARD;
+
         auto endPhase = [&](const char* reason) {
-            stopMotors();
+            bool isSettle = (reason && reason[0] == 'S' && reason[1] == 'E');  // "SETTLED"
+            if (!(fastFwdRoll && isSettle)) stopMotors();
             const char* phN = (runPhase == PH_FORWARD) ? "FWD"
                             : (runPhase == PH_PIVOT)   ? "PIV" : "SPOT";
             Serial.printf("--- STEP END idx=%d/%d ph=%s reason=%s err=%+.2f tL=%ld tR=%ld yaw=%+.2f ---\n",
@@ -940,16 +1071,19 @@ void loop() {
             runPhase   = next.phase;
             runTarget  = next.target;
             runTurnDir = next.dir;
-            leftEnc.reset(); rightEnc.reset();
             resetPidState();
             pid.reset();
-            if (T.useImu && imuReady) {
-                yawDeg = 0.0f; gzFilt = 0.0f; lastYawUs = micros();
-            }
-            onPhaseActivate();
+            phaseEnter();
         };
 
         if (fabsf(posErr) < effHb) {
+            if (fastFwdRoll) {
+                // Fast run: no brake, no settle dwell — end the phase
+                // immediately so the next cell's script kicks in without a
+                // visible pause at the cell boundary.
+                endPhase("SETTLED");
+                break;
+            }
             stopMotors();
             if (settleStart == 0) settleStart = millis();
             if (millis() - settleStart > effSettleMs) {
@@ -960,17 +1094,24 @@ void loop() {
         settleStart = 0;
 
         uint32_t nowUs = micros();
-        float dt = (posPrevUs == 0) ? 0.005f
-                                    : constrain((nowUs - posPrevUs) / 1e6f, 1e-4f, 0.05f);
-        posPrevUs = nowUs;
-
-        if (imuMode) {
-            velFilt = (runTurnDir == TURN_RIGHT) ? -gzFilt : +gzFilt;
+        if (posPrevUs == 0) {
+            // First iteration after a phase reset: seed posAvgPrev with the
+            // current avg so the first computed velocity is 0 instead of a
+            // huge spike scaled by an arbitrary default dt.
             posAvgPrev = avg;
+            posPrevUs  = nowUs;
+            // velFilt keeps its prior filtered value (resetPidState set it to 0).
         } else {
-            float velRaw = (avg - posAvgPrev) / dt;
-            posAvgPrev   = avg;
-            velFilt      = 0.7f * velFilt + 0.3f * velRaw;
+            float dt = constrain((nowUs - posPrevUs) / 1e6f, 1e-4f, 0.05f);
+            posPrevUs = nowUs;
+            if (imuMode) {
+                velFilt = (runTurnDir == TURN_RIGHT) ? -gzFilt : +gzFilt;
+                posAvgPrev = avg;
+            } else {
+                float velRaw = (avg - posAvgPrev) / dt;
+                posAvgPrev   = avg;
+                velFilt      = 0.7f * velFilt + 0.3f * velRaw;
+            }
         }
 
         if (fabsf(velFilt) < effStallVel && fabsf(posErr) < effStallEmax) {
@@ -986,7 +1127,16 @@ void loop() {
         float u   = effKp * posErr - effKd * velFilt;
         int   mag = (int)fabsf(u);
         if (mag > effMaxPwm) mag = effMaxPwm;
-        if (fabsf(posErr) > effFz && mag < effStkPwm) mag = effStkPwm;
+        // Soft stiction floor: linear ramp 0 → effStkPwm over (effFz, effFz+effStkSoft].
+        // Replaces the prior bang-on floor that snapped a visible PWM step
+        // into the wheels whenever the natural PID output dropped below the
+        // floor. Floor still kicks at the same |err| threshold but blends in.
+        float errAbs = fabsf(posErr);
+        if (errAbs > effFz) {
+            float tBlend = constrain((errAbs - effFz) / effStkSoft, 0.0f, 1.0f);
+            int softFloor = (int)(tBlend * (float)effStkPwm);
+            if (mag < softFloor) mag = softFloor;
+        }
         int throttle = (u >= 0) ? mag : -mag;
 
         // IR centering (forward phase only).
@@ -997,13 +1147,13 @@ void loop() {
             constexpr float IR_CONF_HI    = 800.0f;
             constexpr float IR_EDGE_DELTA = 300.0f;
 
-            static float irLSm = 0.0f, irRSm = 0.0f;
-            static float irLPrev = 0.0f, irRPrev = 0.0f;
-            static bool  firstSample = true;
-            if (firstSample) {
+            // EMA + edge state are file-scope globals so scriptKick() can
+            // re-seed `irFirstSample = true` and re-prime the filter at the
+            // start of every script.
+            if (irFirstSample) {
                 irLSm = irVal[1]; irRSm = irVal[2];
                 irLPrev = irLSm;  irRPrev = irRSm;
-                firstSample = false;
+                irFirstSample = false;
             }
             irLSm = 0.7f * irLSm + 0.3f * irVal[1];
             irRSm = 0.7f * irRSm + 0.3f * irVal[2];
@@ -1029,7 +1179,10 @@ void loop() {
 
         int pwmL, pwmR;
         if (runPhase == PH_FORWARD) {
-            int yawBias    = (T.useImu && imuReady) ? (int)(-T.yawHoldKp * yawDeg) : 0;
+            // Hold against the commanded heading, not against an absolute 0
+            // that no longer means "straight ahead" after the first turn.
+            int yawBias    = (T.useImu && imuReady)
+                              ? (int)(-T.yawHoldKp * (yawDeg - yawTargetDeg)) : 0;
             int encBalance = (int)((tL - tR) * T.balanceKp);
             int bias = (int)corr + encBalance + yawBias;
             pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
