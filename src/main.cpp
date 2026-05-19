@@ -24,6 +24,7 @@
 #include "MicromouseEncoderPCNT.h"
 #include "MicromouseMaze.h"
 #include "IRCalibration.h"
+#include "Mm26WifiLive.h"
 
 // ── Maze + robot state ──────────────────────────────────────────────────────
 constexpr uint8_t MAZE_ROWS = 6;
@@ -215,12 +216,13 @@ struct Tuning {
     // re-established after every 180° wall-bump re-anchor.
     //   4.5 cm × ~78.06 ticks/cm  ≈ 351 ticks.
     long     startOffsetTicks      = 351;
-    // After a 180° spot turn, robot reverses until its back bumps the wall
-    // behind. Distance to reverse = (front IR estimated distance) + this
-    // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
-    // back of the robot.  Net effect: robot's rear physically against the
-    // wall, robot center at the same "-4.5 cm" reference as start.
-    float    backupOffsetMm        = 0;
+    // After a 180° spot turn, robot reverses a fixed distance =
+    // startOffsetTicks + (backupOffsetMm × ticksPerMm) ticks.  Fixed because
+    // front IR points at the FAR wall post-180° and saturates near 120 mm
+    // (LUT cap) — the prior `frontMm + offset` formula reversed ~11 cm off a
+    // saturated read. backupOffsetMm is an additive trim in mm; negative
+    // values stop short of the back wall (prevents wheel slip after touch).
+    float    backupOffsetMm        = -12.0f;
     // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
@@ -389,13 +391,18 @@ static void scriptPushReverseToBack() {
 // path takes over from the very next loop iteration.
 static void onPhaseActivate() {
     if (runPhase == PH_REVERSE_TO_BACK) {
-        sampleIR();
-        float frontMm   = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
-        float distMm    = frontMm + T.backupOffsetMm;
+        // After 180° at dead-end the robot sits at cell center; rear edge is
+        // ~45 mm (= startOffsetTicks) from the (now) back wall. Reverse a
+        // fixed distance — front IR can't be used here because it points at
+        // the FAR wall after the 180° and saturates near 120 mm. The old
+        // `frontMm + offset` formula reversed ~11 cm from a saturated read.
+        // backupOffsetMm is an additive fudge in mm (negative = back less).
         float ticksPerMm = (float)T.ticksPerCell / 180.0f;
-        long  ticks      = -(long)(distMm * ticksPerMm + 0.5f);
-        Serial.printf("[BACKUP] frontMm=%.1f offsetMm=%.1f → target=%ld ticks (reverse)\n",
-                      frontMm, T.backupOffsetMm, ticks);
+        long  baseTicks  = T.startOffsetTicks;
+        long  fudge      = (long)(T.backupOffsetMm * ticksPerMm + 0.5f);
+        long  ticks      = -(baseTicks + fudge);
+        Serial.printf("[BACKUP] base=%ld ticks fudge=%ld ticks → target=%ld ticks (reverse)\n",
+                      baseTicks, fudge, ticks);
         runTarget = ticks;
         runPhase  = PH_FORWARD;    // hand off to standard PID (handles negative target)
     }
@@ -421,6 +428,82 @@ static void phaseEnter() {
 // ── State ───────────────────────────────────────────────────────────────────
 enum State { IDLE, ENC_TEST, IR_TEST, GYRO_CAL, EXPLORE_THINK, RUN, GOAL, CRASH };
 static State state = IDLE;
+
+static float wifiPhaseProg = 0.0f;
+static Mm26WifiDebug gWifiDbg = {};
+static uint8_t       wifiBestDist = 255;
+static char          wifiBestDir  = '?';
+
+static void wifiPushCfg() {
+    Mm26WifiCfg c = {};
+    c.ticksPerCell       = T.ticksPerCell;
+    c.startOffsetTicks   = T.startOffsetTicks;
+    c.approachCm         = 14.0f;
+    c.postPivotCm        = 11.0f;
+    c.pivotTrimCm        = 4.0f;
+    c.cellCm             = CELL_MM / 10.0f;
+    c.backupOffsetMm     = T.backupOffsetMm;
+    c.yawKp              = T.yawKp;
+    c.fwdKp              = T.kp;
+    c.useImu             = T.useImu;
+    mm26WifiSetCfg(c);
+}
+
+static void wifiExportScript() {
+    uint8_t ph[MAX_SCRIPT], dr[MAX_SCRIPT];
+    for (int i = 0; i < scriptLen; i++) {
+        RunPhase p = script[i].phase;
+        ph[i] = (p == PH_FORWARD || p == PH_FWD_TO_WALL || p == PH_REVERSE_TO_BACK) ? 0
+              : (p == PH_PIVOT) ? 1 : 2;
+        dr[i] = (script[i].dir == TURN_RIGHT) ? 1
+              : (script[i].dir == TURN_LEFT)  ? 2 : 0;
+    }
+    long tg[MAX_SCRIPT];
+    for (int i = 0; i < scriptLen; i++) tg[i] = script[i].target;
+    mm26WifiExportScript(ph, dr, tg, scriptLen);
+}
+
+static void wifiPollMain() {
+    Mm26WifiLiveIn wi = {};
+    wi.maze          = &maze;
+    wi.mazeRows      = MAZE_ROWS;
+    wi.mazeCols      = MAZE_COLS;
+    wi.goalRow       = GOAL_ROW;
+    wi.goalCol       = GOAL_COL;
+    wi.robotRow      = robotRow;
+    wi.robotCol      = robotCol;
+    wi.robotHeading  = robotHeading;
+    wi.state         = (int)state;
+    wi.explore       = exploreMode;
+    wi.fast          = fastRunMode;
+    if (state == RUN) {
+        wi.inRun          = true;
+        wi.runPhase       = (runPhase == PH_FORWARD) ? 0
+                          : (runPhase == PH_PIVOT)   ? 1 : 2;
+        wi.turnDir        = (runTurnDir == TURN_RIGHT) ? 1
+                          : (runTurnDir == TURN_LEFT)  ? 2 : 0;
+        wi.runTargetTicks = runTarget;
+        wi.phaseProgress  = wifiPhaseProg;
+        wi.scriptIdx      = scriptIdx;
+        wi.scriptLen      = scriptLen;
+        wi.dbg            = gWifiDbg;
+    } else if (state == EXPLORE_THINK || state == GOAL) {
+        wi.dbg.valid    = true;
+        wi.dbg.bestDist = wifiBestDist;
+        wi.dbg.bestDir  = wifiBestDir;
+        wi.dbg.planRow  = plannedRow;
+        wi.dbg.planCol  = plannedCol;
+        wi.dbg.planHd   = plannedHeading;
+        snprintf(wi.dbg.phase, sizeof(wi.dbg.phase), "THINK");
+        wi.dbg.wallF = maze.hasWall(robotRow, robotCol, (AbsDir)robotHeading);
+        wi.dbg.wallL = maze.hasWall(robotRow, robotCol, (AbsDir)((robotHeading + 3) % 4));
+        wi.dbg.wallR = maze.hasWall(robotRow, robotCol, (AbsDir)((robotHeading + 1) % 4));
+        wi.dbg.vbat  = readVbat();
+        wi.dbg.batPct = batPct();
+    }
+    mm26WifiPoll(wi);
+    mm26WifiHandle();
+}
 
 // ── OLED screens ────────────────────────────────────────────────────────────
 static void drawBatteryTopRight() {
@@ -635,23 +718,36 @@ static void senseAndStoreWalls() {
 static void buildMoveScript(AbsDir bestDir) {
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
+    // In Fast Run, replace start-of-move SPOT with single-wheel PIVOT: pivot
+    // from rest translates the robot ~3.7 cm in the new heading (and ~3.7 cm
+    // laterally — IR centering recovers). FWD length is shortened by the
+    // ~3.7 cm pivot advance so the leg still lands at next-cell center.
+    // In Explore, keep SPOT (no IR map yet to trust lateral recovery).
+    // 180° in Fast Run drops the back-wall re-anchor — walls are known, no
+    // need to bump the rear wall, and a 180° in a known maze is suspect
+    // anyway (flood-fill should rarely suggest U-turns).
+    bool startPivot = false;
     if (diff == 1) {
-        // Spot at current cell center. Pivot would translate the robot
-        // diagonally — wrong target for a single-cell turn. Pivot is used
-        // only mid-chain (see chain-extension below) where a pre-FWD
-        // positions the pivot point 4 cm before the turn-cell center.
-        scriptPushSpot(TURN_RIGHT, 90.0f);
+        if (fastRunMode) { scriptPushPivot(TURN_RIGHT, 90.0f); startPivot = true; }
+        else               scriptPushSpot (TURN_RIGHT, 90.0f);
     } else if (diff == 3) {
-        scriptPushSpot(TURN_LEFT, 90.0f);
+        if (fastRunMode) { scriptPushPivot(TURN_LEFT,  90.0f); startPivot = true; }
+        else               scriptPushSpot (TURN_LEFT,  90.0f);
     } else if (diff == 2) {
-        // 180° re-anchor: spot, then reverse until rear bumps the wall now
-        // behind. PH_REVERSE_TO_BACK measures front IR at activation time
-        // and computes its own (negative) tick target = frontMm + 1.5 cm.
         scriptPushSpot(TURN_RIGHT, 180.0f);
-        scriptPushReverseToBack();
-        pendingOffsetTicks = T.startOffsetTicks;     // next fwd lands at next cell center
+        if (!fastRunMode) {
+            scriptPushReverseToBack();
+            pendingOffsetTicks = T.startOffsetTicks;     // next fwd lands at next cell center
+        }
     }
     long fwd = T.ticksPerCell + pendingOffsetTicks;
+    if (startPivot) {
+        // Pivot-from-rest: first FWD after pivot is always 11 cm to next-cell
+        // center (postPivotToCenter). pendingOffset added separately.
+        float ticksPerMm = (float)T.ticksPerCell / 180.0f;
+        long  postPivotToCenter = (long)(110.0f * ticksPerMm + 0.5f);
+        fwd = postPivotToCenter + pendingOffsetTicks;
+    }
     pendingOffsetTicks = 0;
     scriptPushFwd(fwd);
 
@@ -673,10 +769,59 @@ static void buildMoveScript(AbsDir bestDir) {
     if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
-        long pivotFwdOffset = (long)((WHEEL_TRACK_MM * 0.5f)
-                                     * ((float)T.ticksPerCell / 180.0f) + 0.5f);
-        long postPivotShort = T.ticksPerCell - pivotFwdOffset;
+        // Fast-run geometry (user-validated):
+        //   • prev cell center → pivot point          = 14 cm  (singleApproach)
+        //   • post-pivot → next cell center           = 11 cm  (postPivotToCenter)
+        //   • post-pivot → next pivot point (chained) = 11 + 14 = 25 cm
+        // Never use 7 cm legs (old bug: trimmed 4 cm off an 11 cm segment).
+        float ticksPerMm        = (float)T.ticksPerCell / 180.0f;
+        long  singleApproach    = (long)(140.0f * ticksPerMm + 0.5f);     // 14 cm
+        long  postPivotToCenter = (long)(110.0f * ticksPerMm + 0.5f);     // 11 cm
+        long  pivotFwdOffset    = T.ticksPerCell - singleApproach;        //  4 cm
+        long  trimTol           = (long)(15.0f * ticksPerMm + 0.5f);      // ~1.5 cm
         int extraCells = 0, pivots = 0;
+
+        // Pre-check: pivot AT the planned cell itself (not planned+1).
+        // The chain loop below only looks one cell beyond planned, so a turn
+        // at planned cell would otherwise force a full stop + spot at next
+        // EXPLORE_THINK pass. Detect it here: if bestDir at planned ≠
+        // plannedHeading and a 90° pivot fits, trim the just-pushed FWD by
+        // 4 cm (so it lands at pivot point 4 cm before planned center),
+        // push pivot + post-pivot FWD, then enter the chain loop from the
+        // diagonal cell. Subsequent chain iters will treat their pivots as
+        // "chained" (pivots > 0 → 11 cm approach).
+        if (rr != GOAL_ROW || cc != GOAL_COL) {
+            uint8_t dPlanned;
+            AbsDir nextAtPlanned = maze.bestDirectionBiased(rr, cc, hh, dPlanned);
+            int planTurnDiff = ((int)nextAtPlanned - (int)hh + 4) % 4;
+            bool pivotAtPlanned = (planTurnDiff == 1 || planTurnDiff == 3)
+                               && dPlanned != FLOOD_INFINITY
+                               && !maze.hasWall(rr, cc, nextAtPlanned)
+                               && scriptLen + 2 <= MAX_SCRIPT;
+            if (pivotAtPlanned) {
+                int diagR = rr + DIR_DR[nextAtPlanned];
+                int diagC = cc + DIR_DC[nextAtPlanned];
+                bool diagOk = (diagR >= 0 && diagR < MAZE_ROWS
+                            && diagC >= 0 && diagC < MAZE_COLS);
+                if (diagOk) {
+                    // Last FWD: if already the 11 cm post-pivot leg, keep 11 cm
+                    // (do not trim 4 cm → 7 cm). Longer legs trim to pivot point.
+                    long& lastFwd = script[scriptLen - 1].target;
+                    if (lastFwd <= postPivotToCenter + trimTol)
+                        lastFwd = postPivotToCenter;
+                    else
+                        lastFwd -= pivotFwdOffset;
+                    TurnDir td = (planTurnDiff == 1) ? TURN_RIGHT : TURN_LEFT;
+                    scriptPushPivot(td, 90.0f);
+                    scriptPushFwd(postPivotToCenter);
+                    hh = nextAtPlanned;
+                    rr = diagR;
+                    cc = diagC;
+                    pivots = 1;
+                }
+            }
+        }
+
         int safetyCap = MAZE_ROWS * MAZE_COLS;
         while (safetyCap-- > 0) {
             if (rr == GOAL_ROW && cc == GOAL_COL) break;
@@ -705,14 +850,18 @@ static void buildMoveScript(AbsDir bestDir) {
             if (diagR < 0 || diagR >= MAZE_ROWS || diagC < 0 || diagC >= MAZE_COLS) break;
             if (maze.hasWall(nr, nc, next)) break;
 
-            // Approach: extend last FWD by 14 cm so pivot point is 4 cm
-            // before (nr,nc) center.
-            script[scriptLen - 1].target += postPivotShort;
+            // Approach: extend prev FWD by 14 cm so the pivot point lands 4 cm
+            // before (nr,nc) center. Works for both first-chain pivot (prev
+            // FWD lands at planned cell center) and chained pivots (prev FWD
+            // is post-pivot FWD = 11 cm to diag center; +14 cm gets to next
+            // pivot pt). Total post-pivot → next pivot pt = 11 + 14 = 25 cm.
+            script[scriptLen - 1].target += singleApproach;
             TurnDir td = (turnDiff == 1) ? TURN_RIGHT : TURN_LEFT;
             scriptPushPivot(td, 90.0f);
-            // Post-pivot FWD: covers (nr,nc) center → (diagR,diagC) center,
-            // less the ~4 cm the pivot already advanced in the new heading.
-            scriptPushFwd(postPivotShort);
+            // Post-pivot FWD lands at (diagR,diagC) center (11 cm from
+            // post-pivot position). Next iter extends this if another turn
+            // or a straight follows.
+            scriptPushFwd(postPivotToCenter);
 
             hh = next;
             rr = diagR;
@@ -777,6 +926,9 @@ void setup() {
     menuEncRef = rightEnc.getTicks();
     oledMenu();
 
+    wifiPushCfg();
+    mm26WifiBegin();
+
     Serial.println();
     Serial.println("mm26 flood ready");
 }
@@ -805,6 +957,7 @@ void loop() {
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = true; fastRunMode = false;
+                mm26WifiOnRunStart();
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- EXPLORE START ---");
                 state = EXPLORE_THINK;
@@ -820,6 +973,7 @@ void loop() {
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = T.startOffsetTicks;
                 exploreMode = false; fastRunMode = true;
+                mm26WifiOnRunStart();
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- FAST RUN START ---");
                 state = EXPLORE_THINK;
@@ -955,9 +1109,12 @@ void loop() {
             state = CRASH;
             break;
         }
+        wifiBestDist = bestDist;
+        wifiBestDir  = "NESW"[bestDir];
         Serial.printf("[PLAN] (%d,%d,%c) dist=%d → %c\n",
                       robotRow, robotCol, "NESW"[robotHeading], bestDist, "NESW"[bestDir]);
         buildMoveScript(bestDir);
+        wifiExportScript();
         scriptKick();
         state = RUN;
         break;
@@ -1001,6 +1158,7 @@ void loop() {
                 if (scriptIdx + 1 >= scriptLen) {
                     robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
                     runTurnDir = TURN_NONE;
+                    mm26WifiOnMoveDone();
                     Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
                                   robotRow, robotCol, "NESW"[robotHeading]);
                     if (exploreMode || fastRunMode) state = EXPLORE_THINK;
@@ -1102,6 +1260,7 @@ void loop() {
                 robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
                 resetPidState();
                 runTurnDir = TURN_NONE;
+                mm26WifiOnMoveDone();
                 Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
                               robotRow, robotCol, "NESW"[robotHeading]);
                 if (exploreMode || fastRunMode) {
@@ -1122,6 +1281,16 @@ void loop() {
             pid.reset();
             phaseEnter();
         };
+
+        if (runTarget != 0) {
+            if (runPhase == PH_FORWARD)
+                wifiPhaseProg = constrain(fabsf((float)((tL + tR) / 2))
+                                          / fabsf((float)runTarget), 0.0f, 1.0f);
+            else
+                wifiPhaseProg = constrain(fabsf(avg) / fabsf((float)runTarget), 0.0f, 1.0f);
+        } else {
+            wifiPhaseProg = 0.0f;
+        }
 
         if (fabsf(posErr) < effHb) {
             if (fastFwdRoll) {
@@ -1266,6 +1435,36 @@ void loop() {
                 lastTel = millis();
             }
         }
+
+        gWifiDbg.valid    = true;
+        gWifiDbg.encL     = tL;
+        gWifiDbg.encR     = tR;
+        gWifiDbg.tgtTicks = runTarget;
+        gWifiDbg.avgTicks = avg;
+        gWifiDbg.posErr   = posErr;
+        gWifiDbg.prog     = wifiPhaseProg;
+        gWifiDbg.yaw      = yawDeg;
+        gWifiDbg.yawTgt   = yawTargetDeg;
+        gWifiDbg.gz       = gzFilt;
+        gWifiDbg.irLF     = irVal[0];
+        gWifiDbg.irL      = irVal[1];
+        gWifiDbg.irR      = irVal[2];
+        gWifiDbg.irRF     = irVal[3];
+        gWifiDbg.vbat     = readVbat();
+        gWifiDbg.batPct   = batPct();
+        gWifiDbg.pwmL     = pwmL;
+        gWifiDbg.pwmR     = pwmR;
+        gWifiDbg.planRow  = plannedRow;
+        gWifiDbg.planCol  = plannedCol;
+        gWifiDbg.planHd   = plannedHeading;
+        gWifiDbg.bestDist = wifiBestDist;
+        gWifiDbg.bestDir  = wifiBestDir;
+        gWifiDbg.wallF    = maze.hasWall(robotRow, robotCol, (AbsDir)robotHeading);
+        gWifiDbg.wallL    = maze.hasWall(robotRow, robotCol, (AbsDir)((robotHeading + 3) % 4));
+        gWifiDbg.wallR    = maze.hasWall(robotRow, robotCol, (AbsDir)((robotHeading + 1) % 4));
+        snprintf(gWifiDbg.phase, sizeof(gWifiDbg.phase), "%s%s",
+                 (runPhase == PH_FORWARD) ? "FWD" : (runPhase == PH_PIVOT) ? "PIV" : "SPOT",
+                 imuMode ? "/IMU" : "");
         break;
     }
 
@@ -1281,4 +1480,6 @@ void loop() {
     }
 
     }
+
+    wifiPollMain();
 }
