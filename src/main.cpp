@@ -178,7 +178,7 @@ static int batPct() {
 // ── Live tuning ──────────────────────────────────────────────────────────────
 struct Tuning {
     float    kp           = 0.80f;
-    float    kd           = 0.05f;
+    float    kd           = 0.10f;
     int      maxPwm       = 200;
     int      stictionPwm  = 110;
     int      frictionZone = 10;
@@ -220,7 +220,7 @@ struct Tuning {
     // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
     // back of the robot.  Net effect: robot's rear physically against the
     // wall, robot center at the same "-4.5 cm" reference as start.
-    float    backupOffsetMm        = 7.0f;
+    float    backupOffsetMm        = 0;
     // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
@@ -370,6 +370,10 @@ static void scriptPushFwd(long ticks) {
 static void scriptPushSpot(TurnDir d, float deg) {
     long target = T.useImu ? (long)(deg + 0.5f) : T.spot180Ticks;
     scriptPush(PH_SPOT, target, d);
+}
+static void scriptPushPivot(TurnDir d, float deg) {
+    long target = T.useImu ? (long)(deg + 0.5f) : T.turnPivotTicks;
+    scriptPush(PH_PIVOT, target, d);
 }
 static void scriptPushFwdToWall() {
     scriptPush(PH_FWD_TO_WALL, T.fwdToWallMaxTicks, TURN_NONE);
@@ -632,6 +636,10 @@ static void buildMoveScript(AbsDir bestDir) {
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
     if (diff == 1) {
+        // Spot at current cell center. Pivot would translate the robot
+        // diagonally — wrong target for a single-cell turn. Pivot is used
+        // only mid-chain (see chain-extension below) where a pre-FWD
+        // positions the pivot point 4 cm before the turn-cell center.
         scriptPushSpot(TURN_RIGHT, 90.0f);
     } else if (diff == 3) {
         scriptPushSpot(TURN_LEFT, 90.0f);
@@ -651,18 +659,26 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
 
-    // ── Fast-run straight-chain extension ────────────────────────────────────
-    // In FAST mode the maze is fully known and we want unbroken motion. After
-    // the normal single-cell FWD is queued, walk the path forward while the
-    // flood gradient keeps pointing in the same heading and there's no wall
-    // ahead. Each extra cell adds T.ticksPerCell to the last step's target so
-    // the robot covers the whole straight in one PID phase — no per-cell
-    // EXPLORE_THINK / scriptKick gap to coast through.
+    // ── Fast-run chain extension (straights + mid-chain pivots) ──────────────
+    // In FAST mode the maze is fully known and we want unbroken motion. Walk
+    // the planned path forward from `plannedRow/Col` in `plannedHeading`:
+    //   - while next cell continues straight  → extend last FWD by 1 cell;
+    //   - when next cell needs a 90° turn     → shorten approach by 4 cm,
+    //     push PIVOT, push fresh FWD covering "post-pivot to next-cell center".
+    // After a pivot the robot's center is ~`WHEEL_TRACK_MM/2` past the
+    // turn-cell center in the new heading direction, so the post-pivot FWD is
+    // (cellTicks − pivotFwdOffset). Lateral ~half-track displacement is
+    // corrected by IR centering during the post-pivot FWD. 180° turns can't
+    // be pivoted (no in-place rotation), so the chain breaks there.
     if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
-        int extraCells = 0;
-        while (extraCells < (MAZE_ROWS * MAZE_COLS)) {
+        long pivotFwdOffset = (long)((WHEEL_TRACK_MM * 0.5f)
+                                     * ((float)T.ticksPerCell / 180.0f) + 0.5f);
+        long postPivotShort = T.ticksPerCell - pivotFwdOffset;
+        int extraCells = 0, pivots = 0;
+        int safetyCap = MAZE_ROWS * MAZE_COLS;
+        while (safetyCap-- > 0) {
             if (rr == GOAL_ROW && cc == GOAL_COL) break;
             if (maze.hasWall(rr, cc, hh)) break;
             int nr = rr + DIR_DR[hh];
@@ -670,16 +686,47 @@ static void buildMoveScript(AbsDir bestDir) {
             if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
             uint8_t d;
             AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
-            if (d == FLOOD_INFINITY || next != hh) break;
-            rr = nr; cc = nc;
-            extraCells++;
+            if (d == FLOOD_INFINITY) break;
+
+            if (next == hh) {
+                // Straight: extend current FWD by 1 cell.
+                script[scriptLen - 1].target += T.ticksPerCell;
+                rr = nr; cc = nc;
+                extraCells++;
+                continue;
+            }
+
+            int turnDiff = ((int)next - (int)hh + 4) % 4;
+            if (turnDiff != 1 && turnDiff != 3) break;  // 180° not pivot-able
+            if (scriptLen + 2 > MAX_SCRIPT) break;       // need room for PIVOT + FWD
+            // Need the diagonal cell to exist + not be wall-blocked after the pivot.
+            int diagR = nr + DIR_DR[next];
+            int diagC = nc + DIR_DC[next];
+            if (diagR < 0 || diagR >= MAZE_ROWS || diagC < 0 || diagC >= MAZE_COLS) break;
+            if (maze.hasWall(nr, nc, next)) break;
+
+            // Approach: extend last FWD by 14 cm so pivot point is 4 cm
+            // before (nr,nc) center.
+            script[scriptLen - 1].target += postPivotShort;
+            TurnDir td = (turnDiff == 1) ? TURN_RIGHT : TURN_LEFT;
+            scriptPushPivot(td, 90.0f);
+            // Post-pivot FWD: covers (nr,nc) center → (diagR,diagC) center,
+            // less the ~4 cm the pivot already advanced in the new heading.
+            scriptPushFwd(postPivotShort);
+
+            hh = next;
+            rr = diagR;
+            cc = diagC;
+            pivots++;
         }
-        if (extraCells > 0) {
-            script[scriptLen - 1].target += (long)extraCells * T.ticksPerCell;
-            plannedRow = rr;
-            plannedCol = cc;
-            Serial.printf("[FAST] chained +%d straight cells -> (%d,%d) target=%ld\n",
-                          extraCells, rr, cc, (long)script[scriptLen - 1].target);
+
+        plannedRow     = rr;
+        plannedCol     = cc;
+        plannedHeading = hh;
+
+        if (extraCells > 0 || pivots > 0) {
+            Serial.printf("[FAST] chained +%d cells, %d pivots -> (%d,%d) hd=%d\n",
+                          extraCells, pivots, rr, cc, (int)hh);
         }
     }
 }
