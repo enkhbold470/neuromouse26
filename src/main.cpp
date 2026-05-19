@@ -1026,6 +1026,66 @@ void loop() {
             break;
         }
 
+        // ── PH_FWD_TO_BUMP: slow forward, raw IR (LF+RF)/2 threshold stop. ──
+        // Used by the 180° anchor to land the robot against the (now) front
+        // wall. Uses raw IR instead of estimateFrontDistMM because the LUT
+        // clamps to 10 mm minimum; raw values keep rising past that point.
+        if (runPhase == PH_FWD_TO_BUMP) {
+            sampleIR();
+            int  lfRaw    = irVal[0];
+            int  rfRaw    = irVal[3];
+            int  frontAvg = (lfRaw + rfRaw) / 2;
+            long avgTicks = (tL + tR) / 2;
+
+            auto endNow = [&](const char* reason) {
+                stopMotors();
+                Serial.printf("--- STEP END idx=%d/%d ph=FWD_TO_BUMP reason=%s avg=%ld frontRaw=%d tL=%ld tR=%ld ---\n",
+                              scriptIdx + 1, scriptLen, reason, avgTicks, frontAvg, tL, tR);
+                if (scriptIdx + 1 >= scriptLen) {
+                    robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
+                    runTurnDir = TURN_NONE;
+                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
+                                  robotRow, robotCol, "NESW"[robotHeading]);
+                    if (exploreMode || fastRunMode) state = EXPLORE_THINK;
+                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
+                    return;
+                }
+                scriptIdx++;
+                PhaseStep& next = script[scriptIdx];
+                runPhase   = next.phase;
+                runTarget  = next.target;
+                runTurnDir = next.dir;
+                pid.reset();
+                phaseEnter();
+            };
+
+            if (frontAvg >= T.wallBumpRaw) { endNow("BUMP");        break; }
+            if (avgTicks >= runTarget)     { endNow("NO_BUMP_CAP"); break; }
+
+            int throttle = T.stictionPwm;
+            int yawBias  = (T.useImu && imuReady)
+                            ? (int)(-T.yawHoldKp * (yawDeg - yawTargetDeg)) : 0;
+            int pwmL = constrain(throttle - yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            int pwmR = constrain(throttle + yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            leftMotor.drive(pwmL);
+            rightMotor.drive(pwmR);
+
+            static uint32_t lastOled_b = 0;
+            if (millis() - lastOled_b > 150) {
+                oledRun(avgTicks, runTarget, tL, tR);
+                lastOled_b = millis();
+            }
+            if (T.telemetry) {
+                static uint32_t lastTel_b = 0;
+                if (millis() - lastTel_b > 80) {
+                    Serial.printf("t=%lu ph=FWD2BUMP avg=%ld frontRaw=%d thr=%d yaw=%+.2f tL=%ld tR=%ld\n",
+                                  (unsigned long)millis(), avgTicks, frontAvg, throttle, yawDeg, tL, tR);
+                    lastTel_b = millis();
+                }
+            }
+            break;
+        }
+
         bool imuMode = T.useImu && imuReady && (runPhase != PH_FORWARD);
 
         float avg;
