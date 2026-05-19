@@ -211,11 +211,23 @@ struct Tuning {
     // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
     // back of the robot.  Net effect: robot's rear physically against the
     // wall, robot center at the same "-4.5 cm" reference as start.
-    float    backupOffsetMm        = 5.0f;
+    float    backupOffsetMm        = 10.0f;
     // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
     long     fwdToWallMaxTicks     = 1600;
+    // PH_FWD_TO_BUMP — front-wall bump detection by raw IR (LF+RF)/2.
+    // 3500 ≈ ≤ 3 cm per IRCal::IR_DIST_FRONT_AVG. Tighten to ~3800 for ≤ 2 cm.
+    int      wallBumpRaw           = 3500;
+    long     fwdToBumpMaxTicks     = 1600;
+    // PH_DEADEND_RECAL — gyro bias re-cal during stillness window after the
+    // front-bump anchor lands the robot at cell-center.
+    uint32_t recalStillHoldMs      = 100;
+    long     recalStillTicks       = 1;
+    float    recalStillGz          = 1.0f;
+    int      recalSamples          = 300;
+    int      recalSampleDelayMs    = 2;
+    uint32_t recalTimeoutMs        = 500;
 
     bool     useImu          = true;
     float    pivot90Deg      = 90.0f;
