@@ -1086,6 +1086,76 @@ void loop() {
             break;
         }
 
+        // ── PH_DEADEND_RECAL: motors coast, wait for stillness, re-zero
+        // gyro bias via calibrateGyroBias(). Falls through to next script
+        // step on success OR on timeout (yaw zeroed either way so the next
+        // PH_FORWARD has a fresh heading reference).
+        if (runPhase == PH_DEADEND_RECAL) {
+            static long     recal_prevTL      = 0;
+            static long     recal_prevTR      = 0;
+            static uint32_t recal_stillStart  = 0;
+            static uint32_t recal_phaseStart  = 0;
+            static bool     recal_firstEntry  = true;
+
+            if (recal_firstEntry) {
+                stopMotors();
+                recal_phaseStart = millis();
+                recal_prevTL     = leftEnc.getTicks();
+                recal_prevTR     = rTicks();
+                recal_stillStart = 0;
+                recal_firstEntry = false;
+            }
+
+            long tLnow = leftEnc.getTicks();
+            long tRnow = rTicks();
+            bool encStill = (labs(tLnow - recal_prevTL) <= T.recalStillTicks)
+                         && (labs(tRnow - recal_prevTR) <= T.recalStillTicks);
+            recal_prevTL = tLnow; recal_prevTR = tRnow;
+            bool gzStill = fabsf(gzFilt) < T.recalStillGz;
+            bool still   = encStill && gzStill && imuReady;
+
+            if (still) { if (recal_stillStart == 0) recal_stillStart = millis(); }
+            else       { recal_stillStart = 0; }
+
+            bool stillHeld = recal_stillStart
+                          && (millis() - recal_stillStart) >= T.recalStillHoldMs;
+            bool timedOut  = (millis() - recal_phaseStart) >= T.recalTimeoutMs;
+
+            if (stillHeld || timedOut) {
+                if (stillHeld) {
+                    calibrateGyroBias(T.recalSamples, T.recalSampleDelayMs);
+                    Serial.printf("[DEADEND] cal OK bias=%.4f deg/s (stillness held)\n",
+                                  gyroBiasZ);
+                } else {
+                    Serial.printf("[DEADEND] cal SKIP (timeout) — yaw zeroed anyway\n");
+                }
+                yawDeg       = 0.0f;
+                yawTargetDeg = 0.0f;
+                recal_firstEntry = true;
+
+                Serial.printf("--- STEP END idx=%d/%d ph=DEADEND_RECAL reason=%s ---\n",
+                              scriptIdx + 1, scriptLen, stillHeld ? "CAL_OK" : "TIMEOUT");
+
+                if (scriptIdx + 1 >= scriptLen) {
+                    robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
+                    runTurnDir = TURN_NONE;
+                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
+                                  robotRow, robotCol, "NESW"[robotHeading]);
+                    if (exploreMode || fastRunMode) state = EXPLORE_THINK;
+                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
+                    break;
+                }
+                scriptIdx++;
+                PhaseStep& next = script[scriptIdx];
+                runPhase   = next.phase;
+                runTarget  = next.target;
+                runTurnDir = next.dir;
+                pid.reset();
+                phaseEnter();
+            }
+            break;
+        }
+
         bool imuMode = T.useImu && imuReady && (runPhase != PH_FORWARD);
 
         float avg;
