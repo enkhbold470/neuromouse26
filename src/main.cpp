@@ -211,7 +211,7 @@ struct Tuning {
     // offset, because the front sensor sits ~1.5 cm ahead of axle vs the
     // back of the robot.  Net effect: robot's rear physically against the
     // wall, robot center at the same "-4.5 cm" reference as start.
-    float    backupOffsetMm        = 15.0f;
+    float    backupOffsetMm        = 5.0f;
     // Safety cap on PH_FWD_TO_WALL (unused by the 180° anchor now, kept as
     // primitive in case it's wanted later).
     float    wallTouchDistMm       = 35.0f;
