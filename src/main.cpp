@@ -884,22 +884,45 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedCol     = robotCol + DIR_DC[bestDir];
 
     // ── Fast-run chain extension (straights + mid-chain pivots) ──────────────
-    // In FAST mode the maze is fully known and we want unbroken motion. Walk
-    // the planned path forward from `plannedRow/Col` in `plannedHeading`:
-    //   - while next cell continues straight  → extend last FWD by 1 cell;
-    //   - when next cell needs a 90° turn     → shorten approach by 4 cm,
-    //     push PIVOT, push fresh FWD covering "post-pivot to next-cell center".
-    // After a pivot the robot's center is ~`WHEEL_TRACK_MM/2` past the
-    // turn-cell center in the new heading direction, so the post-pivot FWD is
-    // (cellTicks − pivotFwdOffset). Lateral ~half-track displacement is
-    // corrected by IR centering during the post-pivot FWD. 180° turns can't
-    // be pivoted (no in-place rotation), so the chain breaks there.
+    // Walk the planned path forward, chaining FWD+PIVOT so motion is unbroken
+    // through known cells.
+    //
+    // PIVOT GEOMETRY (right pivot, robot facing N, lands facing E):
+    //   PRE:  center at turn-cell-center − (WHEEL_TRACK/2) in original heading.
+    //         (= 37 mm south of turn-cell center; braked right wheel sits at
+    //          cell.x + 37, cell.y − 37 in maze frame)
+    //   PIVOT: rotate 90° CW around the braked right wheel (radius = 37 mm).
+    //   POST: center at (cell.x + 37, cell.y)
+    //         = 37 mm forward in NEW heading, ZERO lateral offset.
+    //
+    // The pre-pivot 37 mm shortfall exactly cancels the rotation arc's lateral
+    // component → robot lands on the new heading's center line, NO IR fix-up
+    // needed. (Earlier comment claimed lateral correction; that was wrong.)
+    //
+    // Distances (CELL_PITCH=180 mm, half-track=37 mm):
+    //   approach  (last cell → pivot point)     = 180 − 37 = 143 mm = postPivotShort
+    //   post-exit (pivot exit → next cell ctr)  = 180 − 37 = 143 mm = postPivotShort
+    //
+    // 180° turns can't be pivoted (single-wheel lock doesn't yield in-place
+    // 180° flip) → chain breaks at 180° corners.
     if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
-        long pivotFwdOffset = (long)((WHEEL_TRACK_MM * 0.5f)
-                                     * ((float)CELL_TICKS / 180.0f) + 0.5f);
-        long postPivotShort = CELL_TICKS - pivotFwdOffset;
+        // Asymmetric pivot offsets — pre is geometric, post is geometric +
+        // brake-creep drift. The braked wheel doesn't perfectly hold during
+        // the 90° rotation under torque from the active wheel; robot center
+        // overshoots the geometric WHEEL_TRACK/2 = 37 mm by ~13 mm of creep,
+        // landing ~50 mm past cell center in new heading. Pre offset stays
+        // geometric (40 mm; slightly above 37 mm to give clearance for the
+        // 3 mm lateral residual at pre=40).
+        constexpr float PRE_PIVOT_OFFSET_MM  = 40.0f;
+        constexpr float POST_PIVOT_OFFSET_MM = 50.0f;
+        const float ticksPerMm = (float)CELL_TICKS / 180.0f;
+        long preOffset       = (long)(PRE_PIVOT_OFFSET_MM  * ticksPerMm + 0.5f);  // ~311 ticks
+        long postOffset      = (long)(POST_PIVOT_OFFSET_MM * ticksPerMm + 0.5f);  // ~389 ticks
+        long approachLen     = CELL_TICKS - preOffset;                // 1089 ticks = 14 cm (cell→pivot)
+        long postPivotToCell = CELL_TICKS - postOffset;               // 1011 ticks = 13 cm (pivot→next cell)
+        long adjPivotFwd     = CELL_TICKS - postOffset - preOffset;   //  700 ticks =  9 cm (pivot→adj pivot)
         int extraCells = 0, pivots = 0;
         int safetyCap = MAZE_ROWS * MAZE_COLS;
         while (safetyCap-- > 0) {
@@ -930,18 +953,55 @@ static void buildMoveScript(AbsDir bestDir) {
             if (maze.hasWall(nr, nc, next)) break;
 
             // Approach: extend last FWD by 14 cm so pivot point is 4 cm
-            // before (nr,nc) center.
-            script[scriptLen - 1].target += postPivotShort;
+            // before (nr,nc) center (= pre-pivot offset).
+            script[scriptLen - 1].target += approachLen;
             TurnDir td = (turnDiff == 1) ? TURN_RIGHT : TURN_LEFT;
             scriptPushPivot(td, 90.0f);
-            // Post-pivot FWD: covers (nr,nc) center → (diagR,diagC) center,
-            // less the ~4 cm the pivot already advanced in the new heading.
-            scriptPushFwd(postPivotShort);
+            // Post-pivot FWD: 13 cm from pivot exit (= cell + post-offset)
+            // to (diagR,diagC) center.
+            scriptPushFwd(postPivotToCell);
 
             hh = next;
             rr = diagR;
             cc = diagC;
             pivots++;
+
+            // Adjacent-pivot extension: if the cell we just landed at
+            // (diagR, diagC) ALSO needs a turn, shorten the just-pushed
+            // post-pivot FWD from postPivotShort (140 mm to next cell center)
+            // down to adjacentPivotFwd (= 1 cell − 2·offset = 100 mm to next
+            // pivot point). Then push the second pivot and a fresh post-pivot
+            // FWD. Outer loop continues with the new state, supporting longer
+            // zigzag chains.
+            if (rr != GOAL_ROW || cc != GOAL_COL) {
+                if (!maze.hasWall(rr, cc, hh)) {
+                    uint8_t dAdj;
+                    AbsDir nextAdj = maze.bestDirectionBiased(rr, cc, hh, dAdj);
+                    if (dAdj != FLOOD_INFINITY && nextAdj != hh) {
+                        int turnDiff2 = ((int)nextAdj - (int)hh + 4) % 4;
+                        if ((turnDiff2 == 1 || turnDiff2 == 3)
+                            && scriptLen + 2 <= MAX_SCRIPT) {
+                            int diagR2 = rr + DIR_DR[nextAdj];
+                            int diagC2 = cc + DIR_DC[nextAdj];
+                            if (diagR2 >= 0 && diagR2 < MAZE_ROWS
+                                && diagC2 >= 0 && diagC2 < MAZE_COLS
+                                && !maze.hasWall(rr, cc, nextAdj)) {
+                                // Adj pivot: shorten the just-pushed FWD from
+                                // 13 cm (to cell center) to 9 cm (to adjacent
+                                // pivot point = cell + post − pre).
+                                script[scriptLen - 1].target = adjPivotFwd;
+                                TurnDir td2 = (turnDiff2 == 1) ? TURN_RIGHT : TURN_LEFT;
+                                scriptPushPivot(td2, 90.0f);
+                                scriptPushFwd(postPivotToCell);
+                                hh = nextAdj;
+                                rr = diagR2;
+                                cc = diagC2;
+                                pivots++;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         plannedRow     = rr;
@@ -1593,12 +1653,23 @@ void loop() {
             pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             leftMotor.drive(pwmL); rightMotor.drive(pwmR);
         } else if (runPhase == PH_PIVOT) {
+            // Pivot must be one-wheel-forward, other braked. If PID overshoots
+            // (posErr goes negative near settle), throttle goes negative and
+            // the active wheel would REVERSE — that turns the pivot into a
+            // wobble. Clamp ≥0 so the active wheel only drives forward; if
+            // overshoot has happened, both wheels effectively brake and the
+            // settle band ends the phase.
+            int pivotThrottle = (throttle > 0) ? throttle : 0;
             if (runTurnDir == TURN_RIGHT) {
-                pwmL = throttle; pwmR = 0;
-                leftMotor.drive(pwmL); rightMotor.brake();
+                pwmL = pivotThrottle; pwmR = 0;
+                if (pivotThrottle > 0) leftMotor.drive(pwmL);
+                else                    leftMotor.brake();
+                rightMotor.brake();
             } else {
-                pwmL = 0; pwmR = throttle;
-                leftMotor.brake(); rightMotor.drive(pwmR);
+                pwmL = 0; pwmR = pivotThrottle;
+                leftMotor.brake();
+                if (pivotThrottle > 0) rightMotor.drive(pwmR);
+                else                    rightMotor.brake();
             }
         } else {
             int sign = (runTurnDir == TURN_RIGHT) ? +1 : -1;
