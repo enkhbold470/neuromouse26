@@ -79,11 +79,10 @@ constexpr int      BASE_BREAKAWAY_PWM    = 110;
 // Derived ratios. `(BASE × N) / 10` is an integer-constexpr way to write
 // N/10× without floats. Caps inline-clamped to MOTOR_PWM_MAX (1023, 10-bit).
 constexpr int      FWD_STICTION_FF     = (BASE_BREAKAWAY_PWM * 10) / 10;   // 1.0×
-constexpr int      ALIGN_PWM           = (BASE_BREAKAWAY_PWM * 10) / 10;   // 1.0×
+constexpr int      ALIGN_PWM           = (BASE_BREAKAWAY_PWM * 18) / 10;   // 1.8× — slow creep needs breakaway headroom
 constexpr int      POS_STICTION_PWM    = (BASE_BREAKAWAY_PWM * 12) / 10;   // 1.2× — non-FWD pos floors
 constexpr int      YAW_STICTION_PWM    = (BASE_BREAKAWAY_PWM * 15) / 10;   // 1.5× — turns drag more
-constexpr int      POS_MAX_PWM         = ((BASE_BREAKAWAY_PWM * 25) / 10 < MOTOR_PWM_MAX)
-                                          ? ((BASE_BREAKAWAY_PWM * 25) / 10) : MOTOR_PWM_MAX;   // 2.5× cap
+constexpr int      POS_MAX_PWM         = MOTOR_PWM_MAX;   // hard cap; speed actually limited by dynMax in PH_FORWARD
 constexpr int      YAW_MAX_PWM         = ((BASE_BREAKAWAY_PWM * 30) / 10 < MOTOR_PWM_MAX)
                                           ? ((BASE_BREAKAWAY_PWM * 30) / 10) : MOTOR_PWM_MAX;   // 3.0× cap
 
@@ -97,7 +96,7 @@ constexpr int      YAW_MAX_PWM         = ((BASE_BREAKAWAY_PWM * 30) / 10 < MOTOR
 //     wheels under-shoot the commanded cruise speed.
 //   - Stiction-related values (FWD_STICTION_FF, POS_*_PWM) are DERIVED from
 //     BASE_BREAKAWAY_PWM above — do not edit here, edit the master knob.
-constexpr float    FWD_V_CRUISE_TPS    = 500.0f;
+constexpr float    FWD_V_CRUISE_TPS    = 150.0f;  // EXPLORE cruise (slow for sense reliability)
 // FAST RUN cruise speed is RUNTIME-ADJUSTABLE via the "Fast Speed" menu and
 // persisted to NVS (key "fspeed"). Default == FWD_V_CRUISE_TPS. EXPLORE mode
 // ignores this knob — explore always uses FWD_V_CRUISE_TPS for sense
@@ -139,16 +138,16 @@ constexpr float    YAW_STALL_VEL       =    5.0f;
 constexpr uint32_t YAW_STALL_MS        =  250;
 constexpr float    YAW_STALL_ERR_MAX   =    4.0f;
 constexpr float    YAW_HOLD_KP         =    5.0f;   // forward-leg heading hold
-constexpr float    YAW_HOLD_KD         =    0.3f;   // damps yaw overshoot during forward (PWM per °/s)
+constexpr float    YAW_HOLD_KD         =    0.8f;   // damps yaw overshoot during forward (PWM per °/s)
 constexpr float    PIVOT_90_DEG        =   90.0f;
 constexpr float    SPOT_180_DEG        =  180.0f;
 
 // ── [D] IR CENTERING (forward phase only) ────────────────────────────────────
 // Trims left/right PWM bias so the robot stays mid-corridor by matching the
 // L/R side-IR raw count to IR_CAL_L / IR_CAL_R from PinConfig.h.
-constexpr float    IR_CENTER_KP        =    0.1f;
+constexpr float    IR_CENTER_KP        =    1.0f;
 constexpr float    IR_CENTER_KI        =    0.0f;
-constexpr float    IR_CENTER_KD        =    0.0f;
+constexpr float    IR_CENTER_KD        =    2.0f;
 constexpr int      IR_CENTER_MAX       =   15;
 
 // ── [E] DEAD-END HANDLING (PH_ALIGN_FRONT + 180° exit) ───────────────────────
@@ -585,20 +584,23 @@ static void onPhaseActivate() {
     }
 }
 
-// Phase-entry snapshot. Replaces the prior "reset encoders + reset yawDeg"
-// pattern. Encoders stay continuous and we just remember where the phase
-// started; turn phases advance the commanded heading `yawTargetDeg` by their
-// signed degree target so forward phases that follow can hold against the
-// new heading instead of against a freshly-zeroed yaw.
+// Phase-entry: per-phase yaw zero. Each phase gets its own clean coordinate
+// frame (yawDeg=0 at start), preventing cross-phase drift accumulation.
+// Previously yawDeg was continuous across phases — settle-band imprecision
+// (±1.5°/turn) compounded across chained turns. Resetting per phase bounds
+// the gyro error to ONE phase duration (max ~1.5 s of integration drift).
 static void phaseEnter() {
     phaseStartTL     = leftEnc.getTicks();
     phaseStartTR     = rTicks();
-    phaseStartYawDeg = yawDeg;
     phaseStartUs     = micros();
+    yawDeg           = 0.0f;                      // per-phase reset
+    phaseStartYawDeg = 0.0f;
     if (runPhase == PH_SPOT || runPhase == PH_PIVOT) {
         float deg = (float)runTarget;             // turn phases store degrees in runTarget when useImu
         float signedDeg = (runTurnDir == TURN_RIGHT) ? -deg : +deg;
-        yawTargetDeg += signedDeg;
+        yawTargetDeg = signedDeg;                 // turn target ±deg from new zero
+    } else {
+        yawTargetDeg = 0.0f;                      // forward holds current heading (= new zero)
     }
     onPhaseActivate();                            // handles PH_REVERSE_TO_BACK target computation
 }
@@ -1134,6 +1136,12 @@ void loop() {
     }
 
     case EXPLORE_THINK: {
+        // Gyro drift fix: zero heading reference at every cell arrival.
+        // Continuous yawDeg accumulation lost ~1–2°/turn from settle-band
+        // imprecision; after ~3 turns the drift exceeded a single 90° turn's
+        // tolerance. Reset bounds the error to one move at a time.
+        yawDeg       = 0.0f;
+        yawTargetDeg = 0.0f;
         if (exploreMode) {
             senseAndStoreWalls();
         }
@@ -1256,7 +1264,14 @@ void loop() {
             sampleIR();
             int errLF = irVal[0] - ALIGN_LF_TARGET;
             int errRF = irVal[3] - ALIGN_RF_TARGET;
-            int errMix = (abs(errLF) > abs(errRF)) ? errLF : errRF;
+            // Average distance error: drives fwd/rev. Old code used the
+            // larger-magnitude sensor which overshot whichever was farther off.
+            int errMean = (errLF + errRF) / 2;
+            // LF/RF difference: angular error against the dead-end wall.
+            // LF>RF (positive diff) → LF wall closer → robot rotated CW
+            // (RF side farther from wall) → spin CCW (left wheel back, right
+            // wheel forward) to flatten. Use as additional differential bias.
+            int errDiff = errLF - errRF;
             long avgTicks = (tL + tR) / 2;
             static uint32_t alignSettleStart = 0;
 
@@ -1296,14 +1311,23 @@ void loop() {
             // Safety: if we've traveled ALIGN_MAX_TICKS without converging, bail.
             if (labs(avgTicks) >= ALIGN_MAX_TICKS) { endNow("ALIGN_CAP"); break; }
 
-            // errMix > 0 → IR reads brighter than 4 cm target → wall closer
-            //   than 4 cm → REVERSE. errMix < 0 → wall farther → FORWARD.
-            int dir = (errMix > 0) ? -1 : +1;
+            // errMean > 0 → both IR brighter than target → wall closer than
+            // target → REVERSE. errMean < 0 → wall farther → FORWARD.
+            int dir = (errMean > 0) ? -1 : +1;
             int throttle = dir * ALIGN_PWM;
+            // Angular correction from front-sensor mismatch. Scale: errDiff
+            // of 500 raw counts ≈ ~5° rotation off-perpendicular at 4 cm gap;
+            // KP=0.05 PWM/count → ~25 PWM differential for 500-count diff.
+            constexpr float ALIGN_DIFF_KP = 0.05f;
+            int angleBias = (int)(ALIGN_DIFF_KP * (float)errDiff);
             int yawBias  = (USE_IMU && imuReady)
                             ? (int)(-YAW_HOLD_KP * (yawDeg - yawTargetDeg) - YAW_HOLD_KD * gzFilt) : 0;
-            int pwmL = constrain(throttle - yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
-            int pwmR = constrain(throttle + yawBias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            // Combine: yawBias holds heading, angleBias rotates to square
+            // against the dead-end wall (overrides gyro hold for this phase
+            // since the wall is the truth reference).
+            int bias = angleBias + yawBias / 4;  // de-weight gyro vs wall
+            int pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            int pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             leftMotor.drive(pwmL);
             rightMotor.drive(pwmR);
 
@@ -1495,7 +1519,16 @@ void loop() {
                 && fabsf(u) < (float)FWD_STICTION_FF) {
                 u = ((posErr >= 0) ? +1.0f : -1.0f) * (float)FWD_STICTION_FF;
             }
-            throttle      = constrain((int)u, -POS_MAX_PWM, POS_MAX_PWM);
+            // Dynamic cap: PWM ≤ FF(vCmd) + small PID headroom. Previously
+            // POS_KP·posErr saturated POS_MAX_PWM (275) for the whole cell
+            // because the setpoint was the FINAL target — robot ran at max
+            // PWM regardless of vCruise. Cap to FF + headroom so commanded
+            // velocity is actually enforced.
+            float ffMag = (vAbsCmd > 5.0f) ? ((float)FWD_STICTION_FF + FWD_KV_SLOPE * vAbsCmd) : 0.0f;
+            int   dynMax = (int)ffMag + 40;
+            if (dynMax > POS_MAX_PWM) dynMax = POS_MAX_PWM;
+            if (dynMax < (int)FWD_STICTION_FF + 20) dynMax = (int)FWD_STICTION_FF + 20;
+            throttle      = constrain((int)u, -dynMax, dynMax);
         } else {
             // PIVOT/SPOT path: position PID with soft stiction floor (unchanged).
             float u   = effKp * posErr - effKd * velFilt;
