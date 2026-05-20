@@ -3,6 +3,9 @@
 
 #include <Arduino.h>
 
+// rgb led
+constexpr uint8_t rgb_pin      = 48;
+
 // ── Pins ──────────────────────────────────────────────────────────────────────
 constexpr uint8_t MOTOR_L_IN1      = 15;
 constexpr uint8_t MOTOR_L_IN2      = 16;
