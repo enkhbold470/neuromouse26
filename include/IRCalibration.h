@@ -3,47 +3,48 @@
 
 #include <Arduino.h>
 
-// IR sensor distance calibration table.
-// Captured 2026-05-17 via test/sensor-cal-ble.cpp `d 1`..`d 9` commands.
-// Robot placed nose-toward front wall in corridor (side walls also
-// present, hence non-zero L/R columns). 32-sample mean per cell.
+// IR sensor distance calibration table — LF and RF only.
+// Re-captured 2026-05-19 at 5 anchor points (1, 2, 5, 8, 12 cm); rows for
+// 3, 4, 6, 7, 9, 10, 11 cm are linear interp between anchors.
 //
-// LF (col 0) and RF (col 3) columns are monotonically decreasing in raw
-// count vs distance — usable for piecewise-linear interp. L (col 1) and
-// R (col 2) columns are NOT monotonic (sensor was at ~30° forward-bias
-// during capture and geometry changed 2026-05-19 to ~90° perpendicular;
-// columns are stale anyway).
+// LF and RF columns are monotonically decreasing in raw count vs distance,
+// so piecewise-linear interp is safe. L/R sensors are NOT in this table —
+// they're side-aimed (~90° perpendicular as of 2026-05-19), used only for
+// centering bias in driveChain(), not for distance estimation.
 //
-// Front sensors saturate near 3900 at d<3cm — interpolation reliable
-// from ~3 cm out. Below 3 cm treat as "very close" (clamp 10mm).
+// Front sensors saturate near 3914 at d<2cm — interp reliable from ~2 cm
+// out. Below 2 cm treat as "very close" (clamp 10 mm).
 
 namespace IRCal {
 
 constexpr int IR_DIST_MIN_CM   = 1;
-constexpr int IR_DIST_MAX_CM   = 9;
+constexpr int IR_DIST_MAX_CM   = 12;
 constexpr int IR_DIST_ROWS     = IR_DIST_MAX_CM - IR_DIST_MIN_CM + 1;
 
-// Per-sensor, indexed [cm-1][sensor]; sensor order: LF, L, R, RF.
-constexpr int IR_DIST_TABLE[IR_DIST_ROWS][4] = {
-    /* 1 cm */ { 3921, 1753, 2364, 3906 },
-    /* 2 cm */ { 3880, 1785, 1714, 3827 },
-    /* 3 cm */ { 3819, 1680, 1637, 3521 },
-    /* 4 cm */ { 3515, 1635, 1559, 2760 },
-    /* 5 cm */ { 2866, 1547, 1469, 2237 },
-    /* 6 cm */ { 2428, 1525, 1426, 1957 },
-    /* 7 cm */ { 2123, 1422, 1511, 1755 },
-    /* 8 cm */ { 1882, 1437, 1478, 1619 },
-    /* 9 cm */ { 1719, 1421, 1500, 1504 },
+// Per-sensor, indexed [cm-1][sensor]; sensor order: LF, RF.
+constexpr int IR_DIST_TABLE[IR_DIST_ROWS][2] = {
+    /*  1 cm */ { 3914, 3914 },
+    /*  2 cm */ { 3878, 3878 },
+    /*  3 cm */ { 3579, 3407 },   // interp
+    /*  4 cm */ { 3281, 2935 },   // interp
+    /*  5 cm */ { 2982, 2464 },
+    /*  6 cm */ { 2623, 2212 },   // interp
+    /*  7 cm */ { 2264, 1960 },   // interp
+    /*  8 cm */ { 1905, 1708 },
+    /*  9 cm */ { 1757, 1607 },   // interp
+    /* 10 cm */ { 1609, 1505 },   // interp
+    /* 11 cm */ { 1460, 1404 },   // interp
+    /* 12 cm */ { 1312, 1302 },
 };
 
 // Interp a single front-sensor raw reading -> mm via piecewise-linear
 // lookup on its own column of IR_DIST_TABLE. sensorIdx MUST be 0 (LF)
-// or 3 (RF); L/R columns are non-monotonic and unsafe to interp.
+// or 1 (RF).
 inline float interpFrontSensorMM(int raw, int sensorIdx) {
     int top = IR_DIST_TABLE[0][sensorIdx];
     int bot = IR_DIST_TABLE[IR_DIST_ROWS - 1][sensorIdx];
-    if (raw >= top) return 10.0f;
-    if (raw <= bot) return 90.0f;
+    if (raw >= top) return (float)(IR_DIST_MIN_CM * 10);
+    if (raw <= bot) return (float)(IR_DIST_MAX_CM * 10);
     for (int i = 0; i < IR_DIST_ROWS - 1; i++) {
         int hi = IR_DIST_TABLE[i][sensorIdx];
         int lo = IR_DIST_TABLE[i + 1][sensorIdx];
@@ -53,7 +54,7 @@ inline float interpFrontSensorMM(int raw, int sensorIdx) {
             return cm * 10.0f;
         }
     }
-    return 90.0f;
+    return (float)(IR_DIST_MAX_CM * 10);
 }
 
 // Per-sensor interp of LF and RF, fused as min — closer sensor wins.
@@ -62,7 +63,7 @@ inline float interpFrontSensorMM(int raw, int sensorIdx) {
 // Returns mm so callers can do arithmetic without rescale.
 inline float estimateFrontDistMM(int lf, int rf) {
     float lfMm = interpFrontSensorMM(lf, 0);
-    float rfMm = interpFrontSensorMM(rf, 3);
+    float rfMm = interpFrontSensorMM(rf, 1);
     return (lfMm < rfMm) ? lfMm : rfMm;
 }
 
