@@ -83,8 +83,8 @@ constexpr int      ALIGN_PWM           = (BASE_BREAKAWAY_PWM * 18) / 10;   // 1.
 constexpr int      POS_STICTION_PWM    = (BASE_BREAKAWAY_PWM * 12) / 10;   // 1.2× — non-FWD pos floors
 constexpr int      YAW_STICTION_PWM    = (BASE_BREAKAWAY_PWM * 15) / 10;   // 1.5× — turns drag more
 constexpr int      POS_MAX_PWM         = MOTOR_PWM_MAX;   // hard cap; speed actually limited by dynMax in PH_FORWARD
-constexpr int      YAW_MAX_PWM         = ((BASE_BREAKAWAY_PWM * 30) / 10 < MOTOR_PWM_MAX)
-                                          ? ((BASE_BREAKAWAY_PWM * 30) / 10) : MOTOR_PWM_MAX;   // 3.0× cap
+constexpr int      YAW_MAX_PWM         = ((BASE_BREAKAWAY_PWM * 16) / 10 < MOTOR_PWM_MAX)
+                                          ? ((BASE_BREAKAWAY_PWM * 16) / 10) : MOTOR_PWM_MAX;   // 1.6× cap — slow turns = cleaner gyro integration
 
 // ── [B] FORWARD MOTION ───────────────────────────────────────────────────────
 // Trapezoidal velocity profile drives a smoothly-moving position setpoint.
