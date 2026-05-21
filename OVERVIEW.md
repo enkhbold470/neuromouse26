@@ -1,513 +1,244 @@
 # Micromouse26 — Firmware Overview
 
-> ESP32-S3 · PlatformIO + Arduino framework · Verbose test build
+> ESP32-S3 · PlatformIO + Arduino · PCNT encoders · MPU-6500 yaw · flood-fill solver
 
 ---
 
 ## Project Structure
 
 ```
-micromouse26/
+neuromouse26/
 ├── include/
-│   ├── PinConfig.h
-│   ├── MicromouseMotor.h
-│   ├── MicromouseEncoder.h
-│   ├── MicromouseIMU.h
-│   ├── MicromouseIR.h
-│   └── MicromouseMaze.h
+│   ├── README                      module map (read this first)
+│   ├── Tuning.h                    every tunable constant
+│   ├── IMU.h                       MPU-6500 + yaw integration
+│   ├── IRSensors.h                 4-sensor IR array
+│   ├── Battery.h                   Vbat + state-of-charge
+│   ├── Pose.h                      robot pose + mode flags
+│   ├── MotionScript.h              RunPhase enum + script[] + pushers
+│   ├── Persistence.h               NVS save/load
+│   ├── Planner.h                   setupMaze, sense, buildMoveScript
+│   ├── OLED.h                      menu + run + diag screens
+│   ├── PinConfig.h                 pin numbers + hardware constants
+│   ├── MicromouseMotor.h           DRV8833 wrapper (LEDC PWM)
+│   ├── MicromouseEncoderPCNT.h     PCNT 4× quadrature decoder
+│   ├── MicromouseMaze.h            16×16 grid + flood-fill BFS
+│   ├── IRCalibration.h             per-cm IR LUT + front-distance interp
+│   ├── MicromouseEncoder.h         legacy ISR encoder (unused by main)
+│   ├── PID.h                       generic PID (unused by main)
+│   └── WifiDebug.h                 dormant HTTP debug server (not included)
 ├── src/
-│   └── main.cpp
+│   └── main.cpp                    hardware objects + setup + loop FSM
+├── test/                           one .cpp per env, bring-up sketches
+├── tools/
+│   └── notify_upload.py            post-upload audible chime
 ├── platformio.ini
-└── OVERVIEW.md  ← this file
+├── CLAUDE.md                       agent guide (Claude)
+├── GEMINI.md                       agent guide (Gemini)
+└── OVERVIEW.md                     this file
 ```
 
 ---
 
-## File Descriptions
+## State Machine
 
-### `include/PinConfig.h`
-All GPIO pin assignments, physical constants (wheel diameter, encoder ticks/rev), and I2C pin definitions in one place. Change hardware wiring here — nowhere else.
+`enum State { IDLE, ENC_TEST, IR_TEST, FAST_SPEED_EDIT, EXPLORE_THINK, RUN, GOAL, CRASH };` (in `src/main.cpp`).
+
+```
+                    ┌──────────────┐
+              boot  │     IDLE     │ ◄────────────────────────────┐
+             ─────► │ encoder=menu │  button (from any leaf state) │
+                    │ button=enter │                               │
+                    └──────┬───────┘                               │
+                           │                                       │
+        menu choice ───────┴──────────────────────────────         │
+        Explore / Fast Run                                │        │
+                  │                                       │        │
+                  ▼                                       │        │
+            autoCalGyro + 3-2-1 countdown                 │        │
+                  │                                       │        │
+                  ▼                                       │        │
+            ┌──────────────┐    senseAndStoreWalls        │        │
+            │EXPLORE_THINK │──────────────────────┐       │        │
+            │ flood + plan │                      │       │        │
+            └──────┬───────┘                      │       │        │
+                   │ buildMoveScript + kick       │       │        │
+                   ▼                              ▼       │        │
+            ┌──────────────┐                ┌─────────┐   │        │
+            │     RUN      │ ────────────► │  GOAL   │   │        │
+            │ script exec  │  reached goal └────┬────┘   │        │
+            └──────┬───────┘                    │ button  │        │
+                   │ script done                ▼         │        │
+                   └─► EXPLORE_THINK    ┌────────────┐   │        │
+                                        │   CRASH    │   │        │
+                                        │ boxed-in   │   │        │
+                                        └─────┬──────┘   │        │
+                                              │ button   │        │
+                                              ▼          ▼        ▼
+                                              └──────────┴────────┘
+```
+
+Other menu leaves: `ENC_TEST` (live tick stream), `IR_TEST` (live sensor read-out), `FAST_SPEED_EDIT` (encoder-knob adjustment of `fastRunCruiseTps`, saved to NVS on button press). Each returns to `IDLE` on a button press.
 
 ---
 
-### `include/MicromouseMotor.h`
-DRV8833-driven DC motor wrapper.
+## One move cycle (EXPLORE_THINK → RUN → EXPLORE_THINK)
 
-| Method | Description |
-|---|---|
-| `begin()` | Sets up LEDC PWM channels |
-| `drive(int pwm)` | Forward (positive) or reverse (negative), range −1023 … +1023 |
-| `brake()` | Both inputs HIGH — active brake |
-| `coast()` | Both inputs LOW — freewheeling |
+```
+EXPLORE_THINK:
+  yawDeg / yawTargetDeg ← 0          // bound drift to a single move
+  if exploreMode: senseAndStoreWalls()
+  maze.visited[r][c] = true
+  if isGoal:
+      if exploreMode: nvsSaveWalls()
+      state = GOAL ; break
+  maze.floodFill()
+  bestDir = maze.bestDirectionBiased(r, c, heading, &bestDist)
+  if bestDist == FLOOD_INFINITY:
+      state = CRASH ; break
+  buildMoveScript(bestDir):
+      diff = (bestDir - heading + 4) % 4
+      diff==0: FWD(cellTicks + pendingOffset)
+      diff==1: SPOT_R 90 + FWD(cellTicks)
+      diff==3: SPOT_L 90 + FWD(cellTicks)
+      diff==2: ALIGN_FRONT + SPOT_R 180 + FWD(−2 cm) + FWD(1 cell pitch)
+      [fast run] extend trailing FWD through consecutive straight cells
+  scriptKick()
+  state = RUN
 
-**Verbose logging:** every `drive()`, `brake()`, and `coast()` call prints the label ("LEFT"/"RIGHT"), direction string, and raw PWM value.
-
-Constructor signature:
-```cpp
-MicromouseMotor(uint8_t in1, uint8_t in2,
-                uint8_t ch1, uint8_t ch2,
-                const char* label);
+RUN:
+  walks script[] phase-by-phase
+  endPhase brakes + advances scriptIdx (or commits planned pose + returns
+  to EXPLORE_THINK on the last step)
 ```
 
 ---
 
-### `include/MicromouseEncoder.h`
-Single-channel quadrature encoder (RISING-edge count only).
+## Motion control: phase-script over a position-PID core
 
-| Method | Description |
+A move is a sequence of `PhaseStep`s. Each step picks a `RunPhase` and a target. The RUN executor walks the script. Per-phase yaw / encoder snapshots are captured in `phaseEnter()`.
+
+| Phase | What it does |
 |---|---|
-| `begin(isr_fn)` | Attaches ISR on channel A |
-| `handleInterrupt()` | Called from ISR — increments tick counter |
-| `getTicks()` | Thread-safe read (interrupt guard) |
-| `reset()` | Zero the tick counter |
-| `printStatus()` | Prints label + current tick count |
+| `PH_FORWARD` | Signed tick target. Position-PID + trapezoidal velocity command (`vAccel = sqrt(2·a·xDone)`, `vDecel = sqrt(2·a·xRem)`, cruise at `vCruise`). Forward bias = IR centering corr + (tL−tR)·`BALANCE_KP` + IMU yaw hold. |
+| `PH_SPOT` | Both wheels opposite. IMU-yaw-PID on `dy = yawDeg − phaseStartYawDeg`. Signed by `runTurnDir`. |
+| `PH_PIVOT` | Single-wheel pivot (other wheel braked). Still callable, but `buildMoveScript` no longer pushes it (R-pivot kept clipping walls). |
+| `PH_ALIGN_FRONT` | Slow creep until `irVal[0] ≈ ALIGN_LF_TARGET` and `irVal[3] ≈ ALIGN_RF_TARGET` at 37.5 mm. Used in the dead-end exit. |
+| `PH_REVERSE_TO_BACK` | Defers its tick target to `onPhaseActivate` (samples front IR there), then reclassifies as `PH_FORWARD`. Not pushed in the current flow; available for future re-anchor primitives. |
 
-**Verbose logging:** `getTicks()` and `reset()` both print current values to Serial.
+All phases share the same stall-escape + settle-band exit logic in the RUN executor — the `imuMode` flag selects gain banks (`POS_*` for forward, `YAW_*` for rotation).
+
+### Fast run = explore + faster cruise + straight-chain fusion
+
+Fast run differs from explore in only two ways:
+1. `vCruise = fastRunCruiseTps` (runtime-adjustable via the Fast Speed menu, NVS-persisted) instead of `FWD_V_CRUISE_TPS`.
+2. `buildMoveScript` fuses consecutive straight cells into one `PH_FORWARD` so the trapezoid stretches accel→cruise→decel over the whole chain.
+
+`endPhase()` always brakes at settle — wheels are stationary before any SPOT. (A prior `fastFwdRoll` continuous-roll flag was removed because it left the right wheel spinning forward into the start of a SPOT R, which the reverse PWM couldn't overcome.)
 
 ---
 
-### `include/MicromouseIMU.h`
-MPU-6050 gyroscope integration for yaw tracking.
+## Tuning knobs
 
-| Method | Description |
+All tunables are `constexpr` in `include/Tuning.h`. Sections:
+
+| Section | Covers |
 |---|---|
-| `begin(sda, scl)` | I2C init + WHO_AM_I check + auto-calibrate |
-| `calibrate()` | Averages 500 samples at rest to find gyro Z bias |
-| `update()` | Integrates gyro Z → `_yaw` (call every loop) |
-| `resetYaw()` | Zero the yaw accumulator |
-| `getYaw()` | Returns current yaw in degrees |
-| `printStatus()` | Prints bias, current yaw, and loop count |
+| [A] | Robot + maze geometry (mm) |
+| [B0] | Main power knob (`BASE_BREAKAWAY_PWM`); all stiction floors derived |
+| [B] | Forward motion: trapezoid (`FWD_V_CRUISE_TPS`, `FWD_ACCEL_TPS2`), position PID (`POS_KP/KD`), settle/stall bands |
+| [C] | Pivot / spot turns: yaw PID (`YAW_KP/KD`), settle/stall, `YAW_HOLD_KP/KD` for forward heading lock |
+| [D] | IR centering: `IR_CENTER_KP/KI/KD`, `IR_CENTER_MAX` |
+| [E] | Dead-end handling: `ALIGN_LF_TARGET`, `ALIGN_RF_TARGET`, `DEADEND_REVERSE_MM`, `DEADEND_FWD_MM` |
+| [F] | Script geometry: `CELL_TICKS`, `START_OFFSET_TICKS`, fallback tick counts |
+| [H] | Debug flags: `USE_IMU`, `USE_IR`, `TELEMETRY` |
 
-**Verbose logging:** calibration prints a dot every 50 samples; `update()` logs raw reading, bias-corrected value, dt, and accumulated yaw.
+**Bump `BASE_BREAKAWAY_PWM` and the whole robot gets stronger proportionally** — every stiction floor scales with it. PID gains (`POS_KP`/etc.) are intentionally NOT derived because they're independent physics.
 
 ---
 
-### `include/MicromouseIR.h`
-6-sensor IR array with ambient-light cancellation.
+## Hardware Constants (`include/PinConfig.h`)
 
-Sensor layout assumed:
-```
-   [FL]  [F]  [FR]
-   [L]        [R]
-```
-(FL = front-left diagonal, F = front centre, FR = front-right diagonal, L = left side, R = right side; plus one spare channel.)
-
-| Method | Description |
-|---|---|
-| `begin()` | Prints all GPIO assignments |
-| `update()` | Reads ambient then lit value for every sensor; prints `ambient`, `lit`, `diff` |
-| `wallFront()` | Returns `true` if front sensor exceeds `IR_THRESH_FRONT` |
-| `wallLeft()` | Returns `true` if left sensor exceeds `IR_THRESH_SIDE` |
-| `wallRight()` | Returns `true` if right sensor exceeds `IR_THRESH_SIDE` |
-| `printStatus()` | Prints all 6 diff values + combined front/left/right boolean |
-
-**Thresholds to calibrate** (in `MicromouseIR.h`):
-
-| Constant | Default | Meaning |
+| Constant | Value | Notes |
 |---|---|---|
-| `IR_THRESH_FRONT` | 800 | Front wall detected |
-| `IR_THRESH_SIDE` | 500 | Side wall detected |
-| `IR_THRESH_DIAG` | 600 | Diagonal sensor wall detected |
+| `WHEEL_DIAMETER` | 33.4 mm | Measured |
+| `RIGHT_ENC_SCALE` | 1.0135f | Auto-calibrated 2026-05-17 |
+| `WHEEL_TRACK_MM` | 80 mm | |
+| `MOTOR_PWM_MAX` | 1023 | 10-bit LEDC |
+| `MOTOR_PWM_FREQ_HZ` | 200 | Empirical sweet spot for stiction + this DRV8833 + N20 |
+| `MOTOR_PWM_BITS` | 10 | |
+| `BAT_VDIV_MULT` | 3.751f | 39k / (39k + 100k) divider, calibrated 2026-05-17 |
+| `IR_CAL_LF` | 3483 | Front-wall pose, 2026-05-17 |
+| `IR_CAL_RF` | 2702 | Front-wall pose, 2026-05-17 |
+| `IR_CAL_L` | 1800 | Centered, 2026-05-19 |
+| `IR_CAL_R` | 2000 | Centered, 2026-05-19 |
+| `WALL_FRONT_THRESH` | 1400 | LF/RF threshold for wall classification |
+| `WALL_SIDE_THRESH` | 900 | L/R threshold for wall classification |
 
----
-
-### `include/MicromouseMaze.h`
-16×16 flood-fill maze solver.
-
-#### Data layout
-```cpp
-uint8_t walls  [MAZE_SIZE][MAZE_SIZE]; // 4-bit wall mask per cell (N/E/S/W)
-uint8_t flood  [MAZE_SIZE][MAZE_SIZE]; // BFS distance to goal
-bool    visited[MAZE_SIZE][MAZE_SIZE]; // has robot entered this cell?
-```
-
-Wall bit masks:
-```cpp
-WALL_N = 0x01   WALL_E = 0x02   WALL_S = 0x04   WALL_W = 0x08
-```
-
-#### Key methods
-
-| Method | Description |
-|---|---|
-| `reset()` | Clears all walls, marks only the outer border walls |
-| `floodFill()` | BFS from goal cells outward; fills `flood[][]` |
-| `setWall(r,c,dir,present)` | Sets wall bit and mirrors to the adjacent cell |
-| `hasWall(r,c,dir)` | Reads wall bit |
-| `bestDirection(r,c,&dist)` | Returns `AbsDir` with the lowest flood neighbour value |
-| `isGoal(r,c)` | True if the cell is one of the goal cells |
-| `setGoalSingle(r,c)` | Override goal to a single cell (useful for testing) |
-| `printFlood()` | 16×16 grid of flood distances |
-| `printWalls()` | 16×16 grid of wall hex bytes |
-| `printVisited()` | 16×16 grid of `V`/`.` visited marks |
-
-#### Direction enum
-```cpp
-enum AbsDir : uint8_t { DIR_NORTH=0, DIR_EAST=1, DIR_SOUTH=2, DIR_WEST=3 };
-
-// Row/col deltas for each direction:
-// DIR_NORTH: dr=+1, dc= 0
-// DIR_EAST:  dr= 0, dc=+1
-// DIR_SOUTH: dr=-1, dc= 0
-// DIR_WEST:  dr= 0, dc=-1
-```
-
----
-
-### `src/main.cpp`
-Full robot firmware — 701 lines.
-
----
-
-## Robot FSM
-
-```
-         ┌──────────┐
-  reset  │          │
- ──────► │   IDLE   │ ◄─────────────────────────────┐
-         │          │  button press (from STOP)      │
-         └────┬─────┘                                │
-    button    │                                      │
-    press     ▼                                      │
-         ┌──────────┐                                │
-         │CALIBRATE │  IMU bias calibration,         │
-         │          │  encoder + maze reset           │
-         └────┬─────┘                                │
-    2 s delay │                                      │
-              ▼                                      │
-         ┌──────────┐   goal cell                    │
-         │  EXPLORE │ ─────────────► ┌─────────────┐ │
-         │  (loop)  │                │GOAL_REACHED │ │
-         └──────────┘                └──────┬──────┘ │
-                                            │        │
-                                    auto    ▼        │
-                                     ┌──────────┐    │
-                                     │   STOP   │ ───┘
-                                     │          │  button press
-                                     └──────────┘
-```
-
-### State details
-
-| State | Entry condition | What it does |
-|---|---|---|
-| **IDLE** | Power-on / restart | Waits for falling edge on BUTTON_1 |
-| **CALIBRATE** | Button press | Re-calibrates IMU gyro bias (500-sample average), resets encoders, resets maze to border-walls-only, re-floods |
-| **EXPLORE** | After 2 s delay | Per-cell loop (see below) |
-| **GOAL_REACHED** | Robot enters a goal cell | Brakes motors, beeps buzzer 3×, dumps flood + visited maps, transitions to STOP |
-| **RETURN_HOME** | *(placeholder)* | Prints TODO, goes to STOP |
-| **STOP** | Error or goal reached | Motors coast; prints status every 5 s; button press goes back to IDLE |
-
----
-
-## Explore Loop (one iteration per cell)
-
-```
-1. Mark current cell as visited
-2. Check if current cell is a goal cell → GOAL_REACHED
-3. senseWallsAndUpdate()
-   └─ ir.update() → wallFront/Left/Right → maze.setWall() (auto-mirrors)
-4. maze.floodFill()  (BFS re-run with new wall knowledge)
-5. Every 10 steps: printFlood() + printVisited()
-6. maze.bestDirection() → targetDir (lowest flood neighbour)
-7. Compute turn steps = (targetDir − heading + 4) % 4
-   └─ 0 → no turn
-   └─ 1 → turnRight()
-   └─ 2 → turnAround()
-   └─ 3 → turnLeft()
-8. moveForwardOneCell()
-9. Update robotRow / robotCol
-10. stepCount++  → printRobotPosition()
-```
-
----
-
-## Movement Functions
-
-### `moveForwardOneCell()`
-- Resets encoders and IMU yaw
-- 50 Hz PID loop until both encoders reach `TICKS_PER_CELL`
-- Ramps speed down to 50% in the last 20% of the cell
-- IMU yaw correction: `leftMotor.drive(outL − yaw×0.5)` / `rightMotor.drive(outR + yaw×0.5)`
-- 5-second safety timeout
-- Brakes then coasts on completion
-
-### `turnRight()` / `turnLeft()`
-- Resets IMU yaw
-- Spins motors in opposite directions at `PID_TARGET_TURN` PWM
-- Polls `imu.update()` every 2 ms; stops when `|yaw| ≥ 88°`
-- 3-second safety timeout
-
-### `turnAround()`
-- Two consecutive `turnRight()` calls with 100 ms gap
-
----
-
-## PID Controller
-
-One `computePID()` instance per motor (independent state structs `pidLeft`, `pidRight`).
-
-```
-speed  = (ticks − prevTicks) / dt          (ticks/second)
-speed  = 0.5×prevSpeed + 0.5×speed         (low-pass filter, α=0.5)
-error  = target − speed
-I     += error × dt                        (clamped ±1278 — anti-windup)
-D      = (error − prevError) / dt
-output = Kp×error + Ki×I + Kd×D
-```
-
-| Parameter | Default | Notes |
-|---|---|---|
-| `Kp` | 1.5 | Raise until motor responds; back off if oscillating |
-| `Ki` | 0.8 | Raise slowly after Kp is stable |
-| `Kd` | 0.05 | Keep low — encoder quantisation amplifies derivative |
-| `PID_TARGET_EXPLORE` | 800 t/s | ≈45% of N20 free-run at 6V |
-| `PID_TARGET_TURN` | 400 t/s | Slower for accurate IMU turns |
-| PID interval | 20 ms (50 Hz) | Fixed-interval via `micros()` |
-
----
-
-## Physical Constants
-
-| Constant | Location | Default | What to do |
-|---|---|---|---|
-| `WHEEL_DIAMETER` | `PinConfig.h` | 32 mm | Measure your wheel |
-| `TICKS_PER_REV` | `PinConfig.h` | 210 | Count ticks for one full wheel rotation |
-| `CELL_MM` | `main.cpp` | 180.0 mm | Standard competition cell size |
-| `TRACK_WIDTH_MM` | `main.cpp` | 74.0 mm | Measure wheel contact patch spacing |
-| `IR_THRESH_FRONT` | `MicromouseIR.h` | 800 | Set by placing robot at cell-centre facing a wall |
-| `IR_THRESH_SIDE` | `MicromouseIR.h` | 500 | Set by placing robot at cell-centre with side wall |
-| `IR_THRESH_DIAG` | `MicromouseIR.h` | 600 | Set by placing robot at cell-centre with diagonal wall |
-
-Derived constants (computed automatically at compile time):
-```
-MM_PER_TICK    = (π × WHEEL_DIAMETER) / TICKS_PER_REV
-TICKS_PER_CELL = CELL_MM / MM_PER_TICK            ≈ 376 ticks
-TICKS_PER_90°  = (π × TRACK_WIDTH / 4) / MM_PER_TICK
-```
+`CELL_TICKS=1400` and `START_OFFSET_TICKS=322` live in `Tuning.h` (section [F]) — both hand-measured on this chassis. Do NOT derive them from `TICKS_PER_REV`.
 
 ---
 
 ## Serial Telemetry
 
-Every 100 ms the firmware prints two lines:
+Per-loop while in RUN (`TELEMETRY=true` in Tuning.h, [H]):
 ```
-[TELE] step=12  pos=(3,2)  heading=NORTH  yaw=0.3°  Lticks=0  Rticks=0
-[TELE] flood_here=11  best_dir=NORTH(10)  state=EXPLORE
+t=12345 ph=FWD/TRAP tgt=1400 xCmd=+1400 vCmd=+150 avg=+782.5 err=+617.5 v=+148.2 thr=+128 pwmL=+132 pwmR=+124 yaw=+0.21 tL=782 tR=783
+t=13456 ph=SPOT/IMU tgt=90 avg=+45.2 err=+44.8 v=+12.3 thr=+165 pwmL=+165 pwmR=-165 yaw=-45.20 tL=80 tR=-78
 ```
 
-Other tagged prefixes:
+Tagged events:
+
 | Tag | Source |
 |---|---|
-| `[INIT]` | `setup()` hardware initialisation |
-| `[FSM]` | State transitions |
-| `[IDLE]` | Button detection |
-| `[CALIBRATE]` | IMU gyro calibration |
-| `[EXPLORE]` | Per-cell navigation logic |
-| `[SENSE]` | IR reading + wall registration |
-| `[MOVE]` | `moveForwardOneCell()` progress |
-| `[TURN-R]` / `[TURN-L]` | Turn yaw feedback loop |
-| `[PID]` | Per-motor PID values (every 20 ms during movement) |
-| `[GOAL]` | Goal-reached actions |
-| `[STOP]` | Stop-state heartbeat |
-| `[POS]` | Verbose position dump after each cell |
-| `[IMU]` | IMU integration values |
-| `[IR]` | Raw IR sensor values |
-| `[MOTOR]` | Motor drive commands |
-| `[ENC]` | Encoder tick reads |
+| `[IMU]` | Setup-time mpu init / bias result |
+| `[GCAL/AUTO]` | autoCalGyroBeforeStart result |
+| `[SENSE]` | senseAndStoreWalls — sampled wall booleans + raw IR |
+| `[PLAN]` | EXPLORE_THINK — current pose, flood distance, chosen direction |
+| `[FAST]` | Straight-chain fusion — how many cells got chained |
+| `[BACKUP]` | onPhaseActivate computing a PH_REVERSE_TO_BACK target |
+| `[EVENT]` | IR centering edge — wall opened / appeared |
+| `--- STEP END idx=I/N ph=PH reason=... ---` | endPhase advance |
+| `--- MOVE DONE pos=... ---` | script complete, pose committed |
+| `[FSPEED]` | Fast Speed load / save |
+| `[NVS]` | Wall persistence |
+
+`TELEMETRY=false` before competition runs — Serial prints inside the PID loop slow it.
 
 ---
 
-## Quick-Start Checklist
+## Build & Flash
 
-1. **Wire up hardware** and fill in `PinConfig.h` with your actual GPIO numbers.
-2. **Build and flash** — open Serial Monitor at 115200 baud.
-3. **Check `[INIT]`** lines — confirm IMU WHO_AM_I passes, all pins print.
-4. **Place robot on a flat surface**, press BUTTON_1 — watch `[CALIBRATE]` complete.
-5. **Put robot at maze start cell (0,0) facing NORTH**, press button again.
-6. **Watch `[EXPLORE]`** — verify IR walls match physical walls in `[SENSE]` lines.
-7. **Tune IR thresholds** until wall detection is reliable.
-8. **Tune `TRACK_WIDTH_MM`** until `turnRight()` consistently reaches 88–92°.
-9. **Tune PID** — start with `Kp` only (set Ki=0, Kd=0); add Ki once straight-line is stable.
-
----
-
-## Future Work
-
-- `STATE_RETURN_HOME` — re-flood with goal at (0,0), navigate back
-- Speed-run mode — second pass using known wall map at full speed
-- Diagonal movement
-- Battery voltage monitoring via ADC
-- OLED display for status without Serial
-
----
-
-## Code Review — Bugs & Risks Found (2026-04-27)
-
-> This section records findings from a full static analysis of all source files.
-> Fix the **Critical Bugs** before running the robot on a real maze.
-
-### Verdict
-The architecture is sound (FSM + flood-fill BFS + PID + IMU yaw turns), but
-two bugs make the forward-drive yaw correction effectively dead code, one bug
-corrupts PID output for both motors simultaneously, and one bug can break the
-BFS queue on complex mazes.
-
----
-
-### Critical Bugs
-
-#### BUG-1 — Shared `static` inside `computePID()` corrupts both motors
-**File:** `src/main.cpp` — `computePID()` function
-
-```cpp
-static float filteredSpeed = 0.0f;  // NOTE: this static is shared
+```bash
+~/.platformio/penv/bin/pio run -e main -t upload     # production firmware
+~/.platformio/penv/bin/pio device monitor             # 115200 baud
+~/.platformio/penv/bin/pio run -e <env>               # build only
 ```
 
-`filteredSpeed` is `static`, so it is one variable shared across every call
-to `computePID()`. Left motor and right motor both call this function. The
-left motor's filtered speed bleeds into the right motor's PID on the very
-next call and vice versa. Both motors receive wrong proportional and
-derivative terms whenever they differ in speed (i.e., almost always).
-
-**Fix:** Add `filteredSpeed` as a field to `PIDState`:
-```cpp
-struct PIDState {
-    float integral      = 0.0f;
-    float prevError     = 0.0f;
-    long  prevTicks     = 0;
-    float filteredSpeed = 0.0f;  // <-- add this
-};
-```
-Then replace the static line inside `computePID()` with `pid.filteredSpeed = ...`.
+Convention: every code change is followed by an upload, not just a build. The post-upload chime (`tools/notify_upload.py`) confirms the flash completed.
 
 ---
 
-#### BUG-2 — `imu.update()` never called inside `moveForwardOneCell()` — yaw correction is dead code
-**File:** `src/main.cpp` — `moveForwardOneCell()` while-loop
+## Where to make changes
 
-The yaw correction code:
-```cpp
-float yaw = imu.getYaw();
-float yawCorr = yaw * 0.5f;
-leftMotor.drive((int)(outL - yawCorr));
-rightMotor.drive((int)(outR + yawCorr));
-```
-`imu.getYaw()` returns `currentYaw`, which only changes when `imu.update()`
-is called. `imu.update()` is called at the top of `loop()`, but `loop()` is
-blocked for the entire duration of the move. The while-loop inside
-`moveForwardOneCell()` never calls `imu.update()`, so `yaw` is always 0.0°
-(the value after `imu.resetYaw()` at move start). Yaw correction does nothing.
-
-**Fix:** Call `imu.update()` at the top of the PID while-loop:
-```cpp
-while (ticksL < TICKS_PER_CELL && ticksR < TICKS_PER_CELL) {
-    imu.update();   // <-- add this line
-    if (millis() - moveStart > 5000) { ... }
-    ...
-}
-```
+| You want to… | Open |
+|---|---|
+| Change a tuning constant | `include/Tuning.h` |
+| Tune a screen / add an OLED diagnostic | `include/OLED.h` |
+| Change wall-sense thresholds or geometry | `include/PinConfig.h` (thresholds, cal values) + `include/Planner.h` (sense logic) |
+| Change the move-decision rule | `include/Planner.h::buildMoveScript` |
+| Touch motion control behavior (PID, settle, stall) | `src/main.cpp` RUN case |
+| Add a new RunPhase | `include/MotionScript.h` (enum + pusher) + `src/main.cpp` RUN case (executor branch) |
+| Wire up a new sensor | new `include/*.h` + `#include` it in `src/main.cpp` |
+| Persist something to NVS | `include/Persistence.h` |
 
 ---
 
-#### BUG-3 — PID output units do not match `drive()` input units; integral saturates
-**File:** `src/main.cpp` — `computePID()` and `moveForwardOneCell()`
+## Conventions worth knowing
 
-`computePID()` works in **ticks/second** (target ≈ 800 t/s). With `Kp=1.5`
-the raw output at zero speed is `1.5 × 800 = 1200`, which exceeds the
-`drive()` PWM range of `±1023`. `drive()` clamps the value (safe), but the
-integrator (`Ki=0.8`) continues winding up well past the useful range. The
-anti-windup clamp of `±1278` was chosen to match this accidental overflow
-rather than the actual control range, so the integrator provides almost no
-benefit during normal operation.
-
-**Fix (minimal):** Scale the PID output before calling `drive()`:
-```cpp
-const float pwmScale = (float)PWM_MAX / PID_TARGET_EXPLORE; // 1023/800 ≈ 1.28
-leftMotor.drive( (int)((outL - yawCorr) * pwmScale));
-rightMotor.drive((int)((outR + yawCorr) * pwmScale));
-```
-Also tighten anti-windup clamp to `±(PWM_MAX / Ki)`.
-
----
-
-#### BUG-4 — BFS queue in `floodFill()` mixes modulo-wrapped and bare indexing
-**File:** `include/MicromouseMaze.h` — `floodFill()`
-
-Goal cells are enqueued without `% MAZE_CELLS`:
-```cpp
-qRow[tail] = goalRow[i];   // bare index — safe only while tail < 256
-qCol[tail] = goalCol[i];
-tail++;
-```
-BFS expansion does use `tail % MAZE_CELLS`. When `tail` (uint16_t) grows
-beyond 255, the head/tail comparison `head != tail` can fail to terminate
-correctly because the indices are no longer in the same numeric domain.
-For the default 4-goal seeding this cannot overflow, but the BFS itself
-can enqueue all 256 cells, pushing `tail` to ~260 while `head` is still
-below 256 — the loop may then spin far too long or terminate early.
-
-**Fix:** Use `% MAZE_CELLS` consistently for every enqueue and dequeue, or
-use a power-of-two ring buffer (size 256, mask 0xFF).
-
----
-
-### Design Risks (not outright bugs, but will hurt real-world performance)
-
-| # | Location | Issue |
-|---|---|---|
-| R1 | `turnRight()` / `turnLeft()` | No ramp-down before target angle. At 400 PWM, mechanical overshoot is typically 5–15°. Add a slow zone when `|yaw| > 75°`. |
-| R2 | `wallFront()` in `MicromouseIR.h` | Requires **both** front sensors to trigger (`&&`). One dirty or misaligned sensor causes missed front walls and the robot drives into them. Consider `||` or a dedicated single front sensor. |
-| R3 | All motion functions | Entire `loop()` is blocked during movement. Top-level `imu.update()` and `printTelemetry()` do not run. All real-time updates must be inlined into motion functions (BUG-2 is a direct consequence of this). |
-| R4 | `IR_THRESH_*` in `MicromouseIR.h` | Placeholder values (800/600/500). Must be calibrated for your specific hardware and maze wall material before exploration is reliable. |
-| R5 | Everywhere | Every `drive()`, `getTicks()`, PID tick, and IR sample prints to Serial. At 115200 baud this adds milliseconds of blocking UART time per PID cycle, skewing `dt` and risking cell overshoot. Comment out verbose prints before any speed run. |
-| R6 | `turnAround()` | Implemented as two `turnRight()` calls. Works because `turnRight()` resets yaw internally. Correct but fragile — document this implicit dependency. |
-
----
-
-### What is correct and can be trusted
-
-- FSM state transitions and button debounce logic
-- Flood-fill BFS algorithm (correct aside from BUG-4 edge case)
-- Wall mirroring in `setWall()` — neighbour cell always updated symmetrically
-- Outer border wall initialisation in `reset()`
-- Encoder direction detection — B-pin sampled on A-pin rising edge
-- Differential IR reading — ambient subtraction cancels background IR correctly
-- Motor `drive()` minimum-power mapping avoids stall zone
-- Turn direction calculation: `(targetDir − heading + 4) % 4`
-- Safety timeouts in all motion functions (3 s turn, 5 s forward)
-- `imu.resetYaw()` called correctly before each turn and each forward move
-
-
-
-
-Bash(~/.platformio/penv/bin/pio run -e main 2>&1 | tail -8)
-  ⎿  Merged 2 ELF sections                                                                            
-     Successfully created esp32s3 image.                                                              
-     ========================= [SUCCESS] Took 2.72 seconds =========================                  
-     … +5 lines (ctrl+o to expand)                                                                    
-                                                                                                      
-⏺ Clean. Web calibration flow (scroll to bottom of page):
-                                                                                                      
-  ┌─────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐   
-  │        Step         │          What to do          │             What it measures             │
-  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤   
-  │ 1 Open Space        │ Robot on table, no walls     │ Ambient no-wall baseline, warns if > 30  │
-  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
-  │ 2 Side Wall Centers │ Robot in corridor, walls     │ Sets L45_CENTER + R45_CENTER             │   
-  │                     │ left+right                   │                                          │   
-  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤   
-  │ 3 Front Wall        │ Robot facing wall ~5cm       │ Verifies LF/RF sensors work              │   
-  │ (optional)          │                              │                                          │
-  ├─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤   
-  │ Apply               │ Click button                 │ POSTs centers + auto-computed threshold  │
-  │                     │                              │ to /config                               │   
-  └─────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘   
-   
-  Threshold auto-computed as midpoint between max no-wall reading and min wall reading. "Apply" button
-   stays disabled until steps 1+2 complete.                 
-                                                                                                      
-  Right motor: reflash with new 100 PWM diagnostic — if still dead at 100, it's wiring (check IN3/IN4 
-  continuity to DRV8833, check MOTOR_R_INV polarity).
-                                                                                                      
-✻ Crunched for 2m 53s                                       
+- **Single translation unit.** `build_src_filter = +<main.cpp>` means `src/main.cpp` is the only `.cpp` compiled into `[env:main]`. File-scope `static` in headers works because each header is text-included exactly once.
+- **`extern MicromouseMaze maze;`** in `Persistence.h` / `Planner.h` points at the single definition in `main.cpp`. Same pattern for `leftEnc`/`rightEnc` in `OLED.h`.
+- **Right rotation → `yawDeg < 0`.** Pivot/spot progress = `−yawDeg` for right turns, `+yawDeg` for left. The forward-leg yaw-hold sign in main.cpp compensates with a leading minus.
+- **All right-tick distance math goes through `rTicks()`**, not `rightEnc.getTicks()`.
+- **`yawDeg` is reset to 0 at every `phaseEnter`** — each leg has its own "straight ahead".
+- **No hooks (`--no-verify`, etc.) on git commits.** No FastLED, no FreeRTOS tasks, no WiFi in `[env:main]`.

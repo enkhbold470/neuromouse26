@@ -4,13 +4,13 @@
 Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3** microcontroller. The firmware is built using the **Arduino framework** within the **PlatformIO** ecosystem. It implements a full control stack, including motor driving, encoder feedback, IR wall sensing, PID-based motion control, and a flood-fill (BFS) maze solver.
 
 ### Key Technologies
-- **MCU:** Universal Portability (Currently ESP32-S3 but written in standard Arduino C++)
-- **Framework:** Arduino / PlatformIO
-- **Motor Control:** LEDC 10-bit PWM (0-1023 scale) driving DRV8833 @ **200 Hz** (`MOTOR_PWM_FREQ_HZ`, max torque on this chassis; audible whine)
-- **Feedback:** Single-channel rising-edge encoders. ISR samples pin-B level for direction (`MicromouseEncoder.h`).
-- **Sensing:** 4-sensor IR array (LF, L45, R45, RF) for wall detection and centering
-- **Navigation:** 16x16 Flood-fill BFS algorithm
-- **UI:** Standard `tone()` buzzer, basic button
+- **MCU:** ESP32-S3 (Xtensa LX7 dual-core, 240 MHz), Arduino C++ throughout.
+- **Framework:** Arduino on PlatformIO (stock `espressif32`, Arduino 2.x).
+- **Motor Control:** LEDC 10-bit PWM (0–1023) driving DRV8833 @ **200 Hz** (`MOTOR_PWM_FREQ_HZ`, max torque on this chassis; audible whine).
+- **Feedback:** ESP32-S3 PCNT 4× quadrature decode (`MicromouseEncoderPCNT.h`). Both encoders constructed with `inverted=true`; right ticks pass through `rTicks()` with `RIGHT_ENC_SCALE`.
+- **Sensing:** 4-sensor IR array (LF / L / R / RF). LF/RF aim ~30° forward-outward for front-detect + look-ahead; L/R aim ~90° perpendicular for true side reads (2026-05-19 geometry change).
+- **Navigation:** 16×16 flood-fill BFS (`MicromouseMaze.h`), active 6×3 sub-region with goal `(5,2)`. NVS-persisted walls (namespace `mm26`, key `walls`).
+- **UI:** 128×64 SSD1306 OLED + single tactile button. Encoder spin used for menu scroll + Fast Speed adjustment.
 
 ---
 
@@ -33,35 +33,64 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 
 ## Technical Architecture
 
-### Core Modules (in `include/`)
-- **`MicromouseMotor`**: DRV8833 wrapper using LEDC PWM (Arduino-2.x `ledcSetup` + `ledcAttachPin` API). `drive(±speed)` for fast-decay forward/reverse, `brake()` = half-duty slow decay, `coast()` = both INs LOW.
-- **`MicromouseEncoder`**: Single-channel rising-edge ISR encoder. Direction inferred by sampling pin-B level in the ISR. Up to 4 instances via static dispatch (`isr0..isr3`). ISRs in flash, not IRAM.
-- **`MicromouseMaze`**: 16×16 grid + flood-fill BFS + `bestDirectionBiased(r, c, heading, &dist)`. Goal defaults to classical 4-cell center; `main.cpp::setupMaze()` overrides to `setGoalSingle(5, 2)`.
-- **`IRCalibration`**: per-cm IR LUT and `estimateFrontDistMM(lf, rf)` piecewise-linear interpolation.
-- **`PID`** (`include/PID.h`): generic templated PID helper. Not used by the production motion stack — `driveChain()` and `doTurn()` inline their own gain math. Available for new code if needed.
-- **`WifiDebug`** (`include/WifiDebug.h`): HTTP debug server. **NOT `#include`d** in current `main.cpp` — dormant. Re-wire only if you intentionally bring WiFi back.
+### Module layout (`include/`)
+The codebase is split into header-only modules; `src/main.cpp` text-includes each. Full inventory in `include/README`. Summary:
 
-### Movement Logic
-- **Forward Drive (`driveChain` in main.cpp):** cascaded velocity-PI inner loop at 200 Hz (`VPID_LOOP_US=5000`).
-  - speed PI on `(vL+vR)/2` → `CELL_TARGET_MMS=250 mm/s` (`VPID_LOOP_KP=1.0`, `VPID_LOOP_KI=1.5`)
-  - straight-line PI on `(curL−curR)` tick mismatch → 0 (`VPID_STRAIGHT_KP=6.0`)
-  - feed-forward = `target / kV_avg`, battery-comp-scaled by `NOMINAL_VBAT / Vbat`
-  - lateral bias adds `POS_KP×IR_pos_err + YAW_KP×yaw` directly to L/R PWM
-- **Cell-boundary stop:** IR-anchored when a front wall is in range (`CELL_ANCHOR_MM=50`), else encoder-anchored at `TICKS_PER_CELL`. Hard crash brake at `CRASH_BRAKE_MM=30`. After stop, optional `squareToFrontWall()` if `35 < fdMM < 80`.
-- **Right encoder scaling:** `rTicks() = rightEnc.getTicks() * RIGHT_ENC_SCALE` (currently `1.0135f`, auto-calibrated 2026-05-17). Always use `rTicks()` — not `rightEnc.getTicks()` — for distance math.
-- **Pivot Turns:** MPU-6500 gyro-integrated, trapezoidal ω profile + KFF + PD on yaw. `TURN_PEAK_OMEGA_DPS=360`, `TURN_ACCEL_DPS2=1800`. No encoder-tick path. `TURN_TIMEOUT_MS=4000`. `TURN_PWM=200` is a saturation cap only.
-- **Explore Loop:** `driveChain()` runs continuous, sensing walls + flood-filling at each cell boundary, returning only on direction change or goal.
-- **Default maze:** 6 rows × 3 cols, goal at `(5,2)`. Allocated inside the 16×16 array (bottom-left corner). Geometry constants in `main.cpp`, not configurable at runtime.
+**Project headers (mm26-specific):**
+- `Tuning.h` — every `constexpr` knob (sections [A]–[F], [H]). `BASE_BREAKAWAY_PWM` is the master power knob; all stiction floors derive from it.
+- `IMU.h` — MPU-6500 register stack, bias capture, `updateYaw()`. Owns `yawDeg`, `gzFilt`, `yawTargetDeg`, `imuReady`.
+- `IRSensors.h` — `PAIRS`, `irVal`, EMA state, `readIR` / `sampleIR`.
+- `Battery.h` — Vbat ADC + 6.4–8.4 V → 0–100 %.
+- `Pose.h` — robot pose + mode flags + `fastRunCruiseTps` + `pendingOffsetTicks`.
+- `MotionScript.h` — `RunPhase` / `TurnDir` enums, `PhaseStep`, `script[]`, `scriptPush*` helpers.
+- `Persistence.h` — NVS save/load (walls + fast-run speed).
+- `Planner.h` — `setupMaze`, `senseAndStoreWalls`, `buildMoveScript` (+ fast-run straight-chain fusion).
+- `OLED.h` — U8G2 instance + menu + run + diag screens + auto gyro-cal.
 
-### Hardware Constants (Adjust in `include/PinConfig.h`)
-- `WHEEL_DIAMETER`: 33.4mm
-- `TICKS_PER_REV`: 205.0f — empirical (raw ≈ 14 PPR × 30 gear = 420, halved by rising-edge-only ISR + 200µs filter at running speed). Do NOT "fix" to 210 or 420 — distance math will break.
-- `TICKS_PER_CELL`: 350 — tape-validated, **not** computed from `MM_PER_TICK`.
-- `WHEEL_TRACK_MM`: 74.0mm
-- PWM is 10-bit (0-1023). `MOTOR_PWM_MAX` = 1023, `MOTOR_PWM_FREQ_HZ` = 200.
-- `BAT_VDIV_MULT` = 3.751f (calibrated 2026-05-17; divider 39k / (39k+100k)).
-- IR cal defaults (PinConfig.h): `IR_CAL_LF=3483`, `IR_CAL_RF=2702` (dead-end 32-sample mean 2026-05-17); `IR_CAL_L=1800`, `IR_CAL_R=2000` (centered-in-cell, 4.5 cm to each side wall, 2026-05-19).
-- Wall thresholds: `WALL_SIDE_THRESH=900`, `WALL_FRONT_THRESH=1400`.
+**Library headers (consumed, not modified normally):**
+- `PinConfig.h` — pin numbers, PWM/IR caps, `RIGHT_ENC_SCALE`, `BAT_VDIV_MULT`, IR cal defaults, wall thresholds (`WALL_SIDE_THRESH`, `WALL_FRONT_THRESH`).
+- `MicromouseMotor.h` — DRV8833 wrapper (LEDC PWM). `drive(±speed)` fast-decay, `brake()` half-duty slow-decay, `coast()` both LOW.
+- `MicromouseEncoderPCNT.h` — ESP32-S3 PCNT 4× quadrature decoder.
+- `MicromouseMaze.h` — 16×16 grid + flood-fill BFS + `bestDirectionBiased(r, c, heading, &dist)`.
+- `IRCalibration.h` — per-cm IR LUT and `estimateFrontDistMM(lf, rf)` piecewise-linear interp.
+- `MicromouseEncoder.h` — legacy ISR encoder (not used by main).
+- `PID.h` — generic PID helper (unused by main motion stack).
+- `WifiDebug.h` — dormant HTTP debug server. **NOT `#include`d** in `main.cpp`.
+
+### Movement Logic — phase-script over a position-PID core
+A "move" is a list of `PhaseStep`s (max 8) built by `buildMoveScript` (in `Planner.h`). The RUN state in `main.cpp::loop()` walks the script step-by-step, calling `phaseEnter()` between steps (resets per-phase encoder/yaw snapshots, fires `onPhaseActivate()`).
+
+- **`PH_FORWARD`** — position-PID with a trapezoidal velocity command:
+  - `vAccel = sqrt(2·a·xDone)`, `vDecel = sqrt(2·a·xRem)`, `vAbsCmd = min(vCruise, vAccel, vDecel)`.
+  - `vCruise` is `FWD_V_CRUISE_TPS` in explore mode, `fastRunCruiseTps` (NVS-persisted, menu-editable) in fast run.
+  - Feedforward = `dirSign × (FWD_STICTION_FF + FWD_KV_SLOPE × vAbsCmd)`; PID closes lag on `posErr = runTarget − avg`.
+  - Bias for steering = `IR centering corr + (tL−tR)·BALANCE_KP + yaw hold (-YAW_HOLD_KP·yawDeg)`.
+  - `pwmL = throttle − bias`, `pwmR = throttle + bias`. Reverse targets work natively (signed `runTarget`).
+- **`PH_SPOT`** — both wheels opposite; IMU-yaw-PID on `dy = yawDeg − phaseStartYawDeg`. PWM = `±throttle`.
+- **`PH_PIVOT`** — single-wheel pivot. Kept callable but no longer pushed by `buildMoveScript` (R-pivot kept clipping walls).
+- **`PH_ALIGN_FRONT`** — slow creep until `irVal[0] ≈ ALIGN_LF_TARGET` and `irVal[3] ≈ ALIGN_RF_TARGET` at 37.5 mm gap. Used in dead-end exit.
+- **`PH_REVERSE_TO_BACK`** — defers its tick target to `onPhaseActivate()` (samples front IR there), then reclassifies as `PH_FORWARD` so the standard PID drives the reverse. Not pushed in the current flow; available for future re-anchors.
+
+Stall-escape, settle-band exit, and SETTLE timing are shared across all phases via the `imuMode` gain selector (encoder gains for forward, yaw gains for rotation).
+
+### Fast run = explore semantics + faster cruise + straight-chain fusion
+Fast run differs from explore in two ways only:
+1. `vCruise = fastRunCruiseTps` (runtime-adjustable, NVS-persisted) instead of `FWD_V_CRUISE_TPS`.
+2. `buildMoveScript` fuses consecutive straight cells into one `PH_FORWARD` so the trapezoid stretches accel→cruise→decel over the whole chain.
+
+`endPhase()` always brakes at settle for both modes — there is no continuous-roll across cell boundaries. (A prior `fastFwdRoll` flag did skip the brake; it broke R-turns because the right motor couldn't reverse against forward inertia. Don't re-introduce it.)
+
+### Hardware Constants (in `include/PinConfig.h` + `include/Tuning.h`)
+- `WHEEL_DIAMETER` = 33.4 mm (PinConfig.h).
+- `CELL_TICKS` = **1400** (Tuning.h, [F]) — hand-measured by rolling 180 mm. Do NOT derive from `TICKS_PER_REV`.
+- `START_OFFSET_TICKS` = **322** (Tuning.h, [F]) — first-leg offset from rear-against-wall pose.
+- `WHEEL_TRACK_MM` = 80 mm (PinConfig.h).
+- PWM is 10-bit (0–1023). `MOTOR_PWM_MAX` = 1023, `MOTOR_PWM_FREQ_HZ` = 200.
+- `BAT_VDIV_MULT` = 3.751f.
+- `RIGHT_ENC_SCALE` = 1.0135f. All distance math goes through `rTicks()`.
+- IR cal (PinConfig.h): `IR_CAL_LF=3483`, `IR_CAL_RF=2702` (dead-end pose, 2026-05-17); `IR_CAL_L=1800`, `IR_CAL_R=2000` (centered, 2026-05-19).
+- Wall thresholds (PinConfig.h): `WALL_SIDE_THRESH=900`, `WALL_FRONT_THRESH=1400`.
+- Dead-end align targets (Tuning.h, [E]): `ALIGN_LF_TARGET=3660`, `ALIGN_RF_TARGET=2940` at 37.5 mm gap.
 
 ---
 
@@ -75,23 +104,25 @@ Micromouse26 is an autonomous maze-solving robot project based on the **ESP32-S3
 - **Standalone Tests:** The `test/` directory contains numerous standalone `.cpp` files for validating individual subsystems (e.g., `ir-test.cpp`, `mpu6500.cpp`, `ws2812b.cpp`).
 - **Validation Workflow:** Before running a full maze, it is recommended to validate hardware using the scripts in `test/`.
 
-### Known Issues & Risks (as of 2026-05-17)
-- **Blocking Loops:** `driveChain()`, `advanceToCellCenter()`, `doTurn()` block the main loop fully. No FreeRTOS task split. `WifiDebug.h` exists but is not `#include`d.
-- **Baud Rate:** Serial prints inside the 200 Hz inner control loop will slow it. Comment out debug prints before speed runs.
-- **`TICKS_PER_REV=205` is empirical, not theoretical.** Do NOT change to 210 or 420 — breaks distance and cell-pitch math.
-- **`TICKS_PER_CELL=350` is tape-validated**, not derived. Re-measure with a tape against an actual cell rather than recomputing from `MM_PER_TICK`.
-- **Right-encoder scaling:** `RIGHT_ENC_SCALE=1.0135f` (re-enabled 2026-05-17, value from on-device auto-cal). All distance reads must go through `rTicks()` wrapper.
-- **Turn convergence:** `doTurn()` reports `OK`/`FAIL` via Serial; main.cpp sets `crashFlag` on FAIL and refuses to issue further `driveChain()` until reset. Hold phase is the only place `TURN_MIN_HOLD_PWM=260` is applied — do not turn it into an always-on stiction floor (fights the ramp).
-- **L/R perpendicular geometry (changed 2026-05-19):** L and R now aim ~90° sideways, not 30° forward-bias. Side reads no longer pick up the front wall at close range, so the old `driveChain()` "filter side samples when `frontMM < 60`" workaround is obsolete — side reads are valid all the way to cell-center stop. LF/RF still 30° forward-outward and remain the only front-detect path. `IR_CAL_L=1800` / `IR_CAL_R=2000` re-captured 2026-05-19 against centered-in-cell pose; `IR_CAL_LF` / `IR_CAL_RF` unchanged.
+### Known Issues & Risks (as of 2026-05-20)
+- **Blocking `loop()`:** Everything runs from a single `loop()` — no FreeRTOS task split. The RUN state's PID loop is real-time-paced via `micros()`. `WifiDebug.h` exists but is not `#include`d.
+- **Baud Rate:** Serial prints inside the RUN loop will slow it. `TELEMETRY=true` in `Tuning.h` enables them; set to false before competition runs.
+- **`CELL_TICKS=1400` is hand-measured**, not derived. Re-measure by hand-rolling 180 mm if wheels/tires change.
+- **`RIGHT_ENC_SCALE=1.0135f`** auto-calibrated 2026-05-17. All right-encoder distance reads must go through the `rTicks()` wrapper in `main.cpp`.
+- **L/R perpendicular IR geometry (2026-05-19):** L and R aim ~90° sideways (true side reads); LF/RF still ~30° forward-outward for front-detect. `IR_CAL_L=1800` / `IR_CAL_R=2000` captured at centered-in-cell pose.
+- **PH_PIVOT is dead-but-callable:** `scriptPushPivot` and the executor branch are preserved, but `buildMoveScript` no longer pushes pivots (R-pivot was clipping walls). Don't re-enable without re-tuning corner geometry.
+- **No `fastFwdRoll`:** Fast run brakes at every FWD-settle, exactly like explore. If you re-introduce a continuous-roll optimization, ensure motors are stationary before any `PH_SPOT` — otherwise R-turns will pivot around an inertia-stuck right wheel.
 
 ---
 
 ## File Structure
-- `src/main.cpp`: Main firmware entry point and logic.
-- `platformio.ini`: Project configuration and dependencies.
-- `test/`: Subsystem validation scripts.
-- `docs/`: Technical documentation and design decisions (may vary from `src/main.cpp`).
-- `OVERVIEW.md`: High-level summary and bug tracking.
+- `src/main.cpp` — hardware objects, IR-centering PID, `setup()`, `loop()` state machine (~700 lines).
+- `include/` — 10 header-only modules (full inventory in `include/README`).
+- `platformio.ini` — env definitions. `[env:main]` uses `build_src_filter = +<main.cpp>`.
+- `test/` — standalone validation sketches (one `.cpp` per env, each selected via its own `build_src_filter`).
+- `docs/` — older design notes; may lag the code.
+- `OVERVIEW.md` — high-level architecture summary.
+- `CLAUDE.md` / `GEMINI.md` — agent-facing project guides.
 
 
 
@@ -112,7 +143,7 @@ You are working on a **16×16 micromouse robot**. Assume this hardware unless to
 | **Framework** | Arduino on PlatformIO. This repo uses **stock `platform = espressif32`** (Arduino 2.x / ESP-IDF 4.x), NOT the `pioarduino` fork — so LEDC calls are 2.x style (`ledcSetup`+`ledcAttachPin`), not 3.x (`ledcAttach`). |
 | **Motor Driver** | DRV8833 dual H-bridge — one driver per motor (IN1/IN2 per channel, PWM on both pins for speed + brake) |
 | **Motors** | N20 brushed DC gear motors — **1:30 gear ratio, 500 RPM @ 6V**, running on 2S LiPo (7.4V nominal) |
-| **Encoders** | Single-channel magnetic encoders on motor shaft (~14 PPR × 30 = ~420 raw ticks/output-rev). Rising-edge ISR samples pin-B level for direction. Effective `TICKS_PER_REV=205` at running speed (200µs noise filter halves count). Right encoder scaled by `RIGHT_ENC_SCALE=1.0135f` via `rTicks()` wrapper. |
+| **Encoders** | Magnetic quadrature encoders on motor shaft. Decoded via the ESP32-S3 PCNT peripheral with 4× decoding in `MicromouseEncoderPCNT.h` (both instances constructed with `inverted=true`). `CELL_TICKS=1400` is hand-measured per 180 mm cell. Right encoder scaled by `RIGHT_ENC_SCALE=1.0135f` via `rTicks()` wrapper. The legacy ISR-encoder header (`MicromouseEncoder.h`) is kept for old test sketches but unused by `main`. |
 | **IR Sensors** | 4-sensor array: LF, L, R, RF. **LF/RF aim ~30° forward-outward (front-detect + look-ahead); L/R aim perpendicular (~90° sideways) for true side-wall reads — changed 2026-05-19 from prior 30° forward-bias.** Ambient-subtracted differential reads in `readIR()`. |
 | **Navigation** | 16×16 flood-fill BFS (`MicromouseMaze`); active maze region is 6×3 with goal `(5,2)`. NVS-persisted walls under namespace `mm26`, key `walls`. |
 | **LEDs** | WS2812B RGB on `WS2812_DATA=GPIO3` (unused by main firmware; test in `test/ws2812b.cpp`). |
@@ -124,14 +155,14 @@ You are working on a **16×16 micromouse robot**. Assume this hardware unless to
 
 **Always follow these rules in every response:**
 
-1. **No blocking delays in control loops** — `driveChain()` paces itself via `micros()` against `VPID_LOOP_US`. Use `millis()`/`micros()`, not `delay()`, inside any new control loop.
-2. **ISR discipline** — encoder ISRs in `MicromouseEncoder.h` are flat (no `this` ptr) and live in flash (no `IRAM_ATTR`, deliberate — firmware never writes flash at runtime). Shared counters are `volatile`. No Serial or heap inside ISRs.
-3. **PWM via LEDC, Arduino-2.x API** — `ledcSetup(ch, freq, bits)` + `ledcAttachPin(pin, ch)` + `ledcWrite(ch, duty)`. This project: **200 Hz, 10-bit** (`MOTOR_PWM_FREQ_HZ=200`, `MOTOR_PWM_BITS=10`). 200 Hz empirically gave best stiction-breaking torque on this DRV8833 + N20 + heavy-chassis combo. If you change it, **recalibrate kV/KV_L/R** on-device with `test/velocity-pid-ble.cpp` and paste new values into `PinConfig.h`.
+1. **No blocking delays in control loops** — the RUN executor in `main.cpp::loop()` paces its PID via `micros()`. Use `millis()`/`micros()`, not `delay()`, inside any new control path.
+2. **Encoders via PCNT** — `MicromouseEncoderPCNT.h` uses the ESP32-S3 PCNT peripheral for 4× quadrature decode. No ISRs in the production path. (The legacy ISR encoder header is preserved for old test sketches.) All right-encoder distance math goes through `rTicks()` (`main.cpp`).
+3. **PWM via LEDC, Arduino-2.x API** — `ledcSetup(ch, freq, bits)` + `ledcAttachPin(pin, ch)` + `ledcWrite(ch, duty)`. This project: **200 Hz, 10-bit** (`MOTOR_PWM_FREQ_HZ=200`, `MOTOR_PWM_BITS=10`). 200 Hz empirically gave best stiction-breaking torque on this DRV8833 + N20 + chassis combo.
 4. **PlatformIO `platformio.ini` first** — always include the relevant `[env:*]` block when introducing a new library or new test sketch.
-5. **Motor control** — `MicromouseMotor::drive(speed)` does fast-decay forward/reverse with the inactive IN held LOW. `brake()` slow-decays at half PWM (full HIGH was found to slam to a stop in the wrong direction).
-6. **No magic numbers** — every pin, threshold, and tuning constant lives as `constexpr` in `PinConfig.h`. Inline controller K's inside a single function (e.g., `POS_KP_PWM` in `driveChain()`) are OK if they're truly local-only.
-7. **Single `loop()` for now** — main firmware runs everything in `loop()`. No FreeRTOS task split today; the velocity-PI inner loop and turn loops are already real-time-paced via `micros()`.
-8. **Interrupt pins** — encoder A on GPIO 38 (L) and 21 (R). All four IR sensors are ADC inputs on GPIO 10/4/1/7. JTAG (GPIO 39-42) is in use (`BUTTON_1=42`, `ENC_L_B=39`) — don't rely on JTAG.
+5. **Motor control** — `MicromouseMotor::drive(speed)` does fast-decay forward/reverse with the inactive IN held LOW. `brake()` slow-decays at half PWM (full HIGH slammed to a stop in the wrong direction).
+6. **No magic numbers** — every pin lives in `PinConfig.h`; every tuning constant lives in `Tuning.h`. Inline controller K's that are local to a single function (e.g., `IR_CONF_LO`/`IR_EDGE_DELTA` inside the RUN executor) are OK if they're truly local-only.
+7. **Single `loop()` for now** — `main.cpp::loop()` runs the entire state machine. No FreeRTOS task split today.
+8. **Interrupt pins** — encoder A on GPIO 38 (L) and 21 (R). All four IR sensors are ADC inputs on GPIO 10/4/1/7. JTAG (GPIO 39–42) is in use (`BUTTON_1=42`, `ENC_L_B=39`) — don't rely on JTAG.
 
 ***
 
@@ -188,21 +219,18 @@ void drive(int speed /* -1023..+1023 */) {
 // HIGH brake was found to drift in the wrong direction at stop.
 ```
 
-### Encoder ISR — direction from pin-B level on rising A (as in `MicromouseEncoder.h`)
+### Encoder — PCNT 4× quadrature (as used by `main`, `MicromouseEncoderPCNT.h`)
 ```cpp
-// Flat ISRs, one per encoder, no `this` ptr (avoids Xtensa l32r literal issues).
-// Counters live in flash (no IRAM_ATTR) — safe because firmware never writes
-// flash at runtime.
-namespace _mmenc {
-    static volatile long c0 = 0;
-    static uint8_t pinB0 = 0xFF;
-    inline void isr0() {
-        c0 += (pinB0 != 0xFF && digitalRead(pinB0)) ? -1 : 1;
-    }
-}
-// setup():
-attachInterrupt(digitalPinToInterrupt(ENC_L_A), _mmenc::isr0, RISING);
+// Production path: no ISRs. PCNT hardware unit counts on both edges of both
+// channels (4×). Both encoders are constructed with inverted=true so that
+// driveForward() yields positive ticks.
+MicromouseEncoderPCNT leftEnc (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/true);
+MicromouseEncoderPCNT rightEnc(PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/true);
+
+// All right-tick distance math must go through rTicks() in main.cpp:
+static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
 ```
+The legacy single-channel rising-edge ISR encoder (`MicromouseEncoder.h`) is preserved for old test sketches that haven't been ported. The production firmware does **not** use it.
 
 ### PID Template (velocity control)
 ```cpp
