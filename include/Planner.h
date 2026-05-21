@@ -102,7 +102,6 @@ static void buildMoveScript(AbsDir bestDir) {
     if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
-        int extraCells = 0;
         int safetyCap = MAZE_ROWS * MAZE_COLS;
         while (safetyCap-- > 0) {
             if (rr == GOAL_ROW && cc == GOAL_COL) break;
@@ -117,15 +116,12 @@ static void buildMoveScript(AbsDir bestDir) {
 
             script[scriptLen - 1].target += CELL_TICKS;
             rr = nr; cc = nc;
-            extraCells++;
         }
         plannedRow     = rr;
         plannedCol     = cc;
         plannedHeading = hh;
-        if (extraCells > 0) {
-            Serial.printf("[FAST] chained +%d cells -> (%d,%d) hd=%d\n",
-                          extraCells, rr, cc, (int)hh);
-        }
+        // [FAST chained] print intentionally omitted — fast run keeps serial
+        // quiet so the control loop isn't blocked by UART writes at 115200 baud.
     }
 }
 

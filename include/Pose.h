@@ -25,6 +25,10 @@ static bool exploreMode = false;
 static bool fastRunMode = false;
 static bool returnHomeMode = false;    // after explore reaches goal, flips to head back to start
 
+// Set when the final 180° celebration spin has been pushed. Next time
+// EXPLORE_THINK runs, transition straight to GOAL instead of sensing/planning.
+static bool finalTurnPending = false;
+
 // Runtime-adjustable fast-run cruise speed (NVS-persisted).
 static float fastRunCruiseTps = FAST_RUN_CRUISE_TPS_DEFAULT;
 

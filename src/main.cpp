@@ -237,7 +237,7 @@ void loop() {
                 setupMaze();
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
-                exploreMode = true; fastRunMode = false; returnHomeMode = false;
+                exploreMode = true; fastRunMode = false; returnHomeMode = false; finalTurnPending = false;
                 autoCalGyroBeforeStart();
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- EXPLORE START (round trip) ---");
@@ -253,7 +253,7 @@ void loop() {
                 }
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
-                exploreMode = false; fastRunMode = true; returnHomeMode = false;
+                exploreMode = false; fastRunMode = true; returnHomeMode = false; finalTurnPending = false;
                 autoCalGyroBeforeStart();
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- FAST RUN START ---");
@@ -341,6 +341,15 @@ void loop() {
     }
 
     case EXPLORE_THINK: {
+        // Final celebration spin completed → transition to GOAL.
+        if (finalTurnPending) {
+            finalTurnPending = false;
+            stopMotors();
+            oledTerminal("DONE!", returnHomeMode ? "home" : "goal");
+            rgbStateT0 = millis();
+            state = GOAL;
+            break;
+        }
         // Zero heading reference at every cell arrival to bound gyro drift
         // accumulation to a single move.
         yawDeg       = 0.0f;
@@ -354,23 +363,36 @@ void loop() {
                 // First leg done — flip the goal to home (0,0) and keep
                 // exploring back. Walls accumulated on the return leg fill
                 // in anything missed on the way out.
+                //
+                // Save NVS immediately so a crash during return-home doesn't
+                // lose the forward map. The home-arrival save below will
+                // overwrite with the more complete round-trip map.
                 Serial.printf("--- FWD GOAL reached (%d,%d), returning home ---\n",
                               robotRow, robotCol);
+                if (nvsSaveWalls()) Serial.println("[NVS] walls saved (forward leg done)");
                 maze.setGoalSingle(START_ROW, START_COL);
                 returnHomeMode = true;
                 // Fall through into floodFill / planning with the new goal.
             } else {
-                stopMotors();
+                // Reached the final destination (fast-run goal, or explore
+                // home after round trip). Spin 180° in place, then GOAL.
                 if (exploreMode) {
                     // Restore the forward goal in the maze so the saved
                     // walls are paired with the right target for fast run.
                     maze.setGoalSingle(GOAL_ROW, GOAL_COL);
                     if (nvsSaveWalls()) Serial.println("[NVS] walls saved (round trip done)");
                 }
-                Serial.printf("--- DONE at (%d,%d) ---\n", robotRow, robotCol);
-                oledTerminal("DONE!", returnHomeMode ? "home" : "goal");
-                rgbStateT0 = millis();
-                state = GOAL;
+                Serial.printf("--- DONE at (%d,%d), spinning 180 ---\n",
+                              robotRow, robotCol);
+                oledTerminal("DONE!", "spin");
+                scriptReset();
+                scriptPushSpot(TURN_RIGHT, 180.0f);
+                plannedRow     = robotRow;
+                plannedCol     = robotCol;
+                plannedHeading = (robotHeading + 2) % 4;
+                finalTurnPending = true;
+                scriptKick();
+                state = RUN;
                 break;
             }
         }
@@ -386,8 +408,10 @@ void loop() {
             state = CRASH;
             break;
         }
-        Serial.printf("[PLAN] (%d,%d,%c) dist=%d → %c\n",
-                      robotRow, robotCol, "NESW"[robotHeading], bestDist, "NESW"[bestDir]);
+        if (!fastRunMode) {
+            Serial.printf("[PLAN] (%d,%d,%c) dist=%d → %c\n",
+                          robotRow, robotCol, "NESW"[robotHeading], bestDist, "NESW"[bestDir]);
+        }
         buildMoveScript(bestDir);
         scriptKick();
         state = RUN;
@@ -428,14 +452,18 @@ void loop() {
 
             auto endNow = [&](const char* reason) {
                 stopMotors();
-                Serial.printf("--- STEP END idx=%d/%d ph=ALIGN reason=%s LF=%d RF=%d tL=%ld tR=%ld ---\n",
-                              scriptIdx + 1, scriptLen, reason, irVal[0], irVal[3], tL, tR);
+                if (!fastRunMode) {
+                    Serial.printf("--- STEP END idx=%d/%d ph=ALIGN reason=%s LF=%d RF=%d tL=%ld tR=%ld ---\n",
+                                  scriptIdx + 1, scriptLen, reason, irVal[0], irVal[3], tL, tR);
+                }
                 alignSettleStart = 0;
                 if (scriptIdx + 1 >= scriptLen) {
                     robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
                     runTurnDir = TURN_NONE;
-                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
-                                  robotRow, robotCol, "NESW"[robotHeading]);
+                    if (!fastRunMode) {
+                        Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
+                                      robotRow, robotCol, "NESW"[robotHeading]);
+                    }
                     if (exploreMode || fastRunMode) state = EXPLORE_THINK;
                     else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
                     return;
@@ -481,7 +509,7 @@ void loop() {
                 oledRun(avgTicks, ALIGN_MAX_TICKS, tL, tR);
                 lastOled = millis();
             }
-            if (TELEMETRY) {
+            if (TELEMETRY && !fastRunMode) {
                 static uint32_t lastTel = 0;
                 if (millis() - lastTel > 80) {
                     Serial.printf("t=%lu ph=ALIGN LF=%d RF=%d errLF=%+d errRF=%+d dir=%+d tL=%ld tR=%ld\n",
@@ -544,15 +572,19 @@ void loop() {
             stopMotors();
             const char* phN = (runPhase == PH_FORWARD) ? "FWD"
                             : (runPhase == PH_PIVOT)   ? "PIV" : "SPOT";
-            Serial.printf("--- STEP END idx=%d/%d ph=%s reason=%s err=%+.2f tL=%ld tR=%ld yaw=%+.2f ---\n",
-                          scriptIdx + 1, scriptLen, phN, reason, posErr, tL, tR, yawDeg);
+            if (!fastRunMode) {
+                Serial.printf("--- STEP END idx=%d/%d ph=%s reason=%s err=%+.2f tL=%ld tR=%ld yaw=%+.2f ---\n",
+                              scriptIdx + 1, scriptLen, phN, reason, posErr, tL, tR, yawDeg);
+            }
 
             if (scriptIdx + 1 >= scriptLen) {
                 robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
                 resetPidState();
                 runTurnDir = TURN_NONE;
-                Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
-                              robotRow, robotCol, "NESW"[robotHeading]);
+                if (!fastRunMode) {
+                    Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
+                                  robotRow, robotCol, "NESW"[robotHeading]);
+                }
                 if (exploreMode || fastRunMode) {
                     state = EXPLORE_THINK;
                 } else {
@@ -683,10 +715,12 @@ void loop() {
             irRSm = 0.7f * irRSm + 0.3f * irVal[2];
             float dL = irLSm - irLPrev, dR = irRSm - irRPrev;
             irLPrev = irLSm; irRPrev = irRSm;
-            if (dL < -IR_EDGE_DELTA) Serial.println("[EVENT] L wall opened");
-            if (dR < -IR_EDGE_DELTA) Serial.println("[EVENT] R wall opened");
-            if (dL >  IR_EDGE_DELTA) Serial.println("[EVENT] L wall appeared");
-            if (dR >  IR_EDGE_DELTA) Serial.println("[EVENT] R wall appeared");
+            if (!fastRunMode) {
+                if (dL < -IR_EDGE_DELTA) Serial.println("[EVENT] L wall opened");
+                if (dR < -IR_EDGE_DELTA) Serial.println("[EVENT] R wall opened");
+                if (dL >  IR_EDGE_DELTA) Serial.println("[EVENT] L wall appeared");
+                if (dR >  IR_EDGE_DELTA) Serial.println("[EVENT] R wall appeared");
+            }
 
             auto wallConf = [](float v) -> float {
                 if (v < IR_CONF_LO) return 0.0f;
@@ -739,7 +773,7 @@ void loop() {
             oledRun((long)avg, runTarget, tL, tR);
             lastOled = millis();
         }
-        if (TELEMETRY) {
+        if (TELEMETRY && !fastRunMode) {
             static uint32_t lastTel = 0;
             if (millis() - lastTel > 80) {
                 const char* phn = (runPhase == PH_FORWARD) ? "FWD"
