@@ -23,6 +23,7 @@ static uint8_t plannedHeading = DIR_NORTH;
 
 static bool exploreMode = false;
 static bool fastRunMode = false;
+static bool returnHomeMode = false;    // after explore reaches goal, flips to head back to start
 
 // Runtime-adjustable fast-run cruise speed (NVS-persisted).
 static float fastRunCruiseTps = FAST_RUN_CRUISE_TPS_DEFAULT;
