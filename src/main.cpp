@@ -194,10 +194,10 @@ void loop() {
                 setupMaze();
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
-                exploreMode = true; fastRunMode = false;
+                exploreMode = true; fastRunMode = false; returnHomeMode = false;
                 autoCalGyroBeforeStart();
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
-                Serial.println("--- EXPLORE START ---");
+                Serial.println("--- EXPLORE START (round trip) ---");
                 state = EXPLORE_THINK;
                 break;
             case M_FAST:
@@ -210,7 +210,7 @@ void loop() {
                 }
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
-                exploreMode = false; fastRunMode = true;
+                exploreMode = false; fastRunMode = true; returnHomeMode = false;
                 autoCalGyroBeforeStart();
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- FAST RUN START ---");
@@ -307,14 +307,28 @@ void loop() {
         }
         maze.visited[robotRow][robotCol] = true;
         if (maze.isGoal(robotRow, robotCol)) {
-            stopMotors();
-            if (exploreMode) {
-                if (nvsSaveWalls()) Serial.println("[NVS] walls saved");
+            if (exploreMode && !returnHomeMode) {
+                // First leg done — flip the goal to home (0,0) and keep
+                // exploring back. Walls accumulated on the return leg fill
+                // in anything missed on the way out.
+                Serial.printf("--- FWD GOAL reached (%d,%d), returning home ---\n",
+                              robotRow, robotCol);
+                maze.setGoalSingle(START_ROW, START_COL);
+                returnHomeMode = true;
+                // Fall through into floodFill / planning with the new goal.
+            } else {
+                stopMotors();
+                if (exploreMode) {
+                    // Restore the forward goal in the maze so the saved
+                    // walls are paired with the right target for fast run.
+                    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+                    if (nvsSaveWalls()) Serial.println("[NVS] walls saved (round trip done)");
+                }
+                Serial.printf("--- DONE at (%d,%d) ---\n", robotRow, robotCol);
+                oledTerminal("DONE!", returnHomeMode ? "home" : "goal");
+                state = GOAL;
+                break;
             }
-            Serial.printf("--- GOAL reached (%d,%d) ---\n", robotRow, robotCol);
-            oledTerminal("GOAL!", "reached");
-            state = GOAL;
-            break;
         }
         maze.floodFill();
         uint8_t bestDist;
@@ -339,7 +353,7 @@ void loop() {
         if (buttonEdge()) {
             stopMotors();
             Serial.println("--- RUN aborted ---");
-            exploreMode = false; fastRunMode = false;
+            exploreMode = false; fastRunMode = false; returnHomeMode = false;
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
@@ -455,7 +469,14 @@ void loop() {
         int      effStkPwm    = imuMode ? YAW_STICTION_PWM  : POS_STICTION_PWM;
         float    effFz        = imuMode ? YAW_FRICTION_ZONE : (float)POS_FRICTION_ZONE;
         float    effHb        = imuMode ? YAW_HOLD_BAND     : (float)POS_HOLD_BAND;
-        uint32_t effSettleMs  = imuMode ? YAW_SETTLE_MS     : POS_SETTLE_MS;
+        // Fast run cuts the FWD-settle dwell — trapezoid decel already
+        // parks velocity at ~0 by the time |posErr| < holdBand, and the
+        // 80 ms wait shows up as a visible "pause" at every turn cell.
+        // Rotation phases (PH_SPOT) keep the full YAW_SETTLE_MS dwell so
+        // the heading doesn't commit before the gyro has actually settled.
+        uint32_t effSettleMs  = imuMode             ? YAW_SETTLE_MS
+                              : fastRunMode         ? 0u
+                                                    : POS_SETTLE_MS;
         float    effStallVel  = imuMode ? YAW_STALL_VEL     : POS_STALL_VEL;
         uint32_t effStallMs   = imuMode ? YAW_STALL_MS      : POS_STALL_MS;
         float    effStallEmax = imuMode ? YAW_STALL_ERR_MAX : (float)POS_STALL_ERR_MAX;
@@ -637,8 +658,7 @@ void loop() {
 
         int pwmL, pwmR;
         if (runPhase == PH_FORWARD) {
-            // Hold against the commanded heading, not against an absolute 0
-            // that no longer means "straight ahead" after the first turn.
+            // Hold against the commanded heading.
             int yawBias    = (USE_IMU && imuReady)
                               ? (int)(-YAW_HOLD_KP * (yawDeg - yawTargetDeg) - YAW_HOLD_KD * gzFilt) : 0;
             int encBalance = (int)((tL - tR) * BALANCE_KP);
@@ -698,7 +718,7 @@ void loop() {
     case GOAL:
     case CRASH: {
         if (buttonEdge()) {
-            exploreMode = false; fastRunMode = false;
+            exploreMode = false; fastRunMode = false; returnHomeMode = false;
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;

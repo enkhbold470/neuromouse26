@@ -48,7 +48,7 @@ static void senseAndStoreWalls() {
 }
 
 // Build a one-cell-move script: optional spot turn, then forward 1 cell (or
-// chain of straight cells in fast run).
+// chain of consecutive straight cells in fast run).
 //
 // 180° turn (diff==2) is followed by a wall re-anchor:
 //   align-front → SPOT 180 → reverse 2 cm → forward 1 cell.

@@ -26,8 +26,8 @@ constexpr uint8_t MAZE_ROWS = 6;
 constexpr uint8_t MAZE_COLS = 3;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 5;
-constexpr uint8_t GOAL_COL  = 2;
+constexpr uint8_t GOAL_ROW  = 1;
+constexpr uint8_t GOAL_COL  = 1;
 
 // ── [B0] ★★★ MAIN POWER KNOB ★★★ ────────────────────────────────────────────
 // Single source-of-truth for motor breakaway PWM at the current
@@ -138,6 +138,7 @@ constexpr long  START_OFFSET_TICKS     =  322;
 constexpr long  PIVOT_TICKS_FALLBACK   =  900;   // used only if USE_IMU=false
 constexpr long  SPOT180_TICKS_FALLBACK =  906;   // used only if USE_IMU=false
 constexpr float BACKUP_OFFSET_MM       =   0.0f; // PH_REVERSE_TO_BACK
+
 
 // ── [H] DEBUG FLAGS ─────────────────────────────────────────────────────────
 constexpr bool USE_IMU   = true;   // false = encoder-tick turns

@@ -18,12 +18,14 @@ enum TurnDir { TURN_NONE, TURN_RIGHT, TURN_LEFT };
 // PH_PIVOT            — single-wheel pivot. Inner wheel braked, outer drives.
 //                       Target in degrees (IMU mode) or ticks (fallback).
 // PH_SPOT             — both wheels opposite, rotates about chassis centre.
+//                       Target = degrees (45 / 90 / 180 all supported).
 // PH_REVERSE_TO_BACK  — at activation, samples front IR and computes a reverse
 //                       tick target then reclassifies itself to PH_FORWARD so
 //                       the standard PID drives it.
 // PH_ALIGN_FRONT      — creeps fwd/rev until front IR LF/RF read the target
 //                       row (ALIGN_LF_TARGET / ALIGN_RF_TARGET).
-enum RunPhase { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_REVERSE_TO_BACK, PH_ALIGN_FRONT };
+enum RunPhase { PH_FORWARD, PH_PIVOT, PH_SPOT,
+                PH_REVERSE_TO_BACK, PH_ALIGN_FRONT };
 
 struct PhaseStep {
     RunPhase phase;
