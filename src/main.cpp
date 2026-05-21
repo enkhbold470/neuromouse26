@@ -363,8 +363,13 @@ void loop() {
                 // First leg done — flip the goal to home (0,0) and keep
                 // exploring back. Walls accumulated on the return leg fill
                 // in anything missed on the way out.
+                //
+                // Save NVS immediately so a crash during return-home doesn't
+                // lose the forward map. The home-arrival save below will
+                // overwrite with the more complete round-trip map.
                 Serial.printf("--- FWD GOAL reached (%d,%d), returning home ---\n",
                               robotRow, robotCol);
+                if (nvsSaveWalls()) Serial.println("[NVS] walls saved (forward leg done)");
                 maze.setGoalSingle(START_ROW, START_COL);
                 returnHomeMode = true;
                 // Fall through into floodFill / planning with the new goal.
