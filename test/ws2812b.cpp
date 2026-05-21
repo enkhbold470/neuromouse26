@@ -3,7 +3,7 @@
 #include <FastLED.h>
 #include "PinConfig.h"
 
-#define NUM_LEDS 8
+#define NUM_LEDS rgb_pin
 CRGB leds[NUM_LEDS];
 
 void setup() {
