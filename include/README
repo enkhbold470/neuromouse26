@@ -91,6 +91,26 @@ Include order in src/main.cpp
     Persistence.h, Planner.h, OLED.h.
   Then setup() and loop().
 
+Status LED (onboard WS2812 on rgb_pin = GPIO 48)
+------------------------------------------------
+
+Visual indicator on the terminal states. Driven non-blocking from inside
+loop() — button stays responsive while the pattern runs.
+
+  OFF                         Menu / running / any non-terminal state.
+  Green flash → rainbow chase Reached GOAL.
+                                * Fast Run goal cell, OR
+                                * Explore return home (after the round
+                                  trip back to (0,0))
+                              Pattern repeats every 4 s until button press.
+  Red blink (300 ms on/off)   CRASH — flood-fill says the goal is
+                              unreachable / robot is boxed in.
+  Off (after button)          Press the button to clear the LED and return
+                              to the menu.
+
+Note: when GOAL is reached, the robot also spins 180° in place as a
+mechanical "done" signal before the LED celebration starts.
+
 Convention notes
 ----------------
 
