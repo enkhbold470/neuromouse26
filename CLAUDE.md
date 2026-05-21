@@ -6,6 +6,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## File layout (post-refactor 2026-05-20)
+
+Domain code is split into header-only modules in `include/`. Each is text-included once into `src/main.cpp` (single TU; `build_src_filter = +<main.cpp>`). To touch a subsystem, open the matching header. The README in `include/` has the full map; the short version:
+
+| File | Owns |
+|---|---|
+| `include/Tuning.h` | Every `constexpr` tuning knob (sections [A]–[F], [H]). The ★★★ MAIN POWER KNOB ★★★ is `BASE_BREAKAWAY_PWM`. |
+| `include/IMU.h` | MPU-6500 + `yawDeg`/`gzFilt`/`yawTargetDeg`/`imuReady` + `updateYaw()`. |
+| `include/IRSensors.h` | `PAIRS`, `irVal`, IR-centering EMA state (`irLSm`/`irRSm`/`irFirstSample`), `readIR`/`sampleIR`. |
+| `include/Battery.h` | `readVbat`, `batPct`. |
+| `include/Pose.h` | `robotRow/Col/Heading`, `plannedRow/Col/Heading`, `exploreMode`, `fastRunMode`, `fastRunCruiseTps`, `pendingOffsetTicks`. |
+| `include/MotionScript.h` | `RunPhase`/`TurnDir` enums, `PhaseStep`, `script[]`, `scriptLen/Idx`, `runPhase/Target/TurnDir`, `phaseStartTL/TR/Us`, the `scriptPush*` helpers. |
+| `include/Persistence.h` | NVS save/load for walls + fast-run speed (namespace `mm26`). |
+| `include/Planner.h` | `setupMaze`, `senseAndStoreWalls`, `buildMoveScript` (+ fast-run straight-chain fusion). |
+| `include/OLED.h` | U8G2 instance + menu + run + diag screens + auto gyro-cal. |
+| `src/main.cpp` | Hardware objects (motors, encoders, maze), IR-centering PID, `rTicks`/`stopMotors`/`buttonEdge`, `onPhaseActivate`/`phaseEnter`/`scriptKick`, `setup()`, full `loop()` state machine. ~700 lines. |
+
+**Adding a new tuning knob** → put it in `Tuning.h`, not in any other header.
+**Adding a new screen** → put it in `OLED.h`.
+**Changing motion control numerics** → `Tuning.h`. **Changing motion control behavior** (PID structure, settle logic) → `src/main.cpp` RUN case.
+
+If you ever add a second `.cpp` to `[env:main]`, convert the file-scope `static` globals in the headers to `inline` (C++17) or move definitions into a `.cpp`.
+
+---
+
 ## Build & Flash
 
 ```bash

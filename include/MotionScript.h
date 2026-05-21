@@ -1,0 +1,72 @@
+// include/MotionScript.h — phase-script data types + simple pushers.
+//
+// A "move" is encoded as a short list of `PhaseStep`s (max 8). The RUN
+// executor in main.cpp walks the list step-by-step. Stateful hooks
+// (`phaseEnter`, `onPhaseActivate`, `scriptKick`) live in main.cpp because
+// they reach into hardware (encoders, IR, pid) — this header is data-only.
+
+#ifndef MM26_MOTION_SCRIPT_H
+#define MM26_MOTION_SCRIPT_H
+
+#include <Arduino.h>
+#include "Tuning.h"
+
+enum TurnDir { TURN_NONE, TURN_RIGHT, TURN_LEFT };
+
+// PH_FORWARD          — tick-target forward (signed; negative = reverse).
+//                       IR centering + IMU yaw hold + encoder balance bias.
+// PH_PIVOT            — single-wheel pivot. Inner wheel braked, outer drives.
+//                       Target in degrees (IMU mode) or ticks (fallback).
+// PH_SPOT             — both wheels opposite, rotates about chassis centre.
+// PH_REVERSE_TO_BACK  — at activation, samples front IR and computes a reverse
+//                       tick target then reclassifies itself to PH_FORWARD so
+//                       the standard PID drives it.
+// PH_ALIGN_FRONT      — creeps fwd/rev until front IR LF/RF read the target
+//                       row (ALIGN_LF_TARGET / ALIGN_RF_TARGET).
+enum RunPhase { PH_FORWARD, PH_PIVOT, PH_SPOT, PH_REVERSE_TO_BACK, PH_ALIGN_FRONT };
+
+struct PhaseStep {
+    RunPhase phase;
+    long     target;
+    TurnDir  dir;
+};
+
+constexpr int MAX_SCRIPT = 8;
+
+static PhaseStep script[MAX_SCRIPT];
+static int       scriptLen = 0;
+static int       scriptIdx = 0;
+
+static TurnDir  runTurnDir = TURN_NONE;
+static RunPhase runPhase   = PH_FORWARD;
+static long     runTarget  = 0;
+
+// Per-phase encoder + time snapshots. Captured by `phaseEnter()` in main.cpp.
+static long     phaseStartTL = 0;
+static long     phaseStartTR = 0;
+static uint32_t phaseStartUs = 0;
+
+static void scriptReset() { scriptLen = 0; scriptIdx = 0; }
+
+static void scriptPush(RunPhase ph, long target, TurnDir d = TURN_NONE) {
+    if (scriptLen < MAX_SCRIPT) script[scriptLen++] = { ph, target, d };
+}
+
+static void scriptPushFwd(long ticks) {
+    scriptPush(PH_FORWARD, ticks + (long)POS_STOP_BIAS, TURN_NONE);
+}
+
+static void scriptPushSpot(TurnDir d, float deg) {
+    long target = USE_IMU ? (long)(deg + 0.5f) : SPOT180_TICKS_FALLBACK;
+    scriptPush(PH_SPOT, target, d);
+}
+
+static void scriptPushPivot(TurnDir d, float deg) {
+    long target = USE_IMU ? (long)(deg + 0.5f) : PIVOT_TICKS_FALLBACK;
+    scriptPush(PH_PIVOT, target, d);
+}
+
+static void scriptPushReverseToBack() { scriptPush(PH_REVERSE_TO_BACK, 0, TURN_NONE); }
+static void scriptPushAlignFront()    { scriptPush(PH_ALIGN_FRONT,    0, TURN_NONE); }
+
+#endif
