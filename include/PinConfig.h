@@ -19,12 +19,19 @@ constexpr uint8_t ENC_R_A          = 21;
 constexpr uint8_t ENC_R_B          = 14;
 
 // ── IR sensors ────────────────────────────────────────────────────────────────
-// Geometry: all 4 sensors point forward-outward at ~30° from straight-ahead.
-// Side sensors (L, R) thus partially face forward — they detect open lanes
-// earlier than perpendicular mounting would, AND they pick up the front wall
-// at close range, so front-only safety must use LF/RF.
-//   LF, RF : ~30° outboard, biased forward — front-wall detection
-//   L, R   : ~30° outboard, biased toward side — wall-follow centering
+// Geometry (updated 2026-05-20): ALL 4 sensors point 90° perpendicular to
+// their target wall — no more 30° forward-outward cones on any sensor.
+//   LF, RF : face STRAIGHT FORWARD, mounted 10 mm behind robot front edge
+//            (= wheel center + 45 mm). Used for front-wall detection and
+//            PH_ALIGN_FRONT distance interp.
+//   L,  R  : face perpendicular SIDEWAYS, for wall-follow centering and
+//            side-wall presence (unchanged from 2026-05-19 rotation).
+// At cell center, front sensor → front wall = 90 − 45 = 45 mm.
+// For "X mm front gap" alignment target → robot center sits at
+// cell_center + (45 − X) mm in current heading.
+// IR_CAL_*, IR_DIST_TABLE (IRCalibration.h), and ALIGN_*_TARGET (main.cpp)
+// must be re-captured at the new 90° geometry — old values were for 30°
+// and are STALE.
 constexpr uint8_t RX_L             = 10;
 constexpr uint8_t RX_LF            = 4;
 constexpr uint8_t RX_RF            = 1;
@@ -77,7 +84,7 @@ constexpr bool    MOTOR_R_INV      = true;
 //   effective at running speed ≈ 205 (empirical)
 constexpr float   WHEEL_DIAMETER   = 33.4f;   // mm
 constexpr float   TICKS_PER_REV    = 205.0f;
-constexpr float   WHEEL_TRACK_MM   = 74.0f;
+constexpr float   WHEEL_TRACK_MM   = 80.0f;   // outer-tire to outer-tire (true axle pitch is slightly less by tire width)
 // Battery voltage divider: V_bat → 100k → ADC → 39k → GND.
 // Theoretical multiplier: 1 / (39 / (39+100)) = 3.564.
 // Empirically calibrated 2026-05-17: actual 7.96V → raw read 6.62V with

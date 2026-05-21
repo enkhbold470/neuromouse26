@@ -198,7 +198,7 @@ constexpr uint8_t MAZE_ROWS = 6;
 constexpr uint8_t MAZE_COLS = 3;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 0;
+constexpr uint8_t GOAL_ROW  = 5;
 constexpr uint8_t GOAL_COL  = 2;
 
 
@@ -842,11 +842,9 @@ static void senseAndStoreWalls() {
 static void buildMoveScript(AbsDir bestDir) {
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
+
     if (diff == 1) {
-        // Spot at current cell center. Pivot would translate the robot
-        // diagonally — wrong target for a single-cell turn. Pivot is used
-        // only mid-chain (see chain-extension below) where a pre-FWD
-        // positions the pivot point 4 cm before the turn-cell center.
+        // Spot at cell center (no translation). Same in explore and fast run.
         scriptPushSpot(TURN_RIGHT, 90.0f);
     } else if (diff == 3) {
         scriptPushSpot(TURN_LEFT, 90.0f);
@@ -875,144 +873,14 @@ static void buildMoveScript(AbsDir bestDir) {
         plannedCol     = robotCol + DIR_DC[bestDir];
         return;                  // skip trailing generic fwd push + chain ext
     }
+    // diff==0 (straight) or just-pushed SPOT both fall here to push the
+    // 1-cell forward. diff==2 (180°) already returned above.
     long fwd = CELL_TICKS + pendingOffsetTicks;
     pendingOffsetTicks = 0;
     scriptPushFwd(fwd);
-
     plannedHeading = bestDir;
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
-
-    // ── Fast-run chain extension (straights + mid-chain pivots) ──────────────
-    // Walk the planned path forward, chaining FWD+PIVOT so motion is unbroken
-    // through known cells.
-    //
-    // PIVOT GEOMETRY (right pivot, robot facing N, lands facing E):
-    //   PRE:  center at turn-cell-center − (WHEEL_TRACK/2) in original heading.
-    //         (= 37 mm south of turn-cell center; braked right wheel sits at
-    //          cell.x + 37, cell.y − 37 in maze frame)
-    //   PIVOT: rotate 90° CW around the braked right wheel (radius = 37 mm).
-    //   POST: center at (cell.x + 37, cell.y)
-    //         = 37 mm forward in NEW heading, ZERO lateral offset.
-    //
-    // The pre-pivot 37 mm shortfall exactly cancels the rotation arc's lateral
-    // component → robot lands on the new heading's center line, NO IR fix-up
-    // needed. (Earlier comment claimed lateral correction; that was wrong.)
-    //
-    // Distances (CELL_PITCH=180 mm, half-track=37 mm):
-    //   approach  (last cell → pivot point)     = 180 − 37 = 143 mm = postPivotShort
-    //   post-exit (pivot exit → next cell ctr)  = 180 − 37 = 143 mm = postPivotShort
-    //
-    // 180° turns can't be pivoted (single-wheel lock doesn't yield in-place
-    // 180° flip) → chain breaks at 180° corners.
-    if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
-        int rr = plannedRow, cc = plannedCol;
-        AbsDir hh = (AbsDir)plannedHeading;
-        // Asymmetric pivot offsets — pre is geometric, post is geometric +
-        // brake-creep drift. The braked wheel doesn't perfectly hold during
-        // the 90° rotation under torque from the active wheel; robot center
-        // overshoots the geometric WHEEL_TRACK/2 = 37 mm by ~13 mm of creep,
-        // landing ~50 mm past cell center in new heading. Pre offset stays
-        // geometric (40 mm; slightly above 37 mm to give clearance for the
-        // 3 mm lateral residual at pre=40).
-        constexpr float PRE_PIVOT_OFFSET_MM  = 40.0f;
-        constexpr float POST_PIVOT_OFFSET_MM = 50.0f;
-        const float ticksPerMm = (float)CELL_TICKS / 180.0f;
-        long preOffset       = (long)(PRE_PIVOT_OFFSET_MM  * ticksPerMm + 0.5f);  // ~311 ticks
-        long postOffset      = (long)(POST_PIVOT_OFFSET_MM * ticksPerMm + 0.5f);  // ~389 ticks
-        long approachLen     = CELL_TICKS - preOffset;                // 1089 ticks = 14 cm (cell→pivot)
-        long postPivotToCell = CELL_TICKS - postOffset;               // 1011 ticks = 13 cm (pivot→next cell)
-        long adjPivotFwd     = CELL_TICKS - postOffset - preOffset;   //  700 ticks =  9 cm (pivot→adj pivot)
-        int extraCells = 0, pivots = 0;
-        int safetyCap = MAZE_ROWS * MAZE_COLS;
-        while (safetyCap-- > 0) {
-            if (rr == GOAL_ROW && cc == GOAL_COL) break;
-            if (maze.hasWall(rr, cc, hh)) break;
-            int nr = rr + DIR_DR[hh];
-            int nc = cc + DIR_DC[hh];
-            if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
-            uint8_t d;
-            AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
-            if (d == FLOOD_INFINITY) break;
-
-            if (next == hh) {
-                // Straight: extend current FWD by 1 cell.
-                script[scriptLen - 1].target += CELL_TICKS;
-                rr = nr; cc = nc;
-                extraCells++;
-                continue;
-            }
-
-            int turnDiff = ((int)next - (int)hh + 4) % 4;
-            if (turnDiff != 1 && turnDiff != 3) break;  // 180° not pivot-able
-            if (scriptLen + 2 > MAX_SCRIPT) break;       // need room for PIVOT + FWD
-            // Need the diagonal cell to exist + not be wall-blocked after the pivot.
-            int diagR = nr + DIR_DR[next];
-            int diagC = nc + DIR_DC[next];
-            if (diagR < 0 || diagR >= MAZE_ROWS || diagC < 0 || diagC >= MAZE_COLS) break;
-            if (maze.hasWall(nr, nc, next)) break;
-
-            // Approach: extend last FWD by 14 cm so pivot point is 4 cm
-            // before (nr,nc) center (= pre-pivot offset).
-            script[scriptLen - 1].target += approachLen;
-            TurnDir td = (turnDiff == 1) ? TURN_RIGHT : TURN_LEFT;
-            scriptPushPivot(td, 90.0f);
-            // Post-pivot FWD: 13 cm from pivot exit (= cell + post-offset)
-            // to (diagR,diagC) center.
-            scriptPushFwd(postPivotToCell);
-
-            hh = next;
-            rr = diagR;
-            cc = diagC;
-            pivots++;
-
-            // Adjacent-pivot extension: if the cell we just landed at
-            // (diagR, diagC) ALSO needs a turn, shorten the just-pushed
-            // post-pivot FWD from postPivotShort (140 mm to next cell center)
-            // down to adjacentPivotFwd (= 1 cell − 2·offset = 100 mm to next
-            // pivot point). Then push the second pivot and a fresh post-pivot
-            // FWD. Outer loop continues with the new state, supporting longer
-            // zigzag chains.
-            if (rr != GOAL_ROW || cc != GOAL_COL) {
-                if (!maze.hasWall(rr, cc, hh)) {
-                    uint8_t dAdj;
-                    AbsDir nextAdj = maze.bestDirectionBiased(rr, cc, hh, dAdj);
-                    if (dAdj != FLOOD_INFINITY && nextAdj != hh) {
-                        int turnDiff2 = ((int)nextAdj - (int)hh + 4) % 4;
-                        if ((turnDiff2 == 1 || turnDiff2 == 3)
-                            && scriptLen + 2 <= MAX_SCRIPT) {
-                            int diagR2 = rr + DIR_DR[nextAdj];
-                            int diagC2 = cc + DIR_DC[nextAdj];
-                            if (diagR2 >= 0 && diagR2 < MAZE_ROWS
-                                && diagC2 >= 0 && diagC2 < MAZE_COLS
-                                && !maze.hasWall(rr, cc, nextAdj)) {
-                                // Adj pivot: shorten the just-pushed FWD from
-                                // 13 cm (to cell center) to 9 cm (to adjacent
-                                // pivot point = cell + post − pre).
-                                script[scriptLen - 1].target = adjPivotFwd;
-                                TurnDir td2 = (turnDiff2 == 1) ? TURN_RIGHT : TURN_LEFT;
-                                scriptPushPivot(td2, 90.0f);
-                                scriptPushFwd(postPivotToCell);
-                                hh = nextAdj;
-                                rr = diagR2;
-                                cc = diagC2;
-                                pivots++;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        plannedRow     = rr;
-        plannedCol     = cc;
-        plannedHeading = hh;
-
-        if (extraCells > 0 || pivots > 0) {
-            Serial.printf("[FAST] chained +%d cells, %d pivots -> (%d,%d) hd=%d\n",
-                          extraCells, pivots, rr, cc, (int)hh);
-        }
-    }
 }
 
 static void scriptKick() {
@@ -1448,14 +1316,8 @@ void loop() {
             settleStart = 0; stallStart = 0;
         };
 
-        // Fast-run continuous-roll flag: while we're inside a FWD phase of a
-        // FAST RUN, skip stopMotors at SETTLED transitions so wheels don't
-        // brake on every cell boundary. Stall/timeout exits still stop.
-        bool fastFwdRoll = fastRunMode && runPhase == PH_FORWARD;
-
         auto endPhase = [&](const char* reason) {
-            bool isSettle = (reason && reason[0] == 'S' && reason[1] == 'E');  // "SETTLED"
-            if (!(fastFwdRoll && isSettle)) stopMotors();
+            stopMotors();
             const char* phN = (runPhase == PH_FORWARD) ? "FWD"
                             : (runPhase == PH_PIVOT)   ? "PIV" : "SPOT";
             Serial.printf("--- STEP END idx=%d/%d ph=%s reason=%s err=%+.2f tL=%ld tR=%ld yaw=%+.2f ---\n",
@@ -1487,13 +1349,6 @@ void loop() {
         };
 
         if (fabsf(posErr) < effHb) {
-            if (fastFwdRoll) {
-                // Fast run: no brake, no settle dwell — end the phase
-                // immediately so the next cell's script kicks in without a
-                // visible pause at the cell boundary.
-                endPhase("SETTLED");
-                break;
-            }
             stopMotors();
             if (settleStart == 0) settleStart = millis();
             if (millis() - settleStart > effSettleMs) {
