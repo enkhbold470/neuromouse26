@@ -69,21 +69,29 @@ The production stack (in `src/main.cpp`) and the reference drivetrain (in `test/
 Movement is expressed as a sequence of `PhaseStep` records (max 8). Each step picks a `RunPhase` and a tick/degree target. The executor walks the script, resets encoders + zero-yaw between steps, and exits to a higher layer (IDLE for one-shot tests, EXPLORE_THINK for flood-fill) when the last step settles.
 
 ```
-RunPhase variants:
+RunPhase variants (include/MotionScript.h):
   PH_FORWARD          — encoder-tick target. Signed (negative = reverse).
                         IR centering + IMU yaw hold + encoder balance bias.
+                        Trapezoid velocity profile in the executor.
   PH_PIVOT            — single-wheel pivot. Inner wheel braked, outer drives.
-                        Target in degrees (IMU) or ticks (fallback).
+                        Kept callable but `buildMoveScript` no longer pushes
+                        it (pivots were replaced with SPOT after R turns
+                        kept bumping walls). Target in degrees (IMU mode).
   PH_SPOT             — both wheels opposite. Robot rotates about its centre.
                         90° and 180° both expressed in degrees.
-  PH_FWD_TO_WALL      — open-loop slow forward, stops when IR-estimated front
-                        distance ≤ T.wallTouchDistMm. Yaw-held during travel.
   PH_REVERSE_TO_BACK  — at activation, samples front IR and computes a reverse
-                        tick target = −(frontMm + T.backupOffsetMm) × ticks/mm,
+                        tick target = −(frontMm + BACKUP_OFFSET_MM) × ticks/mm,
                         then re-classifies itself as PH_FORWARD so the
-                        standard PID handles the reverse motion. Used after
-                        180° to bump the rear against the (now) back wall.
+                        standard PID handles the reverse motion. Not currently
+                        pushed by `buildMoveScript`; kept available for future
+                        re-anchor primitives.
+  PH_ALIGN_FRONT      — slow creep until LF ≈ ALIGN_LF_TARGET and
+                        RF ≈ ALIGN_RF_TARGET (37.5 mm front-wall gap). Used
+                        in the dead-end exit sequence before the 180° spin.
 ```
+
+(The legacy `PH_FWD_TO_WALL` phase was removed in the 2026-05-20 refactor
+along with the unused `trapezoidPos`/`trapezoidVel` helpers.)
 
 `onPhaseActivate()` is called from `scriptKick()` and every endPhase-advance. It's the hook for deferred-target phases (currently only `PH_REVERSE_TO_BACK`).
 
@@ -114,7 +122,7 @@ Configured DLPF=3 (41 Hz BW) to reject motor-PWM harmonics. Z-axis bias captured
 
 ### Cal Gyro is automatic, not button-triggered
 
-The `GYRO_CAL` menu state shows IR LF/RF readings vs `IR_CAL_LF/IR_CAL_RF` (visual alignment aid only — wall-against-robot is geometric, not a stillness signal). Cal **fires automatically** when encoder Δticks ≤ 1 and `|gzFilt| < 1 °/s` are both true for 100 ms continuously. Move the robot mid-cal and the still-timer resets. This protects the bias capture from hand jitter.
+`autoCalGyroBeforeStart()` (in `include/OLED.h`) fires on every Explore / Fast Run start. Pipeline: show "CAL GYRO stay still" → `delay(300)` to let button-release vibration die → `calibrateGyroBias(300, 2)` → zero `yawDeg`/`yawTargetDeg`. The user doesn't have to remember to do it.
 
 ### Encoder polarity is inverted on both wheels
 
@@ -129,11 +137,11 @@ MicromouseEncoderPCNT rightEnc(PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/true)
 
 `RIGHT_ENC_SCALE = 1.0135f` (`PinConfig.h`). All distance math goes through `rTicks()`, never `rightEnc.getTicks()`. If you add a new code path consuming right ticks for distance, use `rTicks()`.
 
-### `TICKS_PER_CELL = 1405` is hand-measured
+### `CELL_TICKS = 1400` is hand-measured
 
-PCNT 4× decode gives ~7.81 ticks/mm. `T.ticksPerCell = 1405` was captured by rolling the robot 180 mm by hand on this exact chassis. **It is not derived from `TICKS_PER_REV`** — re-measure by hand-roll if the wheel/tire changes.
+PCNT 4× decode gives ~7.78 ticks/mm. `CELL_TICKS = 1400` (in `Tuning.h`) was captured by rolling the robot 180 mm by hand on this exact chassis. **It is not derived from `TICKS_PER_REV`** — re-measure by hand-roll if the wheel/tire changes.
 
-`ticksPerMm = T.ticksPerCell / 180.0f` is the conversion factor used by `PH_REVERSE_TO_BACK`.
+`ticksPerMm = CELL_TICKS / 180.0f` is the conversion factor used by `PH_REVERSE_TO_BACK` and the dead-end script.
 
 ---
 
@@ -152,9 +160,11 @@ EXPLORE_THINK:
                                             // +4 penalty for visited cells
   buildMoveScript(bestDir):
     diff==0: FWD(cellTicks + pendingOffset)
-    diff==1: SPOT_R 90 + FWD(...)
-    diff==3: SPOT_L 90 + FWD(...)
-    diff==2: SPOT_R 180 + REVERSE_TO_BACK + FWD(cellTicks + startOffsetTicks)
+    diff==1: SPOT_R 90 + FWD(cellTicks)
+    diff==3: SPOT_L 90 + FWD(cellTicks)
+    diff==2: ALIGN_FRONT + SPOT_R 180 + FWD(−2 cm) + FWD(1 cell pitch)
+    (fast run only) any trailing FWD is extended through consecutive straight
+    cells so the executor trapezoids over the whole chain
   scriptKick(); state = RUN
 RUN:
   ... runs script ...
@@ -163,11 +173,15 @@ RUN:
 
 ### Start-offset and 180° re-anchor
 
-At boot the robot sits with its rear pressed against the back wall of cell `(0,0)` — its centre is `~4.5 cm` behind cell-(0,0)-centre. The first forward leg must travel `cellTicks + startOffsetTicks` (1405 + 351 ≈ 22.5 cm) to land at cell-(1,0)-centre. `pendingOffsetTicks` carries this extra distance into the next forward leg, then clears.
+At boot the robot sits with its rear pressed against the back wall of cell `(0,0)` — its centre is `~4.1 cm` behind cell-(0,0)-centre. The first forward leg must travel `CELL_TICKS + START_OFFSET_TICKS` (1400 + 322 ≈ 22.1 cm) to land at cell-(1,0)-centre. `pendingOffsetTicks` carries this extra distance into the next forward leg, then clears.
 
-After a 180° (only happens at dead-ends in this maze): `SPOT_R 180` then `PH_REVERSE_TO_BACK` (which samples front IR at activation and reverses by `frontMm + T.backupOffsetMm` mm of ticks). Robot now sits with rear against the new back wall — same `-4.5 cm` pose as start — so `pendingOffsetTicks` is set to `startOffsetTicks` again for the subsequent forward.
+180° re-anchor (only happens at dead-ends in this maze) is handled inside `buildMoveScript` with an explicit 4-step script:
+1. `PH_ALIGN_FRONT` — creep until LF/RF hit `ALIGN_LF_TARGET` / `ALIGN_RF_TARGET` (37.5 mm gap).
+2. `SPOT_R 180°` — rotate about chassis centre; dead-end wall is now behind us.
+3. `PH_FORWARD(−DEADEND_REVERSE_MM)` — slow reverse 2 cm.
+4. `PH_FORWARD(DEADEND_FWD_MM)` — forward 1 cell pitch.
 
-`T.backupOffsetMm = 15` mm (1.5 cm) compensates for the front-sensor-to-axle distance being ~1.5 cm longer than the back-edge-to-axle distance on this chassis.
+`BACKUP_OFFSET_MM` (in `Tuning.h`, currently `0.0f`) is the chassis-specific shim for `PH_REVERSE_TO_BACK`. Not used by the current dead-end path but kept for any future re-anchor that wants the rear bumped against a wall directly.
 
 ### Wall sensing & NVS
 
@@ -193,21 +207,24 @@ IR cal (`IR_CAL_LF/L/R/RF`) is **not** persisted to NVS. Compile-time defaults i
 
 ```
 IDLE
- ├─ menu Explore   → EXPLORE_THINK
- ├─ menu Fast Run  → EXPLORE_THINK   (loads NVS first, bails if empty)
- ├─ menu Cal Gyro  → GYRO_CAL        (auto-cal on stillness, button = abort)
- ├─ menu Enc Test  → ENC_TEST
- ├─ menu Turn R/L  → RUN             (single SPOT_90 script for HW test)
- └─ menu Clear NVS → IDLE            (wipes saved walls)
+ ├─ menu Explore     → EXPLORE_THINK (auto gyro-cal first)
+ ├─ menu Fast Run    → EXPLORE_THINK (loads NVS walls first; bails if empty)
+ ├─ menu Fast Speed  → FAST_SPEED_EDIT (encoder knob adjusts fastRunCruiseTps)
+ ├─ menu Enc Test    → ENC_TEST
+ ├─ menu IR Test     → IR_TEST
+ └─ menu Clear NVS   → IDLE (wipes saved walls)
 
-EXPLORE_THINK → RUN          (kicks current move's script)
-RUN → EXPLORE_THINK          (script done, more cells)
-RUN → IDLE                   (script done, not in explore/fast — e.g. menu turn)
-EXPLORE_THINK → GOAL         (at goal; explore saves NVS first)
-EXPLORE_THINK → CRASH        (flood = FLOOD_INFINITY, robot boxed in)
+FAST_SPEED_EDIT → IDLE      (button saves to NVS, returns to menu)
+EXPLORE_THINK → RUN         (kicks current move's script)
+RUN → EXPLORE_THINK         (script done, more cells, explore/fast)
+EXPLORE_THINK → GOAL        (at goal; explore saves NVS first)
+EXPLORE_THINK → CRASH       (flood = FLOOD_INFINITY, robot boxed in)
 
-GOAL / CRASH → IDLE          (button)
+GOAL / CRASH → IDLE         (button)
 ```
+
+Gyro calibration is automatic — runs from `autoCalGyroBeforeStart()` on every
+Explore / Fast Run start. No menu option needed.
 
 `bestDirectionBiased()` returning `FLOOD_INFINITY` is the only crash condition. Unlike the legacy stack, there's no `doTurn()` convergence-failure path because the script's stall-escape exits any phase that can't make progress.
 
