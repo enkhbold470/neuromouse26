@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <FastLED.h>
 #include "PinConfig.h"
 #include "Tuning.h"
 #include "MicromouseMotor.h"
@@ -39,6 +40,44 @@ MicromouseEncoderPCNT leftEnc   (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/tru
 MicromouseEncoderPCNT rightEnc  (PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/true);
 
 static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
+
+// ── Onboard RGB LED (single WS2812 on rgb_pin) ──────────────────────────────
+// Used as a visual status indicator: green celebration on GOAL, red SOS on
+// CRASH. Driven non-blocking from inside the loop().
+static CRGB rgbLed[1];
+static uint32_t rgbStateT0 = 0;     // millis snapshot when entering GOAL/CRASH
+
+static void rgbOff() {
+    rgbLed[0] = CRGB::Black;
+    FastLED.show();
+}
+
+// Green flash → rainbow chase → off → repeat. Non-blocking; call every loop.
+static void rgbBlinkGoal(uint32_t elapsedMs) {
+    constexpr uint32_t FLASH_PERIOD_MS = 400;
+    constexpr uint32_t FLASH_PHASE_MS  = 2000;
+    constexpr uint32_t RAIN_STEP_MS    = 200;
+    constexpr uint32_t RAIN_PHASE_MS   = 1600;
+    constexpr uint32_t TOTAL_MS        = FLASH_PHASE_MS + RAIN_PHASE_MS + 400;
+    uint32_t t = elapsedMs % TOTAL_MS;
+    if (t < FLASH_PHASE_MS) {
+        bool on = (t % FLASH_PERIOD_MS) < (FLASH_PERIOD_MS / 2);
+        rgbLed[0] = on ? CRGB::Green : CRGB::Black;
+    } else if (t < FLASH_PHASE_MS + RAIN_PHASE_MS) {
+        uint8_t step = (t - FLASH_PHASE_MS) / RAIN_STEP_MS;
+        rgbLed[0] = CHSV((step * 32) & 0xFF, 255, 255);
+    } else {
+        rgbLed[0] = CRGB::Black;
+    }
+    FastLED.show();
+}
+
+// Red SOS blink. Non-blocking; call every loop.
+static void rgbBlinkCrash(uint32_t elapsedMs) {
+    bool on = (elapsedMs % 600) < 300;
+    rgbLed[0] = on ? CRGB::Red : CRGB::Black;
+    FastLED.show();
+}
 
 // ── IR-centering PID (consumed by the PH_FORWARD executor below) ────────────
 struct PID {
@@ -146,6 +185,10 @@ void setup() {
     Wire.begin(OLED_SDA, OLED_SCL, 400000);
     oled.setI2CAddress(OLED_ADDR << 1);
     oled.begin();
+
+    FastLED.addLeds<WS2812B, rgb_pin, GRB>(rgbLed, 1);
+    FastLED.setBrightness(20);
+    rgbOff();
 
     imuReady = mpuInit();
     if (imuReady) {
@@ -326,6 +369,7 @@ void loop() {
                 }
                 Serial.printf("--- DONE at (%d,%d) ---\n", robotRow, robotCol);
                 oledTerminal("DONE!", returnHomeMode ? "home" : "goal");
+                rgbStateT0 = millis();
                 state = GOAL;
                 break;
             }
@@ -338,6 +382,7 @@ void loop() {
             stopMotors();
             Serial.println("[CRASH] no reachable goal — boxed in");
             oledTerminal("CRASH", "boxed");
+            rgbStateT0 = millis();
             state = CRASH;
             break;
         }
@@ -717,7 +762,12 @@ void loop() {
 
     case GOAL:
     case CRASH: {
+        uint32_t elapsed = millis() - rgbStateT0;
+        if (state == GOAL) rgbBlinkGoal(elapsed);
+        else               rgbBlinkCrash(elapsed);
+
         if (buttonEdge()) {
+            rgbOff();
             exploreMode = false; fastRunMode = false; returnHomeMode = false;
             menuEncRef = rightEnc.getTicks();
             oledMenu();
