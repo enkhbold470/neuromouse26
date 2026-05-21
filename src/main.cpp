@@ -881,6 +881,41 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedHeading = bestDir;
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
+
+    // Fast-run straight-chain extension: fuse consecutive straight cells into
+    // one PH_FORWARD. The trapezoid in the executor naturally stretches accel
+    // → cruise → decel over the whole chain, so longer straights hit higher
+    // peak speed. Chain breaks at any turn; endPhase brakes before the next
+    // SPOT, so wheels are stationary at the turn (R-turn momentum fix
+    // preserved).
+    if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
+        int rr = plannedRow, cc = plannedCol;
+        AbsDir hh = (AbsDir)plannedHeading;
+        int extraCells = 0;
+        int safetyCap = MAZE_ROWS * MAZE_COLS;
+        while (safetyCap-- > 0) {
+            if (rr == GOAL_ROW && cc == GOAL_COL) break;
+            if (maze.hasWall(rr, cc, hh)) break;
+            int nr = rr + DIR_DR[hh];
+            int nc = cc + DIR_DC[hh];
+            if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
+            uint8_t d;
+            AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
+            if (d == FLOOD_INFINITY) break;
+            if (next != hh) break;
+
+            script[scriptLen - 1].target += CELL_TICKS;
+            rr = nr; cc = nc;
+            extraCells++;
+        }
+        plannedRow     = rr;
+        plannedCol     = cc;
+        plannedHeading = hh;
+        if (extraCells > 0) {
+            Serial.printf("[FAST] chained +%d cells -> (%d,%d) hd=%d\n",
+                          extraCells, rr, cc, (int)hh);
+        }
+    }
 }
 
 static void scriptKick() {
