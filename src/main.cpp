@@ -36,8 +36,8 @@
 MicromouseMaze        maze;
 MicromouseMotor       leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, MOTOR_L_INV);
 MicromouseMotor       rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, MOTOR_R_INV);
-MicromouseEncoderPCNT leftEnc   (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/true);
-MicromouseEncoderPCNT rightEnc  (PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/true);
+MicromouseEncoderPCNT leftEnc   (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/false);
+MicromouseEncoderPCNT rightEnc  (PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/false);
 
 static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
 
@@ -171,6 +171,9 @@ static State state = IDLE;
 void setup() {
     Serial.begin(115200);
     pinMode(BUTTON_1, INPUT_PULLUP);
+
+    pinMode(MOTOR_SLEEP, OUTPUT);
+    digitalWrite(MOTOR_SLEEP, HIGH);
 
     leftMotor.begin(); rightMotor.begin();
     leftEnc.begin();   rightEnc.begin();

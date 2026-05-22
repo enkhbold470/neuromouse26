@@ -7,16 +7,18 @@
 constexpr uint8_t rgb_pin      = 48;
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
-constexpr uint8_t MOTOR_L_IN1      = 15;
-constexpr uint8_t MOTOR_L_IN2      = 16;
-constexpr uint8_t MOTOR_R_IN3      = 18;
-constexpr uint8_t MOTOR_R_IN4      = 17;
-// DRV8833 nSLEEP tied to VCC permanently — no pin needed.
+// Motors physically swapped 2026-05-22: pins swapped L↔R to match new wiring.
+constexpr uint8_t MOTOR_L_IN1      = 18;
+constexpr uint8_t MOTOR_L_IN2      = 17;
+constexpr uint8_t MOTOR_R_IN3      = 15;
+constexpr uint8_t MOTOR_R_IN4      = 16;
+// DRV8833 nSLEEP wired to GPIO41 — must be driven HIGH at boot to enable drivers.
+constexpr uint8_t MOTOR_SLEEP      = 41;
 
-constexpr uint8_t ENC_L_A          = 38;
-constexpr uint8_t ENC_L_B          = 39;
-constexpr uint8_t ENC_R_A          = 21;
-constexpr uint8_t ENC_R_B          = 14;
+constexpr uint8_t ENC_L_A          = 21;
+constexpr uint8_t ENC_L_B          = 14;
+constexpr uint8_t ENC_R_A          = 38;
+constexpr uint8_t ENC_R_B          = 39;
 
 // ── IR sensors ────────────────────────────────────────────────────────────────
 // Geometry (updated 2026-05-20): ALL 4 sensors point 90° perpendicular to
