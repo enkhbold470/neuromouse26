@@ -370,6 +370,9 @@ void loop() {
                 Serial.printf("--- FWD GOAL reached (%d,%d), returning home ---\n",
                               robotRow, robotCol);
                 if (nvsSaveWalls()) Serial.println("[NVS] walls saved (forward leg done)");
+                rgbLed[0] = CRGB::Green; FastLED.show();
+                delay(2000);
+                rgbOff();
                 maze.setGoalSingle(START_ROW, START_COL);
                 returnHomeMode = true;
                 // Fall through into floodFill / planning with the new goal.
@@ -380,6 +383,7 @@ void loop() {
                     // Restore the forward goal in the maze so the saved
                     // walls are paired with the right target for fast run.
                     maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+                    
                     if (nvsSaveWalls()) Serial.println("[NVS] walls saved (round trip done)");
                 }
                 Serial.printf("--- DONE at (%d,%d), spinning 180 ---\n",
