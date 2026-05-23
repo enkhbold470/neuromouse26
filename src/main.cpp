@@ -772,8 +772,11 @@ void loop() {
             leftMotor.drive(pwmL); rightMotor.drive(pwmR);
         }
 
+        // Skip OLED refresh during fast run — I2C transaction blocks the
+        // control loop for ~5 ms at 100 kHz, and the display isn't readable
+        // at fast-run speeds anyway.
         static uint32_t lastOled = 0;
-        if (millis() - lastOled > 150) {
+        if (!fastRunMode && millis() - lastOled > 150) {
             oledRun((long)avg, runTarget, tL, tR);
             lastOled = millis();
         }
