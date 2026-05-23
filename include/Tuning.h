@@ -72,7 +72,7 @@ constexpr float    FWD_V_CRUISE_TPS = 150.0f;  // EXPLORE cruise (slow for sense
 // mode ignores this knob.
 constexpr float    FAST_RUN_CRUISE_TPS_DEFAULT = FWD_V_CRUISE_TPS;
 constexpr float    FAST_RUN_CRUISE_TPS_MIN     =  400.0f;
-constexpr float    FAST_RUN_CRUISE_TPS_MAX     = 3000.0f;
+constexpr float    FAST_RUN_CRUISE_TPS_MAX     = 8000.0f;
 constexpr float    FAST_RUN_CRUISE_TPS_STEP    =  100.0f;
 
 constexpr float    FWD_ACCEL_TPS2    = 500.0f;
