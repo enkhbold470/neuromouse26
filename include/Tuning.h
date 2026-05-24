@@ -22,12 +22,12 @@ constexpr float CELL_INNER_MM      = 166.0f;
 constexpr float CELL_SIDE_GAP_MM   =  40.5f;
 
 // Active maze sub-region. Allocated inside the 16×16 grid from PinConfig.h.
-constexpr uint8_t MAZE_ROWS = 7;
-constexpr uint8_t MAZE_COLS = 7;
+constexpr uint8_t MAZE_ROWS = 16;
+constexpr uint8_t MAZE_COLS = 16;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 2;
-constexpr uint8_t GOAL_COL  = 3;
+constexpr uint8_t GOAL_ROW  = 7;
+constexpr uint8_t GOAL_COL  = 7;
 
 // Centre-goal cell list. Read by maze.setGoalCentre4() (called from
 // maze.reset() and from setupMaze() in Planner.h, and again at the
@@ -40,9 +40,9 @@ constexpr uint8_t GOAL_COL  = 3;
 //       GOAL_CENTRE_COUNT   = 1; slot 0 = (GOAL_ROW, GOAL_COL)
 // If COUNT < 4, unused slots are ignored — keep them in-bounds anyway so
 // nothing references an undefined cell if COUNT is later bumped.
-constexpr uint8_t GOAL_CENTRE_COUNT   = 1;
-constexpr uint8_t GOAL_CENTRE_ROWS[4] = { GOAL_ROW, GOAL_ROW, GOAL_ROW, GOAL_ROW };
-constexpr uint8_t GOAL_CENTRE_COLS[4] = { GOAL_COL, GOAL_COL, GOAL_COL, GOAL_COL };
+constexpr uint8_t GOAL_CENTRE_COUNT   = 4;
+constexpr uint8_t GOAL_CENTRE_ROWS[4] = { 7, 7, 8, 8 };
+constexpr uint8_t GOAL_CENTRE_COLS[4] = { 7, 8, 7, 8 };
 
 // ── [B0] ★★★ MAIN POWER KNOB ★★★ ────────────────────────────────────────────
 // Single source-of-truth for motor breakaway PWM at the current
