@@ -29,6 +29,11 @@ static bool returnHomeMode = false;    // after explore reaches goal, flips to h
 // EXPLORE_THINK runs, transition straight to GOAL instead of sensing/planning.
 static bool finalTurnPending = false;
 
+// Set by the bump-recovery branch in RUN. Next EXPLORE_THINK re-asserts the
+// front wall AFTER senseAndStoreWalls (which would otherwise overwrite it
+// based on the post-backup IR read — possibly below WALL_FRONT_THRESH).
+static bool bumpedFrontWallSticky = false;
+
 // Runtime-adjustable fast-run cruise speed (NVS-persisted).
 static float fastRunCruiseTps = FAST_RUN_CRUISE_TPS_DEFAULT;
 

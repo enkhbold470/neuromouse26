@@ -22,12 +22,27 @@ constexpr float CELL_INNER_MM      = 166.0f;
 constexpr float CELL_SIDE_GAP_MM   =  40.5f;
 
 // Active maze sub-region. Allocated inside the 16×16 grid from PinConfig.h.
-constexpr uint8_t MAZE_ROWS = 16;
-constexpr uint8_t MAZE_COLS = 16;
+constexpr uint8_t MAZE_ROWS = 7;
+constexpr uint8_t MAZE_COLS = 7;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 7;
-constexpr uint8_t GOAL_COL  = 7;
+constexpr uint8_t GOAL_ROW  = 2;
+constexpr uint8_t GOAL_COL  = 3;
+
+// Centre-goal cell list. Read by maze.setGoalCentre4() (called from
+// maze.reset() and from setupMaze() in Planner.h, and again at the
+// explore round-trip-end restoration in main.cpp). Tune for your maze:
+//   * classical 16×16 with 4-cell centre goal:
+//       GOAL_CENTRE_COUNT   = 4
+//       GOAL_CENTRE_ROWS[]  = { 7, 7, 8, 8 }
+//       GOAL_CENTRE_COLS[]  = { 7, 8, 7, 8 }
+//   * small sub-region with a single-cell goal (this 7×7 maze):
+//       GOAL_CENTRE_COUNT   = 1; slot 0 = (GOAL_ROW, GOAL_COL)
+// If COUNT < 4, unused slots are ignored — keep them in-bounds anyway so
+// nothing references an undefined cell if COUNT is later bumped.
+constexpr uint8_t GOAL_CENTRE_COUNT   = 1;
+constexpr uint8_t GOAL_CENTRE_ROWS[4] = { GOAL_ROW, GOAL_ROW, GOAL_ROW, GOAL_ROW };
+constexpr uint8_t GOAL_CENTRE_COLS[4] = { GOAL_COL, GOAL_COL, GOAL_COL, GOAL_COL };
 
 // ── [B0] ★★★ MAIN POWER KNOB ★★★ ────────────────────────────────────────────
 // Single source-of-truth for motor breakaway PWM at the current
@@ -89,6 +104,19 @@ constexpr float    POS_STALL_VEL     =  30.0f;
 constexpr uint32_t POS_STALL_MS      = 200;
 constexpr int      POS_STALL_ERR_MAX =  40;
 constexpr float    BALANCE_KP        =   0.03f;  // (tL−tR) × this added as bias
+
+// Wall-bump detection + recovery (forward phase only):
+//   - 200 ms post-vel-collapse: if front IR confirms a wall → IR-anchored backup
+//   - 6 s deep-stall fallback: even without IR confirmation → abort
+// Recovery uses front-IR distance (IRCal::estimateFrontDistMM) to compute a
+// precise reverse distance so the robot lands at cell center after a wall hit,
+// not at whatever random offset the blind-timed backup happened to produce.
+constexpr uint32_t POS_BUMP_MS          =  200;    // IR-confirmed bump confirmation window
+constexpr int      POS_BUMP_BACKUP_PWM  =  130;    // reverse PWM during recovery
+constexpr uint32_t POS_BUMP_BACKUP_MS   =  250;    // blind-backup duration (fallback only — used when IR distance unreadable)
+constexpr uint32_t POS_BUMP_BACKUP_TIMEOUT_MS = 3000;  // safety cap on the encoder-monitored precise reverse
+constexpr uint32_t POS_HARD_STALL_MS    = 4000;    // deep-stall window: tolerate transient stalls up to 6 s before forcing recovery
+constexpr float    CELL_CENTER_FRONT_MM =  44.0f;  // front-IR distance at cell center (89 − 55 + 10, see PinConfig geometry)
 
 // ── [C] PIVOT / SPOT TURNS (yaw-IMU controller) ─────────────────────────────
 // YAW_STICTION_PWM / YAW_MAX_PWM are DERIVED from BASE_BREAKAWAY_PWM in [B0].

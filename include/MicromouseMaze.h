@@ -2,6 +2,7 @@
 #define MICROMOUSE_MAZE_H
 
 #include "PinConfig.h"
+#include "Tuning.h"
 
 enum AbsDir : uint8_t { DIR_NORTH = 0, DIR_EAST = 1, DIR_SOUTH = 2, DIR_WEST = 3 };
 
@@ -62,11 +63,11 @@ public:
     }
 
     void setGoalCentre4() {
-        goalCount  = 4;
-        goalRow[0] = 7;  goalCol[0] = 7;
-        goalRow[1] = 7;  goalCol[1] = 8;
-        goalRow[2] = 8;  goalCol[2] = 7;
-        goalRow[3] = 8;  goalCol[3] = 8;
+        goalCount = GOAL_CENTRE_COUNT;
+        for (int i = 0; i < goalCount; i++) {
+            goalRow[i] = GOAL_CENTRE_ROWS[i];
+            goalCol[i] = GOAL_CENTRE_COLS[i];
+        }
     }
 
     void setGoalSingle(uint8_t r, uint8_t c) {

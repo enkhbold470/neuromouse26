@@ -79,6 +79,46 @@ static void rgbBlinkCrash(uint32_t elapsedMs) {
     FastLED.show();
 }
 
+// ── Explore-mode debug LED palette ──────────────────────────────────────────
+// Live planner state on the onboard WS2812. Only fired when exploreMode == true.
+//
+// What lights up when:
+//   cell-centre arrival   → wall pattern (R = front wall, G = left, B = right)
+//   PH_SPOT activates     → turn colour (R=ORANGE, L=PURPLE, 180=WHITE)
+//   PH_ALIGN_FRONT active → dim CYAN ("creeping into front wall to anchor")
+//   PH_FORWARD active     → no override → wall pattern persists through travel
+//   bump recovery         → YELLOW   (already wired at the bump branch below)
+//   forward-goal reached  → solid GREEN 2 s (already wired in EXPLORE_THINK)
+//   GOAL state            → flash+rainbow via rgbBlinkGoal()
+//   CRASH state           → red SOS via rgbBlinkCrash()
+//
+// Each setter calls FastLED.show() exactly once — the RMT transaction is
+// ~30-40 µs on a 1-LED strip. Safe to invoke from EXPLORE_THINK and from
+// onPhaseActivate() because those run between control-loop iterations.
+// Do NOT call from inside the PH_FORWARD PID body — a stalled tick will
+// move yawDeg integration off the loop period and bias the heading hold.
+static void rgbWallsSensed(bool wF, bool wL, bool wR) {
+    rgbLed[0] = CRGB(wF ? 140 : 0, wL ? 140 : 0, wR ? 140 : 0);
+    FastLED.show();
+}
+
+static void rgbPhaseEntry() {
+    if (!exploreMode) return;
+    switch (runPhase) {
+        case PH_SPOT:
+            if (runTarget >= 150)              rgbLed[0] = CRGB::White;        // 180° U-turn
+            else if (runTurnDir == TURN_RIGHT) rgbLed[0] = CRGB(255, 80, 0);   // orange = R 90°
+            else                               rgbLed[0] = CRGB(140, 0, 200); // purple = L 90°
+            break;
+        case PH_ALIGN_FRONT:
+            rgbLed[0] = CRGB(0, 60, 60);                                       // dim cyan = aligning
+            break;
+        default:
+            return;                                                            // FWD/PIVOT/REVERSE: no override
+    }
+    FastLED.show();
+}
+
 // ── IR-centering PID (consumed by the PH_FORWARD executor below) ────────────
 struct PID {
     float integral = 0, prevError = 0;
@@ -134,6 +174,7 @@ static void onPhaseActivate() {
         runTarget = ticks;
         runPhase  = PH_FORWARD;
     }
+    rgbPhaseEntry();
 }
 
 static void phaseEnter() {
@@ -375,6 +416,24 @@ void loop() {
         yawTargetDeg = 0.0f;
         if (exploreMode) {
             senseAndStoreWalls();
+            // Mirror the just-sensed walls onto the RGB LED so the operator
+            // sees per-cell wall pattern through the FWD travel: R=front,
+            // G=left, B=right. Re-reads from maze (already mirrored by
+            // setWall) instead of plumbing wF/wL/wR out of senseAndStoreWalls.
+            AbsDir hd = (AbsDir)robotHeading;
+            AbsDir lt = (AbsDir)((robotHeading + 3) % 4);
+            AbsDir rt = (AbsDir)((robotHeading + 1) % 4);
+            rgbWallsSensed(maze.hasWall(robotRow, robotCol, hd),
+                           maze.hasWall(robotRow, robotCol, lt),
+                           maze.hasWall(robotRow, robotCol, rt));
+        }
+        // Re-assert the front wall the bump-recovery branch just marked,
+        // in case senseAndStoreWalls overwrote it with a below-threshold
+        // post-backup reading.
+        if (bumpedFrontWallSticky) {
+            maze.setWall(robotRow, robotCol, (AbsDir)robotHeading, true);
+            bumpedFrontWallSticky = false;
+            Serial.println("[BUMP] re-asserted front wall after sense");
         }
         maze.visited[robotRow][robotCol] = true;
         if (maze.isGoal(robotRow, robotCol)) {
@@ -583,12 +642,13 @@ void loop() {
         static float    velFilt     = 0.0f;
         static uint32_t settleStart = 0;
         static uint32_t stallStart  = 0;
+        static uint32_t bumpStart   = 0;
 
         float posErr = (float)runTarget - avg;
 
         auto resetPidState = [&]() {
             posAvgPrev = 0.0f; posPrevUs = 0; velFilt = 0.0f;
-            settleStart = 0; stallStart = 0;
+            settleStart = 0; stallStart = 0; bumpStart = 0;
         };
 
         auto endPhase = [&](const char* reason) {
@@ -664,6 +724,84 @@ void loop() {
             }
         } else {
             stallStart = 0;
+        }
+
+        // Wall-bump detection (PH_FORWARD, encoder-mode only). Trapezoid says
+        // we should be moving forward but velocity has collapsed AND there's
+        // still significant distance to the target — robot is pushed against
+        // a wall. Two trigger paths:
+        //   200 ms with front IR confirming a wall → fast recovery.
+        //   6 s elapsed even without IR confirmation → forced recovery so
+        //   transient stalls (wheel snag, motor brown-out) get up to 6 s of
+        //   "try harder" before bailing.
+        // Recovery: use front-IR distance to compute the EXACT reverse
+        // needed to land at cell center (not a blind 250 ms backup that
+        // leaves the robot wherever inertia stops it). Yellow LED so the
+        // bench operator sees the trigger fire.
+        if (runPhase == PH_FORWARD && runTarget > 0
+            && posErr > (float)(POS_HOLD_BAND * 2)
+            && fabsf(velFilt) < POS_STALL_VEL) {
+            if (bumpStart == 0) bumpStart = millis();
+            uint32_t bumpElapsed = millis() - bumpStart;
+            if (bumpElapsed > POS_BUMP_MS) {
+                sampleIR();
+                bool frontWall = (irVal[0] > WALL_FRONT_THRESH) || (irVal[3] > WALL_FRONT_THRESH);
+                bool hardStall = bumpElapsed > POS_HARD_STALL_MS;
+                if (frontWall || hardStall) {
+                    float frontMm = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+                    Serial.printf("[BUMP] %s front=%.1fmm posErr=%+.1f tL=%ld tR=%ld elapsed=%lums — recovering\n",
+                                  frontWall ? "IR-confirmed" : "hard-stall",
+                                  frontMm, posErr, tL, tR, (unsigned long)bumpElapsed);
+                    if (frontWall) {
+                        maze.setWall(robotRow, robotCol, (AbsDir)robotHeading, true);
+                        bumpedFrontWallSticky = true;
+                    }
+                    rgbLed[0] = CRGB::Yellow;
+                    FastLED.show();
+                    stopMotors();
+                    delay(50);
+
+                    // Front-sensor center correction: compute the exact
+                    // reverse distance to put the robot back at cell center.
+                    // If IR didn't give a sensible reading, fall back to the
+                    // blind timed backup.
+                    bool irReadOk = frontWall && frontMm > 1.0f && frontMm < CELL_CENTER_FRONT_MM;
+                    if (irReadOk) {
+                        float backupMm   = CELL_CENTER_FRONT_MM - frontMm;
+                        float ticksPerMm = (float)CELL_TICKS / CELL_PITCH_MM;
+                        long  backTicks  = (long)(backupMm * ticksPerMm + 0.5f);
+                        long  startTicks = leftEnc.getTicks();
+                        Serial.printf("[BUMP] IR-anchored backup: %.1f mm reverse (%ld ticks)\n",
+                                      backupMm, backTicks);
+                        leftMotor.drive(-POS_BUMP_BACKUP_PWM);
+                        rightMotor.drive(-POS_BUMP_BACKUP_PWM);
+                        uint32_t t0 = millis();
+                        while (millis() - t0 < POS_BUMP_BACKUP_TIMEOUT_MS) {
+                            long delta = startTicks - leftEnc.getTicks();
+                            if (delta >= backTicks) break;
+                            delay(2);
+                        }
+                        stopMotors();
+                    } else {
+                        Serial.println("[BUMP] no usable IR distance — blind backup");
+                        leftMotor.drive(-POS_BUMP_BACKUP_PWM);
+                        rightMotor.drive(-POS_BUMP_BACKUP_PWM);
+                        delay(POS_BUMP_BACKUP_MS);
+                        stopMotors();
+                    }
+
+                    // Abort the move without committing the planned pose
+                    // (robot never traversed the cell) → EXPLORE_THINK
+                    // re-floods with the newly-marked wall and picks a turn.
+                    resetPidState();
+                    pid.reset();
+                    runTurnDir = TURN_NONE;
+                    state = EXPLORE_THINK;
+                    break;
+                }
+            }
+        } else {
+            bumpStart = 0;
         }
 
         int throttle;
