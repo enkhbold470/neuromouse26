@@ -103,6 +103,11 @@ static void buildMoveScript(AbsDir bestDir) {
     //   returnHomeMode — only fuse through cells visited on the forward leg
     //                    (walls known). Stops at any unvisited cell so the
     //                    per-cell sense step still fires on unknown territory.
+    //   EXPLORE mode (neither flag) — NEVER chain. Per-cell brake gives IR
+    //                    centering a re-anchor opportunity every cell;
+    //                    chaining was tested 2026-05-23 (UCLA) and caused
+    //                    lateral-drift accumulation across cells with no
+    //                    intermediate re-anchor.
     //
     // Goal break point flips to (START_ROW, START_COL) during return-home so
     // we don't fuse past the actual current target.
@@ -119,9 +124,10 @@ static void buildMoveScript(AbsDir bestDir) {
             int nr = rr + DIR_DR[hh];
             int nc = cc + DIR_DC[hh];
             if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
-            // Return-home: only chain through visited (= sensed) cells. Fast
-            // run already has the full map so this guard is skipped.
-            if (!fastRunMode && returnHomeMode && !maze.visited[nr][nc]) break;
+            // Return-home: only chain through visited (= sensed) cells.
+            // Fast run already has the full NVS map so this guard is
+            // skipped entirely.
+            if (!fastRunMode && !maze.visited[nr][nc]) break;
             uint8_t d;
             AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
             if (d == FLOOD_INFINITY) break;
