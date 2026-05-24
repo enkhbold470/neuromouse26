@@ -32,7 +32,10 @@ enum MenuItem {
     M_FAST_SPEED,
     M_ENC,
     M_IR_TEST,
+    M_CAL_IR,
+    M_MOTOR_TEST,
     M_NVS_CLR,
+    M_DUMP_MAZE,
     M_COUNT
 };
 
@@ -42,7 +45,10 @@ static const char* MENU_LABELS[M_COUNT] = {
     "Fast Speed",
     "Encoder Test",
     "IR Test",
-    "Clear NVS"
+    "Cal IR",
+    "Motor Test",
+    "Clear NVS",
+    "Dump Maze"
 };
 
 static int      menuSel    = M_EXPLORE;
@@ -161,17 +167,33 @@ static void oledEncTest() {
     oled.sendBuffer();
 }
 
+static void oledCalIrResult(int newCalL, int newCalR) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "Cal IR Done");
+    oled.drawHLine(0, 10, 128);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "L45: %4d", newCalL);
+    oled.drawStr(0, 26, buf);
+    snprintf(buf, sizeof(buf), "R45: %4d", newCalR);
+    oled.drawStr(0, 40, buf);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 63, "paste->PinConfig.h btn=ok");
+    oled.sendBuffer();
+}
+
 static void oledIrTest() {
+    // irVal[] filled by sampleIR() before this is called.
+    // PAIRS order: 0=LF  1=L45  2=R45  3=RF
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(0, 8, "IR Test");
     drawBatteryTopRight();
     oled.drawHLine(0, 10, 128);
-    oled.setFont(u8g2_font_6x10_tf);
     char buf[32];
-    snprintf(buf, sizeof(buf), "LF %4d  RF %4d", irVal[0], irVal[3]);
+    snprintf(buf, sizeof(buf), "LF:%4d  RF:%4d", irVal[0], irVal[3]);
     oled.drawStr(0, 24, buf);
-    snprintf(buf, sizeof(buf), "L  %4d  R  %4d", irVal[1], irVal[2]);
+    snprintf(buf, sizeof(buf), "R45:%4d L45:%4d", irVal[2], irVal[1]);
     oled.drawStr(0, 36, buf);
     float frontMm = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
     snprintf(buf, sizeof(buf), "front %.0f mm", frontMm);

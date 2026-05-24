@@ -17,8 +17,8 @@ struct TuningConfig {
     int   l45Thresh   = L_THRESH,  r45Thresh  = R_THRESH;
     int   lfThresh    = LF_THRESH,   rfThresh   = RF_THRESH;
     int   ticksPerCell = TICKS_PER_CELL, cellPauseMs = CELL_PAUSE_MS;
-    int   mazeRows    = 6,           mazeCols   = 3;
-    int   goalRow     = 5,           goalCol    = 1;
+    int   mazeRows    = 16,          mazeCols   = 16;
+    int   goalRow     = 7,           goalCol    = 7;
 };
 
 // ── Debug Snapshot ────────────────────────────────────────────────────────────

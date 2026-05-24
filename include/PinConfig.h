@@ -7,11 +7,12 @@
 constexpr uint8_t rgb_pin      = 48;
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
-// Motors physically swapped 2026-05-22: pins swapped L↔R to match new wiring.
-constexpr uint8_t MOTOR_L_IN1      = 18;
-constexpr uint8_t MOTOR_L_IN2      = 17;
-constexpr uint8_t MOTOR_R_IN3      = 15;
-constexpr uint8_t MOTOR_R_IN4      = 16;
+// IN1/IN2 (GPIO15/16) → OUT1/OUT2 → left motor.
+// IN3/IN4 (GPIO17/18) → OUT3/OUT4 → right motor.
+constexpr uint8_t MOTOR_L_IN1      = 15;
+constexpr uint8_t MOTOR_L_IN2      = 16;
+constexpr uint8_t MOTOR_R_IN3      = 17;
+constexpr uint8_t MOTOR_R_IN4      = 18;
 // DRV8833 nSLEEP wired to GPIO41 — must be driven HIGH at boot to enable drivers.
 constexpr uint8_t MOTOR_SLEEP      = 41;
 
@@ -34,15 +35,15 @@ constexpr uint8_t ENC_R_B          = 39;
 // IR_CAL_*, IR_DIST_TABLE (IRCalibration.h), and ALIGN_*_TARGET (main.cpp)
 // must be re-captured at the new 90° geometry — old values were for 30°
 // and are STALE.
-constexpr uint8_t RX_L             = 10;
-constexpr uint8_t RX_LF            = 4;
-constexpr uint8_t RX_RF            = 1;
-constexpr uint8_t RX_R             = 7;
+constexpr uint8_t RX_L45             = 6;   //good
+constexpr uint8_t RX_LF            = 4; //good
+constexpr uint8_t RX_RF            = 1; //good
+constexpr uint8_t RX_R45             = 2; //good
 
-constexpr uint8_t EMIT_L           = 47;
-constexpr uint8_t EMIT_LF          = 13;
-constexpr uint8_t EMIT_RF          = 46;
-constexpr uint8_t EMIT_R           = 11;
+constexpr uint8_t EMIT_L45           = 45; //good
+constexpr uint8_t EMIT_LF          = 13; //good
+constexpr uint8_t EMIT_RF          = 11;  //good
+constexpr uint8_t EMIT_R45           = 12; //good
 
 constexpr uint8_t BUTTON_1         = 42;
 constexpr uint8_t BUZZER_PIN       = 40;
@@ -76,7 +77,7 @@ constexpr int     MOTOR_PWM_BITS    = 10;
 constexpr int     MOTOR_PWM_MAX     = 1023;
 
 // ── Motor polarity ────────────────────────────────────────────────────────────
-constexpr bool    MOTOR_L_INV      = true;
+constexpr bool    MOTOR_L_INV      = false;
 constexpr bool    MOTOR_R_INV      = true;
 
 // ── Wheel / encoder physics ───────────────────────────────────────────────────
@@ -171,8 +172,8 @@ constexpr float   TURN_CLEAR_FRAC  = 1.15f;
 // change, or surface-reflectivity change. Each value = differential
 // ambient-subtracted reading (no-wall ~0, wall present 1500–3500).
 constexpr int     IR_CAL_LF        = 3483;
-constexpr int     IR_CAL_L         = 1776;   // 2026-05-19, centered in 170 mm cell (42.5 mm to L wall)
-constexpr int     IR_CAL_R         = 1810;   // 2026-05-19, centered in 170 mm cell (42.5 mm to R wall)
+constexpr int     IR_CAL_L45       = 330;    // 2026-05-22, centered in cell, lit-amb formula
+constexpr int     IR_CAL_R45       = 403;    // 2026-05-22, centered in cell, lit-amb formula
 constexpr int     IR_CAL_RF        = 2702;
 
 // Wall-presence thresholds.
@@ -180,8 +181,8 @@ constexpr int     IR_CAL_RF        = 2702;
 // Front: front-sweep at 9cm gives RF=1504 (worst). 1400 keeps margin so
 // far-wall detection at full cell distance (≈9cm sensor-to-wall) doesn't
 // flicker. See test/sensor-cal-ble.cpp capture log 2026-05-17.
-constexpr int     WALL_SIDE_THRESH  = 900;
-constexpr int     WALL_FRONT_THRESH = 1400;
+constexpr int     WALL_SIDE_THRESH  = 150;   // lit-amb: open~0-80, wall@center~300-400; <150=open
+constexpr int     WALL_FRONT_THRESH = 300;   // lit-amb: open~12-80, wall~500+; <150=open
 
 // ── Drive loop misc ──────────────────────────────────────────────────────────
 constexpr int     TIMEOUT_MS       = 5000;    // per-cell drive timeout

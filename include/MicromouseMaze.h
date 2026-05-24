@@ -2,6 +2,7 @@
 #define MICROMOUSE_MAZE_H
 
 #include "PinConfig.h"
+#include "Tuning.h"
 
 enum AbsDir : uint8_t { DIR_NORTH = 0, DIR_EAST = 1, DIR_SOUTH = 2, DIR_WEST = 3 };
 
@@ -79,6 +80,56 @@ public:
         return false;
     }
 
+    int countUnvisited(uint8_t maxRow, uint8_t maxCol) const {
+        int n = 0;
+        for (int r = 0; r < maxRow; r++)
+            for (int c = 0; c < maxCol; c++)
+                if (!visited[r][c]) n++;
+        return n;
+    }
+
+    // Multi-source BFS seeded from every unvisited cell in the active region.
+    // Robot always routes toward the nearest unexplored territory first.
+    // Falls back to normal floodFill if no unvisited cells remain.
+    void floodFillExplore(uint8_t maxRow, uint8_t maxCol) {
+        for (int r = 0; r < MAZE_SIZE; r++)
+            for (int c = 0; c < MAZE_SIZE; c++)
+                flood[r][c] = FLOOD_INFINITY;
+
+        static uint8_t qRow[MAZE_CELLS];
+        static uint8_t qCol[MAZE_CELLS];
+        uint16_t head = 0, tail = 0;
+
+        for (int r = 0; r < maxRow; r++) {
+            for (int c = 0; c < maxCol; c++) {
+                if (!visited[r][c]) {
+                    flood[r][c] = 0;
+                    qRow[tail % MAZE_CELLS] = r;
+                    qCol[tail % MAZE_CELLS] = c;
+                    tail++;
+                }
+            }
+        }
+        if (tail == 0) { floodFill(); return; }
+
+        while (head != tail) {
+            uint8_t r = qRow[head % MAZE_CELLS];
+            uint8_t c = qCol[head % MAZE_CELLS];
+            head++;
+            uint8_t nextDist = flood[r][c] + 1;
+            for (int d = 0; d < 4; d++) {
+                if (hasWall(r, c, (AbsDir)d)) continue;
+                int nr = r + DIR_DR[d], nc = c + DIR_DC[d];
+                if (!inBounds(nr, nc)) continue;
+                if (flood[nr][nc] <= nextDist) continue;
+                flood[nr][nc] = nextDist;
+                qRow[tail % MAZE_CELLS] = nr;
+                qCol[tail % MAZE_CELLS] = nc;
+                tail++;
+            }
+        }
+    }
+
     void floodFill() {
         for (int r = 0; r < MAZE_SIZE; r++)
             for (int c = 0; c < MAZE_SIZE; c++)
@@ -114,7 +165,49 @@ public:
         }
     }
 
-    AbsDir bestDirectionBiased(uint8_t r, uint8_t c, AbsDir h, uint8_t &bestDist) const {
+    // Print ASCII maze to Serial. North at top, row 15 = top row.
+    // Each cell shows 2-char hex flood value; visited cells prefixed '*'.
+    // Walls: '+--' horizontal, '|' vertical.
+    void dump() const {
+        // Column header
+        Serial.print("   ");
+        for (int c = 0; c < MAZE_SIZE; c++) {
+            char buf[4]; snprintf(buf, sizeof(buf), "%2d ", c);
+            Serial.print(buf);
+        }
+        Serial.println();
+
+        for (int r = MAZE_SIZE - 1; r >= 0; r--) {
+            // North wall row
+            Serial.print("   ");
+            for (int c = 0; c < MAZE_SIZE; c++) {
+                Serial.print(hasWall(r, c, DIR_NORTH) ? "+--" : "+  ");
+            }
+            Serial.println("+");
+            // Cell row
+            char rowLabel[4]; snprintf(rowLabel, sizeof(rowLabel), "%2d ", r);
+            Serial.print(rowLabel);
+            for (int c = 0; c < MAZE_SIZE; c++) {
+                Serial.print(hasWall(r, c, DIR_WEST) ? "|" : " ");
+                uint8_t f = flood[r][c];
+                char cell[3];
+                if (f == FLOOD_INFINITY) {
+                    snprintf(cell, sizeof(cell), "%s", visited[r][c] ? "**" : "  ");
+                } else {
+                    snprintf(cell, sizeof(cell), "%02X", f);
+                }
+                Serial.print(cell);
+            }
+            Serial.println("|");
+        }
+        // South border
+        Serial.print("   ");
+        for (int c = 0; c < MAZE_SIZE; c++) Serial.print("+--");
+        Serial.println("+");
+    }
+
+    AbsDir bestDirectionBiased(uint8_t r, uint8_t c, AbsDir h, uint8_t &bestDist,
+                               bool penalizeVisited = false) const {
         bestDist = FLOOD_INFINITY;
         AbsDir best = h;
         int bestPref = 99;
@@ -123,15 +216,17 @@ public:
             int nr = r + DIR_DR[d], nc = c + DIR_DC[d];
             if (!inBounds(nr, nc)) continue;
             uint8_t dist = flood[nr][nc];
+            if (dist == FLOOD_INFINITY) continue;
+            if (penalizeVisited && visited[nr][nc]) {
+                uint16_t bumped = (uint16_t)dist + EXPLORE_VISITED_FLOOD_PENALTY;
+                dist = (bumped >= FLOOD_INFINITY) ? (uint8_t)(FLOOD_INFINITY - 1) : (uint8_t)bumped;
+            }
             int turn = ((int)d - (int)h + 4) % 4;
             int turnPref;
             if      (turn == 0) turnPref = 0;
             else if (turn == 3) turnPref = 1;
             else if (turn == 1) turnPref = 2;
             else                turnPref = 3;
-            // GreenYe: when flood distances tie, prefer unvisited cells to map
-            // the maze faster. Explored cells get a 4-point penalty so any
-            // unvisited neighbour beats any visited one at the same distance.
             int pref = (visited[nr][nc] ? 4 : 0) + turnPref;
             if (dist < bestDist || (dist == bestDist && pref < bestPref)) {
                 bestDist = dist;

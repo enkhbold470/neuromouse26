@@ -16,8 +16,8 @@ struct IRPair { uint8_t emit, rx; };
 
 static IRPair PAIRS[4] = {
     { EMIT_LF, RX_LF },
-    { EMIT_L,  RX_L  },
-    { EMIT_R,  RX_R  },
+    { EMIT_L45, RX_L45 },
+    { EMIT_R45, RX_R45 },
     { EMIT_RF, RX_RF },
 };
 
@@ -30,8 +30,8 @@ static bool  irFirstSample = true;
 
 // Side-IR cal targets. Default to PinConfig values; can be overridden at
 // runtime by calibration sketches if needed.
-static int calL = IR_CAL_L;
-static int calR = IR_CAL_R;
+static int calL = IR_CAL_L45;
+static int calR = IR_CAL_R45;
 
 static int readIR(const IRPair& p) {
     digitalWrite(p.emit, LOW);
@@ -41,7 +41,7 @@ static int readIR(const IRPair& p) {
     delayMicroseconds(80);
     int lit = analogRead(p.rx);
     digitalWrite(p.emit, LOW);
-    int d = amb - lit;
+    int d = lit - amb;
     return d < 0 ? 0 : d;
 }
 

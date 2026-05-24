@@ -199,10 +199,10 @@ static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCAL
 // PAIRS: 0=LF, 1=L, 2=R, 3=RF
 struct IRPair { uint8_t emit, rx; };
 static IRPair PAIRS[4] = {
-    { EMIT_L,  RX_L  },
-    { EMIT_LF, RX_LF },
-    { EMIT_RF, RX_RF },
-    { EMIT_R,  RX_R  },
+    { EMIT_L45, RX_L45 },
+    { EMIT_LF,  RX_LF  },
+    { EMIT_RF,  RX_RF  },
+    { EMIT_R45, RX_R45 },
 };
 static int irVal[4] = {0,0,0,0};
 
@@ -217,14 +217,14 @@ static int readIR(const IRPair& p) {
     delayMicroseconds(80);
     int lit = analogRead(p.rx);
     digitalWrite(p.emit, LOW);
-    int d = amb - lit;
+    int d = lit - amb;
     return d < 0 ? 0 : d;
 }
 static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
 
 // ── Calibration ──────────────────────────────────────────────────────────────
-static int calL = IR_CAL_L;
-static int calR = IR_CAL_R;
+static int calL = IR_CAL_L45;
+static int calR = IR_CAL_R45;
 
 // ── PID ──────────────────────────────────────────────────────────────────────
 // IR centering gains + clamp moved into the Tuning struct above (live-tunable).
@@ -583,7 +583,7 @@ static int gcalSampleIRPair(uint8_t emit, uint8_t rx) {
     delayMicroseconds(80);
     int lit = analogRead(rx);
     digitalWrite(emit, LOW);
-    int d = amb - lit;
+    int d = lit - amb;
     return d < 0 ? 0 : d;
 }
 static void oledGyroCal(int irLF, int irRF, bool still, int stillMs, const char* msg) {

@@ -13,7 +13,10 @@
       "Read(//Users/elijah/.platformio/penv/bin/**)",
       "mcp__playwright__browser_take_screenshot",
       "Bash(/Users/elijah/.platformio/penv/bin/pio run *)",
-      "Bash(grep -n \"scriptLen == 0\\\\|state = IDLE;$\\\\|RUN END last\" /Users/inky/Desktop/neuromouse26/test/wall-follow-encoder-pcnt.cpp)"
+      "Bash(grep -n \"scriptLen == 0\\\\|state = IDLE;$\\\\|RUN END last\" /Users/inky/Desktop/neuromouse26/test/wall-follow-encoder-pcnt.cpp)",
+      "Bash(git -C /Users/elijah/program/neuromouse26 show HEAD --stat)",
+      "Bash(git -C /Users/elijah/program/neuromouse26 show HEAD -- include/PinConfig.h src/main.cpp)",
+      "Bash(~/.platformio/penv/bin/pio run *)"
     ]
   }
 }

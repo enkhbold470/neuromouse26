@@ -14,10 +14,10 @@
 struct IRPair { const char* name; uint8_t emit, rx; };
 
 static IRPair PAIRS[4] = {
-    { "L ", EMIT_L,  RX_L  },
+    { "L45", EMIT_L45, RX_L45 },
     { "LF", EMIT_LF, RX_LF },
     { "RF", EMIT_RF, RX_RF },
-    { "R ", EMIT_R,  RX_R  },
+    { "R45", EMIT_R45, RX_R45 },
 };
 
 // Shared between sampler task and printer. volatile = no caching across cores.
@@ -35,7 +35,7 @@ static inline int readDelta(const IRPair& p) {
     delayMicroseconds(80);
     int lit = analogRead(p.rx);
     digitalWrite(p.emit, LOW);
-    int d = amb - lit;
+    int d = lit - amb;
     return d < 0 ? 0 : d;
 }
 

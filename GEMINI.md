@@ -97,7 +97,7 @@ Fast run differs from explore in two ways only:
 ## Development Conventions
 
 ### Coding Style
-- **Lean dependencies:** main firmware pulls only `Wire`, `U8g2`, `Preferences`, and the four `Micromouse*.h` headers. No FastLED, no FreeRTOS task fan-out, no WiFi. `lib_deps` adds `NimBLE-Arduino` and `U8g2`; FastLED is not a dep of `env:main`.
+- **Lean dependencies:** main firmware pulls `Wire`, `U8g2`, `Preferences`, `FastLED` (for onboard WS2812B on `rgb_pin=48`), and the four `Micromouse*.h` headers. No FreeRTOS task fan-out, no WiFi. `lib_deps` for `env:main` adds `NimBLE-Arduino`, `U8g2`, and `FastLED`.
 - **Hardware Abstraction:** Hardware-specific code is encapsulated in classes (`MicromouseMotor`, `MicromouseEncoder`).
 
 ### Testing

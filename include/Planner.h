@@ -1,9 +1,8 @@
 // include/Planner.h — maze setup, wall sensing, move-script construction.
 //
-// `setupMaze` closes the active sub-region's far borders and overrides the
-// classical-centre goal to (GOAL_ROW, GOAL_COL).
+// `setupMaze` resets the full 16×16 grid (perimeter walls + centre 2×2 goal).
 // `senseAndStoreWalls` samples IR + writes F/L/R walls into the maze.
-// `buildMoveScript` decides between SPOT 90 / SPOT 180 + recover / 1-cell FWD,
+// `buildMoveScript` decides between SPOT 90 / SPOT 180 (dead end) / 1-cell FWD,
 // then in fast-run extends the FWD through any straight cells ahead.
 //
 // `maze` is defined in main.cpp — extern'd here.
@@ -21,37 +20,77 @@
 extern MicromouseMaze maze;
 
 static void setupMaze() {
-    maze.reset();
-    for (int c = 0; c < MAZE_COLS; c++) {
-        maze.setWall(MAZE_ROWS - 1, c, DIR_NORTH, true);
+    maze.reset();  // 16×16 borders + traditional centre 2×2 goal
+}
+
+// Wall sensing sets AND clears edges from IR each cell arrival. Stale "walls"
+// that were never cleared caused 2-cell ping-pong (map thought only A↔B was open).
+// Readings above WALL_SIDE_MAX are skipped (saturation / too close).
+constexpr int WALL_SIDE_MAX = 2000;
+
+static inline bool sideWallPresent(int raw) {
+    return raw > WALL_SIDE_THRESH && raw < WALL_SIDE_MAX;
+}
+
+// Do not clear perimeter borders (neighbor out of bounds).
+static void setWallSensed(int r, int c, AbsDir d, bool present) {
+    if (!present) {
+        int nr = r + DIR_DR[d], nc = c + DIR_DC[d];
+        if (!maze.inBounds(nr, nc)) return;
     }
-    for (int r = 0; r < MAZE_ROWS; r++) {
-        maze.setWall(r, MAZE_COLS - 1, DIR_EAST, true);
-    }
-    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+    maze.setWall(r, c, d, present);
+}
+
+// Called at ~50% of the forward move, while robot is between cells.
+// At mid-cell the 45° sensors are far enough from any front wall to read true
+// side walls of the destination cell without front-wall contamination.
+static void senseSideWallsMidCell(int r, int c, int heading) {
+    if (!maze.inBounds(r, c)) return;
+    sampleIR();
+    AbsDir lt = (AbsDir)((heading + 3) % 4);
+    AbsDir rt = (AbsDir)((heading + 1) % 4);
+    setWallSensed(r, c, lt, sideWallPresent(irVal[1]));
+    setWallSensed(r, c, rt, sideWallPresent(irVal[2]));
+    Serial.printf("[MID] (%d,%d) hd=%c L=%d R=%d\n",
+                  r, c, "NESW"[heading], irVal[1], irVal[2]);
+}
+
+static bool irFrontBlocked() {
+    return irVal[0] > WALL_FRONT_THRESH || irVal[3] > WALL_FRONT_THRESH;
+}
+
+static bool mazeDeadEnd(int r, int c, uint8_t h) {
+    AbsDir f = (AbsDir)h;
+    AbsDir l = (AbsDir)((h + 3) % 4);
+    AbsDir rt = (AbsDir)((h + 1) % 4);
+    return maze.hasWall(r, c, f) && maze.hasWall(r, c, l) && maze.hasWall(r, c, rt);
 }
 
 static void senseAndStoreWalls() {
     sampleIR();
-    bool wF = irVal[0] > WALL_FRONT_THRESH || irVal[3] > WALL_FRONT_THRESH;
-    bool wL = irVal[1] > WALL_SIDE_THRESH;
-    bool wR = irVal[2] > WALL_SIDE_THRESH;
+    bool wF = irFrontBlocked();
+    bool wL = sideWallPresent(irVal[1]);
+    bool wR = sideWallPresent(irVal[2]);
     AbsDir hd = (AbsDir)robotHeading;
     AbsDir lt = (AbsDir)((robotHeading + 3) % 4);
     AbsDir rt = (AbsDir)((robotHeading + 1) % 4);
-    maze.setWall(robotRow, robotCol, hd, wF);
-    maze.setWall(robotRow, robotCol, lt, wL);
-    maze.setWall(robotRow, robotCol, rt, wR);
-    Serial.printf("[SENSE] (%d,%d) hd=%c F=%d L=%d R=%d irLF=%d irRF=%d irL=%d irR=%d\n",
-                  robotRow, robotCol, "NESW"[robotHeading], wF, wL, wR,
-                  irVal[0], irVal[3], irVal[1], irVal[2]);
+    setWallSensed(robotRow, robotCol, hd, wF);
+    setWallSensed(robotRow, robotCol, lt, wL);
+    setWallSensed(robotRow, robotCol, rt, wR);
+    Serial.printf("[SENSE] (%d,%d) hd=%c F=%s LF=%d RF=%d L=%s R=%s\n",
+                  robotRow, robotCol, "NESW"[robotHeading],
+                  wF ? "wall" : "open", irVal[0], irVal[3],
+                  wL ? "wall" : "open", wR ? "wall" : "open");
+}
+
+static bool atDeadEnd() {
+    return mazeDeadEnd(robotRow, robotCol, robotHeading);
 }
 
 // Build a one-cell-move script: optional spot turn, then forward 1 cell (or
 // chain of consecutive straight cells in fast run).
 //
-// 180° turn (diff==2) is followed by a wall re-anchor:
-//   align-front → SPOT 180 → reverse 2 cm → forward 1 cell.
+// 180° at a dead end (diff==2): SPOT then 1 cell forward along bestDir (exit).
 //
 // `pendingOffsetTicks` is added to the forward target then cleared — lets
 // the first leg from start (or after a 180° re-anchor) compensate for the
@@ -66,19 +105,11 @@ static void buildMoveScript(AbsDir bestDir) {
     } else if (diff == 3) {
         scriptPushSpot(TURN_LEFT, 90.0f);
     } else if (diff == 2) {
-        // Dead-end exit. Sequence:
-        //   1. PH_ALIGN_FRONT — creep until front IR hits ALIGN_LF/RF_TARGET.
-        //   2. SPOT 180° — dead-end wall is now behind us.
-        //   3. Reverse DEADEND_REVERSE_MM (2 cm) at low speed.
-        //   4. Forward DEADEND_FWD_MM (1 cell pitch).
-        float ticksPerMm = (float)CELL_TICKS / 180.0f;
-        long  revTicks   = (long)(DEADEND_REVERSE_MM * ticksPerMm + 0.5f);
-        long  fwdTicks   = (long)(DEADEND_FWD_MM     * ticksPerMm + 0.5f);
-        scriptPushAlignFront();
+        // Dead end: face the exit, then drive one cell back out.
         scriptPushSpot(TURN_RIGHT, 180.0f);
-        scriptPushFwd(-revTicks);
-        scriptPushFwd( fwdTicks);
+        long fwd = CELL_TICKS + pendingOffsetTicks;
         pendingOffsetTicks = 0;
+        scriptPushFwd(fwd);
         plannedHeading = bestDir;
         plannedRow     = robotRow + DIR_DR[bestDir];
         plannedCol     = robotCol + DIR_DC[bestDir];
@@ -102,13 +133,13 @@ static void buildMoveScript(AbsDir bestDir) {
     if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
-        int safetyCap = MAZE_ROWS * MAZE_COLS;
+        int safetyCap = MAZE_CELLS;
         while (safetyCap-- > 0) {
-            if (rr == GOAL_ROW && cc == GOAL_COL) break;
+            if (maze.isGoal(rr, cc)) break;
             if (maze.hasWall(rr, cc, hh)) break;
             int nr = rr + DIR_DR[hh];
             int nc = cc + DIR_DC[hh];
-            if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
+            if (!maze.inBounds(nr, nc)) break;
             uint8_t d;
             AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
             if (d == FLOOD_INFINITY) break;

@@ -136,12 +136,15 @@ static void onPhaseActivate() {
     }
 }
 
+static bool midCellSensed = false;  // reset by phaseEnter, fired once per FWD leg
+
 static void phaseEnter() {
     phaseStartTL     = leftEnc.getTicks();
     phaseStartTR     = rTicks();
     phaseStartUs     = micros();
     yawDeg           = 0.0f;
     phaseStartYawDeg = 0.0f;
+    midCellSensed    = false;
     if (runPhase == PH_SPOT || runPhase == PH_PIVOT) {
         float deg = (float)runTarget;
         float signedDeg = (runTurnDir == TURN_RIGHT) ? -deg : +deg;
@@ -164,7 +167,7 @@ static void scriptKick() {
 }
 
 // ── State machine ───────────────────────────────────────────────────────────
-enum State { IDLE, ENC_TEST, IR_TEST, FAST_SPEED_EDIT, EXPLORE_THINK, RUN, GOAL, CRASH };
+enum State { IDLE, ENC_TEST, IR_TEST, CAL_IR, MOTOR_TEST, FAST_SPEED_EDIT, EXPLORE_THINK, RUN, GOAL, CRASH };
 static State state = IDLE;
 
 // ── Setup ───────────────────────────────────────────────────────────────────
@@ -277,10 +280,28 @@ void loop() {
                 state = IR_TEST;
                 oledIrTest();
                 break;
+            case M_CAL_IR:
+                oledTerminal("Cal IR", "center robot\nbtn=start");
+                state = CAL_IR;
+                break;
+            case M_MOTOR_TEST: {
+                leftEnc.reset(); rightEnc.reset();
+                menuEncRef = rightEnc.getTicks();
+                state = MOTOR_TEST;
+                // motorTestStep and motorTestTimer initialised in the state case
+                break;
+            }
             case M_NVS_CLR:
                 nvsClearWalls();
                 Serial.println("[NVS] walls cleared");
                 oledTerminal("NVS", "cleared");
+                delay(600); oledMenu();
+                break;
+            case M_DUMP_MAZE:
+                Serial.println("[MAZE DUMP] walls + flood (hex), * = visited");
+                maze.floodFill();
+                maze.dump();
+                oledTerminal("Maze", "dumped->serial");
                 delay(600); oledMenu();
                 break;
             }
@@ -303,17 +324,104 @@ void loop() {
     case IR_TEST: {
         static uint32_t last = 0;
         if (millis() - last > 100) {
-            sampleIR();
+            // Read amb+lit individually for serial diagnostic
+            int amb[4], lit[4], delta[4];
+            for (int i = 0; i < 4; i++) {
+                digitalWrite(PAIRS[i].emit, LOW);  delayMicroseconds(80);
+                amb[i] = analogRead(PAIRS[i].rx);
+                digitalWrite(PAIRS[i].emit, HIGH); delayMicroseconds(80);
+                lit[i] = analogRead(PAIRS[i].rx);
+                digitalWrite(PAIRS[i].emit, LOW);
+                int d = lit[i] - amb[i];
+                delta[i] = d < 0 ? 0 : d;
+                irVal[i] = delta[i];
+            }
             oledIrTest();
-            Serial.printf("[IR] LF=%d L=%d R=%d RF=%d frontMm=%.1f\n",
-                          irVal[0], irVal[1], irVal[2], irVal[3],
-                          IRCal::estimateFrontDistMM(irVal[0], irVal[3]));
+            // PAIRS: 0=LF 1=L45 2=R45 3=RF
+            Serial.printf("[IR] LF  emit=IO%-2d rx=IO%-2d amb=%4d lit=%4d d=%4d\n", PAIRS[0].emit, PAIRS[0].rx, amb[0], lit[0], delta[0]);
+            Serial.printf("[IR] RF  emit=IO%-2d rx=IO%-2d amb=%4d lit=%4d d=%4d\n", PAIRS[3].emit, PAIRS[3].rx, amb[3], lit[3], delta[3]);
+            Serial.printf("[IR] R45 emit=IO%-2d rx=IO%-2d amb=%4d lit=%4d d=%4d\n", PAIRS[2].emit, PAIRS[2].rx, amb[2], lit[2], delta[2]);
+            Serial.printf("[IR] L45 emit=IO%-2d rx=IO%-2d amb=%4d lit=%4d d=%4d\n", PAIRS[1].emit, PAIRS[1].rx, amb[1], lit[1], delta[1]);
+            Serial.printf("[IR] front=%.1f mm\n---\n", IRCal::estimateFrontDistMM(delta[0], delta[3]));
             last = millis();
         }
         if (buttonEdge()) {
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
+        }
+        break;
+    }
+
+    case CAL_IR: {
+        // Wait for button press → sample 32 reads → update calL/calR → display result.
+        static bool calDone = false;
+        if (!calDone && buttonEdge()) {
+            // 32-sample mean of L45 (PAIRS[1]) and R45 (PAIRS[2])
+            long sumL = 0, sumR = 0;
+            for (int n = 0; n < 32; n++) {
+                digitalWrite(PAIRS[1].emit, LOW);  delayMicroseconds(80);
+                int aL = analogRead(PAIRS[1].rx);
+                digitalWrite(PAIRS[1].emit, HIGH); delayMicroseconds(80);
+                int lL = analogRead(PAIRS[1].rx);
+                digitalWrite(PAIRS[1].emit, LOW);
+                sumL += max(0, lL - aL);
+
+                digitalWrite(PAIRS[2].emit, LOW);  delayMicroseconds(80);
+                int aR = analogRead(PAIRS[2].rx);
+                digitalWrite(PAIRS[2].emit, HIGH); delayMicroseconds(80);
+                int lR = analogRead(PAIRS[2].rx);
+                digitalWrite(PAIRS[2].emit, LOW);
+                sumR += max(0, lR - aR);
+
+                delay(5);
+            }
+            calL = (int)(sumL / 32);
+            calR = (int)(sumR / 32);
+            calDone = true;
+            oledCalIrResult(calL, calR);
+            Serial.printf("[CAL IR] L45=%d  R45=%d  (paste into PinConfig.h IR_CAL_L45/R45)\n", calL, calR);
+        } else if (calDone && buttonEdge()) {
+            calDone = false;
+            menuEncRef = rightEnc.getTicks();
+            oledMenu();
+            state = IDLE;
+        }
+        break;
+    }
+
+    case MOTOR_TEST: {
+        // Button press advances to next step; after all 4, exits to menu.
+        static const struct { const char* label; int l; int r; } MT_STEPS[] = {
+            {"L fwd      ", +400,    0},
+            {"L rev      ", -400,    0},
+            {"R fwd      ",    0, +400},
+            {"R rev      ",    0, -400},
+        };
+        static int mtStep = -1;  // -1 = uninitialised sentinel
+
+        if (mtStep == -1) {
+            mtStep = 0;
+            leftMotor.drive(MT_STEPS[0].l);
+            rightMotor.drive(MT_STEPS[0].r);
+            Serial.printf("[MOTOR TEST] step 0: %s\n", MT_STEPS[0].label);
+            oledTerminal("MotorTest", MT_STEPS[0].label);
+        }
+
+        if (buttonEdge()) {
+            leftMotor.brake(); rightMotor.brake();
+            mtStep++;
+            if (mtStep >= 4) {
+                mtStep = -1;
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+            } else {
+                leftMotor.drive(MT_STEPS[mtStep].l);
+                rightMotor.drive(MT_STEPS[mtStep].r);
+                Serial.printf("[MOTOR TEST] step %d: %s\n", mtStep, MT_STEPS[mtStep].label);
+                oledTerminal("MotorTest", MT_STEPS[mtStep].label);
+            }
         }
         break;
     }
@@ -358,7 +466,28 @@ void loop() {
         yawDeg       = 0.0f;
         yawTargetDeg = 0.0f;
         if (exploreMode) {
-            senseAndStoreWalls();
+            if (!maze.visited[robotRow][robotCol]) {
+                senseAndStoreWalls();
+            }
+            if (atDeadEnd()) {
+                AbsDir back = (AbsDir)((robotHeading + 2) % 4);
+                Serial.printf("[DEADEND] (%d,%d,%c) → 180 + exit cell\n",
+                              robotRow, robotCol, "NESW"[robotHeading]);
+                maze.visited[robotRow][robotCol] = true;
+                // Spin 180° then drive back one full cell. EXPLORE_THINK
+                // re-senses from the previous cell where L/R branches exist.
+                scriptReset();
+                scriptPushSpot(TURN_RIGHT, 180.0f);
+                long fwd = CELL_TICKS + pendingOffsetTicks;
+                pendingOffsetTicks = 0;
+                scriptPushFwd(fwd);
+                plannedHeading = (uint8_t)back;
+                plannedRow     = robotRow + DIR_DR[back];
+                plannedCol     = robotCol + DIR_DC[back];
+                scriptKick();
+                state = RUN;
+                break;
+            }
         }
         maze.visited[robotRow][robotCol] = true;
         if (maze.isGoal(robotRow, robotCol)) {
@@ -376,15 +505,41 @@ void loop() {
                 maze.setGoalSingle(START_ROW, START_COL);
                 returnHomeMode = true;
                 // Fall through into floodFill / planning with the new goal.
-            } else {
-                // Reached the final destination (fast-run goal, or explore
-                // home after round trip). Spin 180° in place, then GOAL.
-                if (exploreMode) {
-                    // Restore the forward goal in the maze so the saved
-                    // walls are paired with the right target for fast run.
-                    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
-                    if (nvsSaveWalls()) Serial.println("[NVS] walls saved (round trip done)");
+            } else if (exploreMode && returnHomeMode) {
+                // Back home — check for any unvisited cells before stopping.
+                int ur = -1, uc = -1, bestManhattan = 9999;
+                for (int r = 0; r < MAZE_ROWS; r++) {
+                    for (int c = 0; c < MAZE_COLS; c++) {
+                        if (!maze.visited[r][c]) {
+                            int d = abs(r - (int)robotRow) + abs(c - (int)robotCol);
+                            if (d < bestManhattan) { bestManhattan = d; ur = r; uc = c; }
+                        }
+                    }
                 }
+                if (ur >= 0) {
+                    Serial.printf("--- home reached, unvisited (%d,%d) remain, targeting (%d,%d) ---\n",
+                                  MAZE_ROWS * MAZE_COLS - /* rough */ 0, 0, ur, uc);
+                    maze.setGoalSingle(ur, uc);
+                    // returnHomeMode stays true; we'll re-check each time we hit a goal
+                    // Fall through to floodFill / planning below.
+                } else {
+                    // All reachable cells visited — wrap up.
+                    maze.setGoalCentre4();
+                    if (nvsSaveWalls()) Serial.println("[NVS] walls saved (full explore done)");
+                    Serial.printf("--- FULLY EXPLORED, spinning 180 ---\n");
+                    oledTerminal("DONE!", "full");
+                    scriptReset();
+                    scriptPushSpot(TURN_RIGHT, 180.0f);
+                    plannedRow     = robotRow;
+                    plannedCol     = robotCol;
+                    plannedHeading = (robotHeading + 2) % 4;
+                    finalTurnPending = true;
+                    scriptKick();
+                    state = RUN;
+                    break;
+                }
+            } else {
+                // Fast-run goal reached or explore forward goal reached (handled above).
                 Serial.printf("--- DONE at (%d,%d), spinning 180 ---\n",
                               robotRow, robotCol);
                 oledTerminal("DONE!", "spin");
@@ -399,21 +554,77 @@ void loop() {
                 break;
             }
         }
-        maze.floodFill();
+        // Explore: flood from all unvisited cells (return to branches after dead
+        // ends). Fast run / return-home: flood toward goal. Open-wall IR clears
+        // keep floodFillExplore from ping-ponging on a stale map.
+        bool routeToUnvisited = exploreMode && !returnHomeMode;
+        if (routeToUnvisited)
+            maze.floodFillExplore(MAZE_ROWS, MAZE_COLS);
+        else
+            maze.floodFill();
         uint8_t bestDist;
         AbsDir bestDir = maze.bestDirectionBiased(robotRow, robotCol,
-                                                  (AbsDir)robotHeading, bestDist);
+                                                  (AbsDir)robotHeading, bestDist,
+                                                  routeToUnvisited);
         if (bestDist == FLOOD_INFINITY) {
+            if (exploreMode) {
+                // False walls isolated us — force 180° and keep exploring.
+                Serial.printf("[RECOVER] (%d,%d,%c) flood=INF, forcing 180\n",
+                              robotRow, robotCol, "NESW"[robotHeading]);
+                AbsDir backDir = (AbsDir)((robotHeading + 2) % 4);
+                buildMoveScript(backDir);
+                scriptKick();
+                state = RUN;
+                break;
+            }
             stopMotors();
-            Serial.println("[CRASH] no reachable goal — boxed in");
-            oledTerminal("CRASH", "boxed");
+            // Re-sample so OLED shows current raw values
+            sampleIR();
+            bool dbgF = irVal[0] > WALL_FRONT_THRESH && irVal[3] > WALL_FRONT_THRESH;
+            bool dbgL = irVal[1] > WALL_SIDE_THRESH;
+            bool dbgR = irVal[2] > WALL_SIDE_THRESH;
+            // Print flood distances and wall bits for all 4 neighbours
+            int nr_N = robotRow + DIR_DR[DIR_NORTH], nc_N = robotCol + DIR_DC[DIR_NORTH];
+            int nr_E = robotRow + DIR_DR[DIR_EAST],  nc_E = robotCol + DIR_DC[DIR_EAST];
+            int nr_S = robotRow + DIR_DR[DIR_SOUTH], nc_S = robotCol + DIR_DC[DIR_SOUTH];
+            int nr_W = robotRow + DIR_DR[DIR_WEST],  nc_W = robotCol + DIR_DC[DIR_WEST];
+            Serial.printf("[CRASH] boxed (%d,%d,%c) walls=0x%02X\n",
+                          robotRow, robotCol, "NESW"[robotHeading], maze.walls[robotRow][robotCol]);
+            Serial.printf("[CRASH] floodN=%d floodE=%d floodS=%d floodW=%d\n",
+                          (nr_N>=0&&nr_N<MAZE_SIZE)?maze.flood[nr_N][nc_N]:255,
+                          (nr_E>=0&&nc_E<MAZE_SIZE)?maze.flood[nr_E][nc_E]:255,
+                          (nr_S>=0&&nr_S>=0)?maze.flood[nr_S][nc_S]:255,
+                          (nr_W>=0&&nc_W>=0)?maze.flood[nr_W][nc_W]:255);
+            Serial.printf("[CRASH] IR F=%d(LF=%d RF=%d) L=%d(%d) R=%d(%d) thr=%d\n",
+                          dbgF, irVal[0], irVal[3],
+                          dbgL, irVal[1], dbgR, irVal[2], WALL_FRONT_THRESH);
+            // OLED: walls bitmask + flood distances of neighbours
+            {
+                char line1[24], line2[24], line3[24];
+                snprintf(line1, sizeof(line1), "BOX(%d,%d)%c w=%02X f=%d", robotRow, robotCol, "NESW"[robotHeading], maze.walls[robotRow][robotCol], maze.flood[robotRow][robotCol]);
+                uint8_t fN = (nr_N>=0&&nr_N<MAZE_SIZE) ? maze.flood[nr_N][nc_N] : 255;
+                uint8_t fS = (nr_S>=0&&nr_S<MAZE_SIZE) ? maze.flood[nr_S][nc_S] : 255;
+                uint8_t fE = (nc_E>=0&&nc_E<MAZE_SIZE) ? maze.flood[nr_E][nc_E] : 255;
+                snprintf(line2, sizeof(line2), "fN=%d fS=%d fE=%d", fN, fS, fE);
+                snprintf(line3, sizeof(line3), "w4=%02X L=%d R=%d", (nr_S>=0&&nr_S<MAZE_SIZE)?maze.walls[nr_S][nc_S]:0, irVal[1], irVal[2]);
+                oled.clearBuffer();
+                oled.setFont(u8g2_font_5x7_tf);
+                oled.drawStr(0, 8,  line1);
+                oled.drawHLine(0, 10, 128);
+                oled.drawStr(0, 22, line2);
+                oled.drawStr(0, 34, line3);
+                oled.drawStr(0, 63, "btn=back");
+                oled.sendBuffer();
+            }
             rgbStateT0 = millis();
             state = CRASH;
             break;
         }
         if (!fastRunMode) {
-            Serial.printf("[PLAN] (%d,%d,%c) dist=%d → %c\n",
-                          robotRow, robotCol, "NESW"[robotHeading], bestDist, "NESW"[bestDir]);
+            Serial.printf("[PLAN] (%d,%d,%c) dist=%d uv=%d fHere=%d → %c\n",
+                          robotRow, robotCol, "NESW"[robotHeading], bestDist,
+                          routeToUnvisited ? maze.countUnvisited(MAZE_ROWS, MAZE_COLS) : 0,
+                          maze.flood[robotRow][robotCol], "NESW"[bestDir]);
         }
         buildMoveScript(bestDir);
         scriptKick();
@@ -529,6 +740,17 @@ void loop() {
         float avg;
         if (runPhase == PH_FORWARD) {
             avg = (float)((tL + tR) / 2);
+            // Mid-cell side-wall sense: fires once per forward leg when the robot
+            // is ~halfway through the cell. At this distance the 45° sensors are
+            // clear of any front wall, so L45/R45 read true side walls of the
+            // destination cell without contamination.
+            if (!fastRunMode && !midCellSensed
+                    && runTarget > 0
+                    && avg >= (float)(CELL_TICKS * 3 / 4)
+                    && !maze.visited[plannedRow][plannedCol]) {
+                senseSideWallsMidCell(plannedRow, plannedCol, plannedHeading);
+                midCellSensed = true;
+            }
         } else if (imuMode) {
             // Per-phase yaw zero — measure progress against the phase-entry snapshot.
             float dy = yawDeg - phaseStartYawDeg;
@@ -705,9 +927,9 @@ void loop() {
         float corr = 0.0f;
         if (runPhase == PH_FORWARD && USE_IR) {
             sampleIR();
-            constexpr float IR_CONF_LO    = 200.0f;
-            constexpr float IR_CONF_HI    = 800.0f;
-            constexpr float IR_EDGE_DELTA = 300.0f;
+            constexpr float IR_CONF_LO    = 10.0f;   // above noise floor
+            constexpr float IR_CONF_HI    = 150.0f;  // full conf well below cal@center(~330-403)
+            constexpr float IR_EDGE_DELTA = 60.0f;   // wall appear/vanish in 0-400 range
 
             if (irFirstSample) {
                 irLSm = irVal[1]; irRSm = irVal[2];

@@ -23,18 +23,18 @@ constexpr int IR_DIST_ROWS     = IR_DIST_MAX_CM - IR_DIST_MIN_CM + 1;
 
 // Per-sensor, indexed [cm-1][sensor]; sensor order: LF, RF.
 constexpr int IR_DIST_TABLE[IR_DIST_ROWS][2] = {
-    /*  1 cm */ { 3914, 3914 },
-    /*  2 cm */ { 3878, 3878 },
-    /*  3 cm */ { 3579, 3407 },   // interp
-    /*  4 cm */ { 3281, 2935 },   // interp
-    /*  5 cm */ { 2982, 2464 },
-    /*  6 cm */ { 2623, 2212 },   // interp
-    /*  7 cm */ { 2264, 1960 },   // interp
-    /*  8 cm */ { 1905, 1708 },
-    /*  9 cm */ { 1757, 1607 },   // interp
-    /* 10 cm */ { 1609, 1505 },   // interp
-    /* 11 cm */ { 1460, 1404 },   // interp
-    /* 12 cm */ { 1312, 1302 },
+    /*  1 cm */ { 1895, 2260 },
+    /*  2 cm */ { 1235, 1288 },
+    /*  3 cm */ { 865, 839 },   // interp
+    /*  4 cm */ { 651, 613 },   // interp
+    /*  5 cm */ { 495, 492 },
+    /*  6 cm */ { 407, 371 },   // interp
+    /*  7 cm */ { 341, 297 },   // interp
+    /*  8 cm */ { 281, 247 },
+    /*  9 cm */ { 233, 211 },   // interp
+    /* 10 cm */ { 191, 177 },   // interp
+    /* 11 cm */ { 165, 150 },   // interp
+    /* 12 cm */ { 141, 123 },
 };
 
 // Interp a single front-sensor raw reading -> mm via piecewise-linear

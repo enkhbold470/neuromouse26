@@ -14,20 +14,22 @@
 // Chassis 95×85, wheel center 55 mm from front edge. Cell pitch 180 mm
 // centre-to-centre, wall-to-wall opening 170 mm. Robot 85 mm wide in 170 mm
 // cell → 42.5 mm side clearance each side.
-constexpr float ROBOT_LEN_MM       =  95.0f;
-constexpr float ROBOT_WIDTH_MM     =  85.0f;
-constexpr float WHEEL_FRONT_OFF_MM =  55.0f;
+constexpr float ROBOT_LEN_MM       =  100.0f;
+constexpr float ROBOT_WIDTH_MM     =  80.0f;
+constexpr float WHEEL_FRONT_OFF_MM =  65.0f;
 constexpr float CELL_PITCH_MM      = 180.0f;
 constexpr float CELL_INNER_MM      = 170.0f;
-constexpr float CELL_SIDE_GAP_MM   =  42.5f;
+constexpr float CELL_SIDE_GAP_MM   =  45.0f;
 
-// Active maze sub-region. Allocated inside the 16×16 grid from PinConfig.h.
-constexpr uint8_t MAZE_ROWS = 6;
-constexpr uint8_t MAZE_COLS = 3;
+// Full IEEE 16×16 maze (MAZE_SIZE in PinConfig.h). Start SW corner (0,0) facing
+// North; goal is centre 2×2 cells (7,7)–(8,8) via setGoalCentre4() in reset().
+constexpr uint8_t MAZE_ROWS = MAZE_SIZE;
+constexpr uint8_t MAZE_COLS = MAZE_SIZE;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 1;
-constexpr uint8_t GOAL_COL  = 1;
+// Added to flood[visited neighbour] during explore so backtracking loses to
+// any path toward unvisited cells (junction after a dead end).
+constexpr uint8_t EXPLORE_VISITED_FLOOD_PENALTY = 64;
 
 // ── [B0] ★★★ MAIN POWER KNOB ★★★ ────────────────────────────────────────────
 // Single source-of-truth for motor breakaway PWM at the current
@@ -115,10 +117,8 @@ constexpr float    IR_CENTER_KI  =   0.0f;
 constexpr float    IR_CENTER_KD  =   2.0f;
 constexpr int      IR_CENTER_MAX =  15;
 
-// ── [E] DEAD-END HANDLING (PH_ALIGN_FRONT + 180° exit) ──────────────────────
-// Before exiting a dead-end, creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET
-// (raw counts at 37.5 mm gap on THIS hardware, 2026-05-19). After align:
-// SPOT 180° → reverse DEADEND_REVERSE_MM → forward DEADEND_FWD_MM.
+// ── [E] PH_ALIGN_FRONT (optional creep primitive; not used in explore script) ─
+// Creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET. Dead ends use SPOT 180 only.
 constexpr int      ALIGN_LF_TARGET   = 3660;
 constexpr int      ALIGN_RF_TARGET   = 2940;
 constexpr int      ALIGN_TOL         =  150;

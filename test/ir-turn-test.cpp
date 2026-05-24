@@ -37,10 +37,10 @@ static void stopMotors() { motorL.brake(); motorR.brake(); }
 // ── IR ────────────────────────────────────────────────────────────────────────
 struct IRPair { uint8_t emit, rx; };
 static const IRPair PAIRS[4] = {
-    { EMIT_LF, RX_LF },
-    { EMIT_L,  RX_L  },
-    { EMIT_R,  RX_R  },
-    { EMIT_RF, RX_RF },
+    { EMIT_LF,  RX_LF  },
+    { EMIT_L45, RX_L45 },
+    { EMIT_R45, RX_R45 },
+    { EMIT_RF,  RX_RF  },
 };
 static int irVal[4];
 
@@ -50,7 +50,7 @@ static int readIR(const IRPair& p) {
     digitalWrite(p.emit, HIGH); delayMicroseconds(80);
     int lit = analogRead(p.rx);
     digitalWrite(p.emit, LOW);
-    int d = amb - lit;
+    int d = lit - amb;
     return d < 0 ? 0 : d;
 }
 static void sampleIR() { for (int i = 0; i < 4; i++) irVal[i] = readIR(PAIRS[i]); }
@@ -291,12 +291,7 @@ static int    robotCol     = 0;
 static AbsDir robotHeading = DIR_NORTH;
 
 static void setupMaze() {
-    maze.reset();
-    // Bound the 6×3 active region within the 16×16 grid.
-    // reset() sets outer 16×16 borders; add inner bounds for rows 0-5, cols 0-2.
-    for (int c = 0; c < 3; c++) maze.setWall(5, c, DIR_NORTH, true);
-    for (int r = 0; r < 6; r++) maze.setWall(r, 2, DIR_EAST,  true);
-    maze.setGoalSingle(5, 2);
+    maze.reset();  // full 16×16 + centre 2×2 goal
     maze.floodFill();
 }
 
@@ -377,15 +372,15 @@ static Walls driveCell() {
         int lateral = 0;
 
         if (hasL && hasR) {
-            int posErr = (irVal[1] - IR_CAL_L) - (irVal[2] - IR_CAL_R);
+            int posErr = (irVal[1] - IR_CAL_L45) - (irVal[2] - IR_CAL_R45);
             if (abs(posErr) > IR_DEADBAND)
                 lateral = (int)constrain(IR_KP_DUAL * (float)posErr, (float)-IR_MAX, (float)IR_MAX);
         } else if (hasL) {
-            int posErr = irVal[1] - IR_CAL_L;
+            int posErr = irVal[1] - IR_CAL_L45;
             if (abs(posErr) > IR_DEADBAND)
                 lateral = (int)constrain(IR_KP_SINGLE * (float)posErr, (float)-IR_MAX, (float)IR_MAX);
         } else if (hasR) {
-            int posErr = -(irVal[2] - IR_CAL_R);
+            int posErr = -(irVal[2] - IR_CAL_R45);
             if (abs(posErr) > IR_DEADBAND)
                 lateral = (int)constrain(IR_KP_SINGLE * (float)posErr, (float)-IR_MAX, (float)IR_MAX);
         } else {
