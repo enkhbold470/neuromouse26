@@ -17,7 +17,7 @@
 extern MicromouseMaze maze;
 
 static Preferences _prefs;
-static const char* NVS_NS     = "mm26";
+static const char* NVS_NS     = "mm26"; 
 static const char* NVS_WALLS  = "walls";
 static const char* NVS_FSPEED = "fspeed";
 
@@ -40,6 +40,49 @@ static void nvsClearWalls() {
     if (!_prefs.begin(NVS_NS, false)) return;
     _prefs.remove(NVS_WALLS);
     _prefs.end();
+}
+
+// Print the NVS-saved walls to Serial as (a) a copy-pasteable C++ array and
+// (b) an ASCII map. Loads NVS into maze.walls as a side-effect — fine from
+// IDLE because setupMaze() resets walls on the next explore/fast run.
+static void nvsDumpWalls() {
+    if (!nvsLoadWalls()) {
+        Serial.println("[DUMP] no NVS walls saved");
+        return;
+    }
+    Serial.println();
+    Serial.println("[DUMP] === C++ array (paste into a header) ===");
+    Serial.printf("const uint8_t SAVED_WALLS[%d][%d] = {\n", MAZE_SIZE, MAZE_SIZE);
+    for (int r = 0; r < MAZE_SIZE; r++) {
+        Serial.print("  {");
+        for (int c = 0; c < MAZE_SIZE; c++) {
+            Serial.printf("0x%02x%s", maze.walls[r][c], (c == MAZE_SIZE - 1) ? "" : ",");
+        }
+        Serial.printf("}%s  // row %d\n", (r == MAZE_SIZE - 1) ? "" : ",", r);
+    }
+    Serial.println("};");
+    Serial.println();
+    Serial.println("[DUMP] === ASCII map (north up, ST=start, **=goal) ===");
+    for (int r = MAZE_SIZE - 1; r >= 0; r--) {
+        Serial.print("+");
+        for (int c = 0; c < MAZE_SIZE; c++)
+            Serial.print((maze.walls[r][c] & WALL_NORTH) ? "--+" : "  +");
+        Serial.println();
+        Serial.print((maze.walls[r][0] & WALL_WEST) ? "|" : " ");
+        for (int c = 0; c < MAZE_SIZE; c++) {
+            const char* content = "  ";
+            if (r == GOAL_ROW  && c == GOAL_COL ) content = "**";
+            else if (r == START_ROW && c == START_COL) content = "ST";
+            Serial.print(content);
+            Serial.print((maze.walls[r][c] & WALL_EAST) ? "|" : " ");
+        }
+        Serial.println();
+    }
+    Serial.print("+");
+    for (int c = 0; c < MAZE_SIZE; c++)
+        Serial.print((maze.walls[0][c] & WALL_SOUTH) ? "--+" : "  +");
+    Serial.println();
+    Serial.println("[DUMP] done");
 }
 
 static void nvsLoadFastSpeed() {

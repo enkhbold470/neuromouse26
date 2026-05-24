@@ -274,6 +274,12 @@ void loop() {
                 state = IR_TEST;
                 oledIrTest();
                 break;
+            case M_DUMP_NVS:
+                oledTerminal("NVS", "dumping...");
+                nvsDumpWalls();
+                oledTerminal("NVS", "see serial");
+                delay(800); oledMenu();
+                break;
             case M_NVS_CLR:
                 nvsClearWalls();
                 Serial.println("[NVS] walls cleared");

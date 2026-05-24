@@ -32,6 +32,7 @@ enum MenuItem {
     M_FAST_SPEED,
     M_ENC,
     M_IR_TEST,
+    M_DUMP_NVS,
     M_NVS_CLR,
     M_COUNT
 };
@@ -42,6 +43,7 @@ static const char* MENU_LABELS[M_COUNT] = {
     "Fast Speed",
     "Encoder Test",
     "IR Test",
+    "Dump Walls",
     "Clear NVS"
 };
 
