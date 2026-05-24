@@ -22,12 +22,12 @@ constexpr float CELL_INNER_MM      = 170.0f;
 constexpr float CELL_SIDE_GAP_MM   =  42.5f;
 
 // Active maze sub-region. Allocated inside the 16×16 grid from PinConfig.h.
-constexpr uint8_t MAZE_ROWS = 6;
-constexpr uint8_t MAZE_COLS = 6;
+constexpr uint8_t MAZE_ROWS = 16;
+constexpr uint8_t MAZE_COLS = 16;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 5;
-constexpr uint8_t GOAL_COL  = 5;
+constexpr uint8_t GOAL_ROW  = 7;
+constexpr uint8_t GOAL_COL  = 7;
 
 // ── [B0] ★★★ MAIN POWER KNOB ★★★ ────────────────────────────────────────────
 // Single source-of-truth for motor breakaway PWM at the current

@@ -4,8 +4,8 @@
 #include <Arduino.h>
 
 // IR sensor distance calibration table — LF and RF only.
-// Re-captured 2026-05-19 at 5 anchor points (1, 2, 5, 8, 12 cm); rows for
-// 3, 4, 6, 7, 9, 10, 11 cm are linear interp between anchors.
+// Anchors: 1, 2, 5, 8, 12 cm captured 2026-05-19; 4 cm anchor added
+// 2026-05-23. Rows 3, 6, 7, 9, 10, 11 cm are linear interp between anchors.
 //
 // LF and RF columns are monotonically decreasing in raw count vs distance,
 // so piecewise-linear interp is safe. L/R sensors are NOT in this table —
@@ -25,8 +25,8 @@ constexpr int IR_DIST_ROWS     = IR_DIST_MAX_CM - IR_DIST_MIN_CM + 1;
 constexpr int IR_DIST_TABLE[IR_DIST_ROWS][2] = {
     /*  1 cm */ { 3914, 3914 },
     /*  2 cm */ { 3878, 3878 },
-    /*  3 cm */ { 3579, 3407 },   // interp
-    /*  4 cm */ { 3281, 2935 },   // interp
+    /*  3 cm */ { 3841, 3684 },   // interp 2cm↔4cm
+    /*  4 cm */ { 3803, 3489 },
     /*  5 cm */ { 2982, 2464 },
     /*  6 cm */ { 2623, 2212 },   // interp
     /*  7 cm */ { 2264, 1960 },   // interp
