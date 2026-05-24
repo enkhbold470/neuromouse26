@@ -251,6 +251,19 @@ void loop() {
                     delay(800); oledMenu();
                     break;
                 }
+                // Restrict path planning to cells actually traversed during
+                // explore — otherwise flood-fill would route through
+                // unvisited cells (default walls=0) and bump real walls
+                // the robot never sensed.
+                {
+                    int unvisited = 0;
+                    for (int r = 0; r < MAZE_ROWS; r++)
+                        for (int c = 0; c < MAZE_COLS; c++)
+                            if (!maze.visited[r][c]) unvisited++;
+                    Serial.printf("[FAST] %d/%d cells unvisited — fortifying with walls\n",
+                                  unvisited, MAZE_ROWS * MAZE_COLS);
+                    fortifyUnvisited();
+                }
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
                 exploreMode = false; fastRunMode = true; returnHomeMode = false; finalTurnPending = false;
@@ -388,7 +401,7 @@ void loop() {
                 if (exploreMode) {
                     // Restore the forward goal in the maze so the saved
                     // walls are paired with the right target for fast run.
-                    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+                    maze.setGoalCentre4();
                     
                     if (nvsSaveWalls()) Serial.println("[NVS] walls saved (round trip done)");
                 }

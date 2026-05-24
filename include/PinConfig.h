@@ -96,7 +96,7 @@ constexpr float   NOMINAL_VBAT     = 7.4f;    // 2S full-charge target for comp
 // ── Encoder L/R equalization ─────────────────────────────────────────────────
 // Calibrated 2026-05-17 via on-device auto-calibration.
 // Equalizes accumulated rTicks() against leftEnc.getTicks() for equal travel.
-constexpr float   RIGHT_ENC_SCALE  = 1.0135f;
+constexpr float   RIGHT_ENC_SCALE  = 1.0028f;   // UCLA 2026-05-24: L/R = 19856/19800 from 15-cell push test
 
 // ── Cell / turn geometry ─────────────────────────────────────────────────────
 constexpr float   CELL_MM          = 180.0f;

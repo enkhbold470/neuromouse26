@@ -112,8 +112,8 @@ constexpr float    SPOT_180_DEG      = 180.0f;
 // IR_CAL_L / IR_CAL_R from PinConfig.h.
 constexpr float    IR_CENTER_KP  =   2.0f;
 constexpr float    IR_CENTER_KI  =   0.0f;
-constexpr float    IR_CENTER_KD  =   2.0f;
-constexpr int      IR_CENTER_MAX =  60;   // UCLA 2026-05-23: 15 → 60 so IR can overpower YAW_HOLD on wall contact
+constexpr float    IR_CENTER_KD  =   1.0f;
+constexpr int      IR_CENTER_MAX =  30;   // UCLA 2026-05-23: 15 → 60 so IR can overpower YAW_HOLD on wall contact
 
 // ── [E] DEAD-END HANDLING (PH_ALIGN_FRONT + 180° exit) ──────────────────────
 // Before exiting a dead-end, creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET
@@ -133,7 +133,7 @@ constexpr float    DEADEND_FWD_MM     = 180.0f;
 // START_OFFSET_TICKS = extra ticks on the first forward leg because the robot
 // starts pressed against the back wall of cell (0,0) — its center sits
 // ~41 mm behind the cell-(0,0) centre.
-constexpr long  CELL_TICKS             = 1385;   // UCLA 2026-05-23: 1400 × 178/180 (16.6 cm wall-to-wall)
+constexpr long  CELL_TICKS             = 1373;   // UCLA 2026-05-24: measured 19856 L ticks over 2575 mm (15-cell rear→front push)
 constexpr long  START_OFFSET_TICKS     =  322;
 constexpr long  PIVOT_TICKS_FALLBACK   =  900;   // used only if USE_IMU=false
 constexpr long  SPOT180_TICKS_FALLBACK =  906;   // used only if USE_IMU=false

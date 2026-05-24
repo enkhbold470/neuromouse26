@@ -17,13 +17,27 @@
 extern MicromouseMaze maze;
 
 static Preferences _prefs;
-static const char* NVS_NS     = "mm26"; 
-static const char* NVS_WALLS  = "walls";
-static const char* NVS_FSPEED = "fspeed";
+static const char* NVS_NS      = "mm26";
+static const char* NVS_WALLS   = "walls";
+static const char* NVS_VISITED = "visited";
+static const char* NVS_FSPEED  = "fspeed";
 
 static bool nvsSaveWalls() {
     if (!_prefs.begin(NVS_NS, false)) return false;
     _prefs.putBytes(NVS_WALLS, maze.walls, sizeof(maze.walls));
+    // Pack visited[][] into a 32-byte bitmap so fast-run can restrict
+    // path planning to cells the robot actually traversed (see
+    // fortifyUnvisited in Planner.h).
+    uint8_t bitmap[(MAZE_SIZE * MAZE_SIZE + 7) / 8] = {0};
+    for (int r = 0; r < MAZE_SIZE; r++) {
+        for (int c = 0; c < MAZE_SIZE; c++) {
+            if (maze.visited[r][c]) {
+                int bit = r * MAZE_SIZE + c;
+                bitmap[bit / 8] |= (uint8_t)(1u << (bit % 8));
+            }
+        }
+    }
+    _prefs.putBytes(NVS_VISITED, bitmap, sizeof(bitmap));
     _prefs.end();
     return true;
 }
@@ -31,7 +45,26 @@ static bool nvsSaveWalls() {
 static bool nvsLoadWalls() {
     if (!_prefs.begin(NVS_NS, true)) return false;
     bool ok = _prefs.isKey(NVS_WALLS);
-    if (ok) _prefs.getBytes(NVS_WALLS, maze.walls, sizeof(maze.walls));
+    if (ok) {
+        _prefs.getBytes(NVS_WALLS, maze.walls, sizeof(maze.walls));
+        // Visited bitmap is optional — older saves won't have it. Without
+        // it, fortifyUnvisited would block every cell, so treat missing
+        // visited as "everything was visited" (legacy behavior).
+        if (_prefs.isKey(NVS_VISITED)) {
+            uint8_t bitmap[(MAZE_SIZE * MAZE_SIZE + 7) / 8] = {0};
+            _prefs.getBytes(NVS_VISITED, bitmap, sizeof(bitmap));
+            for (int r = 0; r < MAZE_SIZE; r++) {
+                for (int c = 0; c < MAZE_SIZE; c++) {
+                    int bit = r * MAZE_SIZE + c;
+                    maze.visited[r][c] = (bitmap[bit / 8] & (1u << (bit % 8))) != 0;
+                }
+            }
+        } else {
+            for (int r = 0; r < MAZE_SIZE; r++)
+                for (int c = 0; c < MAZE_SIZE; c++)
+                    maze.visited[r][c] = true;
+        }
+    }
     _prefs.end();
     return ok;
 }
@@ -39,6 +72,7 @@ static bool nvsLoadWalls() {
 static void nvsClearWalls() {
     if (!_prefs.begin(NVS_NS, false)) return;
     _prefs.remove(NVS_WALLS);
+    _prefs.remove(NVS_VISITED);
     _prefs.end();
 }
 
@@ -71,7 +105,7 @@ static void nvsDumpWalls() {
         Serial.print((maze.walls[r][0] & WALL_WEST) ? "|" : " ");
         for (int c = 0; c < MAZE_SIZE; c++) {
             const char* content = "  ";
-            if (r == GOAL_ROW  && c == GOAL_COL ) content = "**";
+            if (maze.isGoal((uint8_t)r, (uint8_t)c)) content = "**";
             else if (r == START_ROW && c == START_COL) content = "ST";
             Serial.print(content);
             Serial.print((maze.walls[r][c] & WALL_EAST) ? "|" : " ");
