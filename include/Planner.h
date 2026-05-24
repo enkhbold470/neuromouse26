@@ -1,7 +1,8 @@
 // include/Planner.h — maze setup, wall sensing, move-script construction.
 //
 // `setupMaze` closes the active sub-region's far borders and sets the
-// classical centre-4 goal (7,7)(7,8)(8,7)(8,8).
+// centre goal cells listed in Tuning.h::GOAL_CENTRE_* (default for the
+// 7×7 sub-region is one cell at (GOAL_ROW, GOAL_COL)).
 // `senseAndStoreWalls` samples IR + writes F/L/R walls into the maze.
 // `buildMoveScript` decides between SPOT 90 / SPOT 180 + recover / 1-cell FWD,
 // then in fast-run extends the FWD through any straight cells ahead.
