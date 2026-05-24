@@ -178,7 +178,7 @@ constexpr int     IR_CAL_RF        = 2702;
 // Front: front-sweep at 9cm gives RF=1504 (worst). 1400 keeps margin so
 // far-wall detection at full cell distance (≈9cm sensor-to-wall) doesn't
 // flicker. See test/sensor-cal-ble.cpp capture log 2026-05-17.
-constexpr int     WALL_SIDE_THRESH  = 900;
+constexpr int     WALL_SIDE_THRESH  = 800;   // UCLA 2026-05-23: open-side reads <800 on this hardware
 constexpr int     WALL_FRONT_THRESH = 1400;
 
 // ── Drive loop misc ──────────────────────────────────────────────────────────

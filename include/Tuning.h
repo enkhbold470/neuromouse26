@@ -11,15 +11,15 @@
 #include "PinConfig.h"
 
 // ── [A] ROBOT + MAZE GEOMETRY (mm) ──────────────────────────────────────────
-// Chassis 95×85, wheel center 55 mm from front edge. Cell pitch 180 mm
-// centre-to-centre, wall-to-wall opening 170 mm. Robot 85 mm wide in 170 mm
-// cell → 42.5 mm side clearance each side.
+// Chassis 95×85, wheel center 55 mm from front edge. UCLA venue measured
+// 2026-05-23: wall-to-wall opening 166 mm → cell pitch ≈ 178 mm (12 mm walls).
+// Robot 85 mm wide in 166 mm cell → 40.5 mm side clearance each side.
 constexpr float ROBOT_LEN_MM       =  95.0f;
 constexpr float ROBOT_WIDTH_MM     =  85.0f;
 constexpr float WHEEL_FRONT_OFF_MM =  55.0f;
-constexpr float CELL_PITCH_MM      = 180.0f;
-constexpr float CELL_INNER_MM      = 170.0f;
-constexpr float CELL_SIDE_GAP_MM   =  42.5f;
+constexpr float CELL_PITCH_MM      = 178.0f;
+constexpr float CELL_INNER_MM      = 166.0f;
+constexpr float CELL_SIDE_GAP_MM   =  40.5f;
 
 // Active maze sub-region. Allocated inside the 16×16 grid from PinConfig.h.
 constexpr uint8_t MAZE_ROWS = 16;
@@ -46,7 +46,7 @@ constexpr uint8_t GOAL_COL  = 7;
 //      Wheels jerk hard / overshoot     → BASE too high.
 //   3. Add ~20 % headroom over the threshold so dirty wheels still go.
 //   4. Changing MOTOR_PWM_FREQ_HZ invalidates BASE — re-tune.
-constexpr int BASE_BREAKAWAY_PWM = 110;
+constexpr int BASE_BREAKAWAY_PWM = 110;   // UCLA 2026-05-23: +18% for stall-recovery torque
 
 // Derived ratios. `(BASE × N) / 10` is an integer-constexpr way to write N/10×.
 constexpr int FWD_STICTION_FF  = (BASE_BREAKAWAY_PWM * 10) / 10;   // 1.0×
@@ -110,10 +110,10 @@ constexpr float    SPOT_180_DEG      = 180.0f;
 // ── [D] IR CENTERING (forward phase only) ───────────────────────────────────
 // Trims L/R PWM bias to keep robot mid-corridor matching L/R raw counts to
 // IR_CAL_L / IR_CAL_R from PinConfig.h.
-constexpr float    IR_CENTER_KP  =   1.0f;
+constexpr float    IR_CENTER_KP  =   2.0f;
 constexpr float    IR_CENTER_KI  =   0.0f;
 constexpr float    IR_CENTER_KD  =   2.0f;
-constexpr int      IR_CENTER_MAX =  15;
+constexpr int      IR_CENTER_MAX =  60;   // UCLA 2026-05-23: 15 → 60 so IR can overpower YAW_HOLD on wall contact
 
 // ── [E] DEAD-END HANDLING (PH_ALIGN_FRONT + 180° exit) ──────────────────────
 // Before exiting a dead-end, creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET
@@ -133,7 +133,7 @@ constexpr float    DEADEND_FWD_MM     = 180.0f;
 // START_OFFSET_TICKS = extra ticks on the first forward leg because the robot
 // starts pressed against the back wall of cell (0,0) — its center sits
 // ~41 mm behind the cell-(0,0) centre.
-constexpr long  CELL_TICKS             = 1400;
+constexpr long  CELL_TICKS             = 1385;   // UCLA 2026-05-23: 1400 × 178/180 (16.6 cm wall-to-wall)
 constexpr long  START_OFFSET_TICKS     =  322;
 constexpr long  PIVOT_TICKS_FALLBACK   =  900;   // used only if USE_IMU=false
 constexpr long  SPOT180_TICKS_FALLBACK =  906;   // used only if USE_IMU=false
