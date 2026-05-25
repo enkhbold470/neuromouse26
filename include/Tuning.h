@@ -11,23 +11,38 @@
 #include "PinConfig.h"
 
 // ── [A] ROBOT + MAZE GEOMETRY (mm) ──────────────────────────────────────────
-// Chassis 95×85, wheel center 55 mm from front edge. Cell pitch 180 mm
-// centre-to-centre, wall-to-wall opening 170 mm. Robot 85 mm wide in 170 mm
-// cell → 42.5 mm side clearance each side.
+// Chassis 95×85, wheel center 55 mm from front edge. UCLA venue measured
+// 2026-05-23: wall-to-wall opening 166 mm → cell pitch ≈ 178 mm (12 mm walls).
+// Robot 85 mm wide in 166 mm cell → 40.5 mm side clearance each side.
 constexpr float ROBOT_LEN_MM       =  95.0f;
 constexpr float ROBOT_WIDTH_MM     =  85.0f;
 constexpr float WHEEL_FRONT_OFF_MM =  55.0f;
-constexpr float CELL_PITCH_MM      = 180.0f;
-constexpr float CELL_INNER_MM      = 170.0f;
-constexpr float CELL_SIDE_GAP_MM   =  42.5f;
+constexpr float CELL_PITCH_MM      = 178.0f;
+constexpr float CELL_INNER_MM      = 166.0f;
+constexpr float CELL_SIDE_GAP_MM   =  40.5f;
 
 // Active maze sub-region. Allocated inside the 16×16 grid from PinConfig.h.
-constexpr uint8_t MAZE_ROWS = 6;
-constexpr uint8_t MAZE_COLS = 3;
+constexpr uint8_t MAZE_ROWS = 16;
+constexpr uint8_t MAZE_COLS = 16;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-constexpr uint8_t GOAL_ROW  = 1;
-constexpr uint8_t GOAL_COL  = 1;
+constexpr uint8_t GOAL_ROW  = 7;
+constexpr uint8_t GOAL_COL  = 7;
+
+// Centre-goal cell list. Read by maze.setGoalCentre4() (called from
+// maze.reset() and from setupMaze() in Planner.h, and again at the
+// explore round-trip-end restoration in main.cpp). Tune for your maze:
+//   * classical 16×16 with 4-cell centre goal:
+//       GOAL_CENTRE_COUNT   = 4
+//       GOAL_CENTRE_ROWS[]  = { 7, 7, 8, 8 }
+//       GOAL_CENTRE_COLS[]  = { 7, 8, 7, 8 }
+//   * small sub-region with a single-cell goal (this 7×7 maze):
+//       GOAL_CENTRE_COUNT   = 1; slot 0 = (GOAL_ROW, GOAL_COL)
+// If COUNT < 4, unused slots are ignored — keep them in-bounds anyway so
+// nothing references an undefined cell if COUNT is later bumped.
+constexpr uint8_t GOAL_CENTRE_COUNT   = 4;
+constexpr uint8_t GOAL_CENTRE_ROWS[4] = { 7, 7, 8, 8 };
+constexpr uint8_t GOAL_CENTRE_COLS[4] = { 7, 8, 7, 8 };
 
 // ── [B0] ★★★ MAIN POWER KNOB ★★★ ────────────────────────────────────────────
 // Single source-of-truth for motor breakaway PWM at the current
@@ -46,7 +61,7 @@ constexpr uint8_t GOAL_COL  = 1;
 //      Wheels jerk hard / overshoot     → BASE too high.
 //   3. Add ~20 % headroom over the threshold so dirty wheels still go.
 //   4. Changing MOTOR_PWM_FREQ_HZ invalidates BASE — re-tune.
-constexpr int BASE_BREAKAWAY_PWM = 110;
+constexpr int BASE_BREAKAWAY_PWM = 110;   // UCLA 2026-05-23: +18% for stall-recovery torque
 
 // Derived ratios. `(BASE × N) / 10` is an integer-constexpr way to write N/10×.
 constexpr int FWD_STICTION_FF  = (BASE_BREAKAWAY_PWM * 10) / 10;   // 1.0×
@@ -72,14 +87,14 @@ constexpr float    FWD_V_CRUISE_TPS = 150.0f;  // EXPLORE cruise (slow for sense
 // mode ignores this knob.
 constexpr float    FAST_RUN_CRUISE_TPS_DEFAULT = FWD_V_CRUISE_TPS;
 constexpr float    FAST_RUN_CRUISE_TPS_MIN     =  400.0f;
-constexpr float    FAST_RUN_CRUISE_TPS_MAX     = 3000.0f;
+constexpr float    FAST_RUN_CRUISE_TPS_MAX     = 8000.0f;
 constexpr float    FAST_RUN_CRUISE_TPS_STEP    =  100.0f;
 
 constexpr float    FWD_ACCEL_TPS2    = 500.0f;
 constexpr float    FWD_DECEL_TPS2    = 500.0f;
 constexpr float    FWD_KV_SLOPE      =   0.12f;
 constexpr float    POS_KP            =   0.80f;
-constexpr float    POS_KD            =   0.10f;
+constexpr float    POS_KD            =   0.3f;
 constexpr int      POS_FRICTION_ZONE =  10;
 constexpr int      POS_STK_SOFT_BAND =  30;
 constexpr int      POS_HOLD_BAND     =  20;   // |posErr| < this → settle candidate
@@ -89,6 +104,19 @@ constexpr float    POS_STALL_VEL     =  30.0f;
 constexpr uint32_t POS_STALL_MS      = 200;
 constexpr int      POS_STALL_ERR_MAX =  40;
 constexpr float    BALANCE_KP        =   0.03f;  // (tL−tR) × this added as bias
+
+// Wall-bump detection + recovery (forward phase only):
+//   - 200 ms post-vel-collapse: if front IR confirms a wall → IR-anchored backup
+//   - 6 s deep-stall fallback: even without IR confirmation → abort
+// Recovery uses front-IR distance (IRCal::estimateFrontDistMM) to compute a
+// precise reverse distance so the robot lands at cell center after a wall hit,
+// not at whatever random offset the blind-timed backup happened to produce.
+constexpr uint32_t POS_BUMP_MS          =  200;    // IR-confirmed bump confirmation window
+constexpr int      POS_BUMP_BACKUP_PWM  =  130;    // reverse PWM during recovery
+constexpr uint32_t POS_BUMP_BACKUP_MS   =  250;    // blind-backup duration (fallback only — used when IR distance unreadable)
+constexpr uint32_t POS_BUMP_BACKUP_TIMEOUT_MS = 3000;  // safety cap on the encoder-monitored precise reverse
+constexpr uint32_t POS_HARD_STALL_MS    = 4000;    // deep-stall window: tolerate transient stalls up to 6 s before forcing recovery
+constexpr float    CELL_CENTER_FRONT_MM =  44.0f;  // front-IR distance at cell center (89 − 55 + 10, see PinConfig geometry)
 
 // ── [C] PIVOT / SPOT TURNS (yaw-IMU controller) ─────────────────────────────
 // YAW_STICTION_PWM / YAW_MAX_PWM are DERIVED from BASE_BREAKAWAY_PWM in [B0].
@@ -110,10 +138,10 @@ constexpr float    SPOT_180_DEG      = 180.0f;
 // ── [D] IR CENTERING (forward phase only) ───────────────────────────────────
 // Trims L/R PWM bias to keep robot mid-corridor matching L/R raw counts to
 // IR_CAL_L / IR_CAL_R from PinConfig.h.
-constexpr float    IR_CENTER_KP  =   1.0f;
+constexpr float    IR_CENTER_KP  =   2.0f;
 constexpr float    IR_CENTER_KI  =   0.0f;
-constexpr float    IR_CENTER_KD  =   2.0f;
-constexpr int      IR_CENTER_MAX =  15;
+constexpr float    IR_CENTER_KD  =   1.0f;
+constexpr int      IR_CENTER_MAX =  30;   // UCLA 2026-05-23: 15 → 60 so IR can overpower YAW_HOLD on wall contact
 
 // ── [E] DEAD-END HANDLING (PH_ALIGN_FRONT + 180° exit) ──────────────────────
 // Before exiting a dead-end, creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET
@@ -133,7 +161,7 @@ constexpr float    DEADEND_FWD_MM     = 180.0f;
 // START_OFFSET_TICKS = extra ticks on the first forward leg because the robot
 // starts pressed against the back wall of cell (0,0) — its center sits
 // ~41 mm behind the cell-(0,0) centre.
-constexpr long  CELL_TICKS             = 1400;
+constexpr long  CELL_TICKS             = 1373;   // UCLA 2026-05-24: measured 19856 L ticks over 2575 mm (15-cell rear→front push)
 constexpr long  START_OFFSET_TICKS     =  322;
 constexpr long  PIVOT_TICKS_FALLBACK   =  900;   // used only if USE_IMU=false
 constexpr long  SPOT180_TICKS_FALLBACK =  906;   // used only if USE_IMU=false

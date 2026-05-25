@@ -96,7 +96,7 @@ constexpr float   NOMINAL_VBAT     = 7.4f;    // 2S full-charge target for comp
 // ── Encoder L/R equalization ─────────────────────────────────────────────────
 // Calibrated 2026-05-17 via on-device auto-calibration.
 // Equalizes accumulated rTicks() against leftEnc.getTicks() for equal travel.
-constexpr float   RIGHT_ENC_SCALE  = 1.0135f;
+constexpr float   RIGHT_ENC_SCALE  = 1.0028f;   // UCLA 2026-05-24: L/R = 19856/19800 from 15-cell push test
 
 // ── Cell / turn geometry ─────────────────────────────────────────────────────
 constexpr float   CELL_MM          = 180.0f;
@@ -169,8 +169,8 @@ constexpr float   TURN_CLEAR_FRAC  = 1.15f;
 // change, or surface-reflectivity change. Each value = differential
 // ambient-subtracted reading (no-wall ~0, wall present 1500–3500).
 constexpr int     IR_CAL_LF        = 3483;
-constexpr int     IR_CAL_L         = 1776;   // 2026-05-19, centered in 170 mm cell (42.5 mm to L wall)
-constexpr int     IR_CAL_R         = 1810;   // 2026-05-19, centered in 170 mm cell (42.5 mm to R wall)
+constexpr int     IR_CAL_L         = 2288;   // 2026-05-19, centered in 170 mm cell (42.5 mm to L wall)
+constexpr int     IR_CAL_R         = 2504;   // 2026-05-19, centered in 170 mm cell (42.5 mm to R wall)
 constexpr int     IR_CAL_RF        = 2702;
 
 // Wall-presence thresholds.
@@ -178,7 +178,7 @@ constexpr int     IR_CAL_RF        = 2702;
 // Front: front-sweep at 9cm gives RF=1504 (worst). 1400 keeps margin so
 // far-wall detection at full cell distance (≈9cm sensor-to-wall) doesn't
 // flicker. See test/sensor-cal-ble.cpp capture log 2026-05-17.
-constexpr int     WALL_SIDE_THRESH  = 900;
+constexpr int     WALL_SIDE_THRESH  = 800;   // UCLA 2026-05-23: open-side reads <800 on this hardware
 constexpr int     WALL_FRONT_THRESH = 1400;
 
 // ── Drive loop misc ──────────────────────────────────────────────────────────

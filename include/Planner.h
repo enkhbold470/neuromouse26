@@ -1,7 +1,8 @@
 // include/Planner.h — maze setup, wall sensing, move-script construction.
 //
-// `setupMaze` closes the active sub-region's far borders and overrides the
-// classical-centre goal to (GOAL_ROW, GOAL_COL).
+// `setupMaze` closes the active sub-region's far borders and sets the
+// centre goal cells listed in Tuning.h::GOAL_CENTRE_* (default for the
+// 7×7 sub-region is one cell at (GOAL_ROW, GOAL_COL)).
 // `senseAndStoreWalls` samples IR + writes F/L/R walls into the maze.
 // `buildMoveScript` decides between SPOT 90 / SPOT 180 + recover / 1-cell FWD,
 // then in fast-run extends the FWD through any straight cells ahead.
@@ -28,7 +29,29 @@ static void setupMaze() {
     for (int r = 0; r < MAZE_ROWS; r++) {
         maze.setWall(r, MAZE_COLS - 1, DIR_EAST, true);
     }
-    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+    maze.setGoalCentre4();
+}
+
+// Fortify every unvisited cell with walls on all four sides. Called once at
+// fast-run start so flood-fill cannot route the robot through cells it never
+// sensed during explore (those cells default to all-walls-down = 0, which
+// the planner would happily treat as open corridors and ram into real walls
+// the robot never detected). After fortify, fast-run path planning is
+// strictly restricted to the visited subgraph.
+//
+// Goal cells the robot didn't reach during explore will end up isolated.
+// EXPLORE_THINK's flood-fill will then return FLOOD_INFINITY and bail to
+// CRASH — a loud "explore was incomplete" signal instead of a silent
+// wall-bump loop on the run.
+static void fortifyUnvisited() {
+    for (int r = 0; r < MAZE_ROWS; r++) {
+        for (int c = 0; c < MAZE_COLS; c++) {
+            if (maze.visited[r][c]) continue;
+            for (int d = 0; d < 4; d++) {
+                maze.setWall(r, c, (AbsDir)d, true);  // mirrors to neighbour
+            }
+        }
+    }
 }
 
 static void senseAndStoreWalls() {
@@ -60,10 +83,24 @@ static void buildMoveScript(AbsDir bestDir) {
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
 
+    // Pre-turn front-wall anchor (explore + return-home only). When the
+    // planner wants a 90° turn AND the current cell has a front wall,
+    // creep into PH_ALIGN_FRONT first so the SPOT happens from a known
+    // position (LF/RF ≈ ALIGN_*_TARGET, ~37.5 mm front gap). Re-zeroes
+    // both encoder reference (via phaseEnter) AND yawDeg integration,
+    // bounding drift from long straight runs. Fast run skips it because
+    // sustained-speed motion has no time for ALIGN creep — fast run
+    // trusts the saved map + open-loop tick targets.
+    bool preTurnAlign = !fastRunMode
+                        && (diff == 1 || diff == 3)
+                        && maze.hasWall(robotRow, robotCol, (AbsDir)robotHeading);
+
     if (diff == 1) {
         // Spot at cell center (no translation). Same in explore and fast run.
+        if (preTurnAlign) scriptPushAlignFront();
         scriptPushSpot(TURN_RIGHT, 90.0f);
     } else if (diff == 3) {
+        if (preTurnAlign) scriptPushAlignFront();
         scriptPushSpot(TURN_LEFT, 90.0f);
     } else if (diff == 2) {
         // Dead-end exit. Sequence:
@@ -94,21 +131,45 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
 
-    // Fast-run straight-chain extension: fuse consecutive straight cells into
-    // one PH_FORWARD. The trapezoid in the executor naturally stretches
-    // accel → cruise → decel over the whole chain, so longer straights hit
-    // higher peak speed. Chain breaks at any turn; endPhase brakes before
-    // the next SPOT so wheels are stationary at the turn.
-    if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
+    // Straight-chain extension: fuse consecutive straight cells into one
+    // PH_FORWARD so the trapezoid stretches accel → cruise → decel over the
+    // whole chain. Chain breaks at any turn; endPhase brakes before the next
+    // SPOT so wheels are stationary at the turn.
+    //
+    //   fastRunMode    — full NVS map, fuse freely.
+    //   returnHomeMode — only fuse through cells visited on the forward leg
+    //                    (walls known). Stops at any unvisited cell so the
+    //                    per-cell sense step still fires on unknown territory.
+    //   EXPLORE mode (neither flag) — NEVER chain. Per-cell brake gives IR
+    //                    centering a re-anchor opportunity every cell;
+    //                    chaining was tested 2026-05-23 (UCLA) and caused
+    //                    lateral-drift accumulation across cells with no
+    //                    intermediate re-anchor.
+    //
+    // Goal break point flips to (START_ROW, START_COL) during return-home so
+    // we don't fuse past the actual current target.
+    bool chainAllowed = fastRunMode || returnHomeMode;
+    if (chainAllowed && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
         int safetyCap = MAZE_ROWS * MAZE_COLS;
         while (safetyCap-- > 0) {
-            if (rr == GOAL_ROW && cc == GOAL_COL) break;
+            // Stop the chain at the current run's target. Return-home goal is
+            // the single start cell; forward-run goal is any of the centre-4
+            // cells (use isGoal so we don't fuse past the first one entered).
+            if (returnHomeMode) {
+                if (rr == (int)START_ROW && cc == (int)START_COL) break;
+            } else {
+                if (maze.isGoal((uint8_t)rr, (uint8_t)cc)) break;
+            }
             if (maze.hasWall(rr, cc, hh)) break;
             int nr = rr + DIR_DR[hh];
             int nc = cc + DIR_DC[hh];
             if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
+            // Return-home: only chain through visited (= sensed) cells.
+            // Fast run already has the full NVS map so this guard is
+            // skipped entirely.
+            if (!fastRunMode && !maze.visited[nr][nc]) break;
             uint8_t d;
             AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
             if (d == FLOOD_INFINITY) break;
@@ -120,8 +181,8 @@ static void buildMoveScript(AbsDir bestDir) {
         plannedRow     = rr;
         plannedCol     = cc;
         plannedHeading = hh;
-        // [FAST chained] print intentionally omitted — fast run keeps serial
-        // quiet so the control loop isn't blocked by UART writes at 115200 baud.
+        // [chain] print intentionally omitted — fast run keeps serial quiet
+        // so the control loop isn't blocked by UART writes at 115200 baud.
     }
 }
 
