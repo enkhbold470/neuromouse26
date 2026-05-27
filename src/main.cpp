@@ -832,12 +832,12 @@ void loop() {
         // brakes both. No PID, no encoders, no IR — pure RC.
         switch (BLECar::lastCmd) {
         case 'F':
-            leftMotor.drive(+BLE_CAR_FWD_PWM);
-            rightMotor.drive(+BLE_CAR_FWD_PWM);
-            break;
-        case 'B':
             leftMotor.drive(-BLE_CAR_FWD_PWM);
             rightMotor.drive(-BLE_CAR_FWD_PWM);
+            break;
+        case 'B':
+            leftMotor.drive(+BLE_CAR_FWD_PWM);
+            rightMotor.drive(+BLE_CAR_FWD_PWM);
             break;
         case 'L':
             leftMotor.drive(-BLE_CAR_TURN_PWM);
