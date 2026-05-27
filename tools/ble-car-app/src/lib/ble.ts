@@ -46,7 +46,12 @@ export async function connect(): Promise<BLECarHandle> {
     let device: BluetoothDevice;
     try {
         device = await navigator.bluetooth.requestDevice({
-            filters: [{ namePrefix: 'Micromouse' }],
+            // Match on EITHER the name prefix OR the NUS service UUID —
+            // robust to advertising packets that only include one of the two.
+            filters: [
+                { namePrefix: 'Micromouse' },
+                { services: [NUS_SERVICE] }
+            ],
             optionalServices: [NUS_SERVICE]
         });
     } catch (e) {

@@ -89,9 +89,16 @@ inline void init() {
         RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     rx->setCallbacks(new RxCB());
 
-    svc->start();
+    // NimBLE 2.x: NimBLEService::start() is a no-op; the GATT server is
+    // started lazily by startAdvertising() (NimBLEAdvertising.cpp:201).
+    //
+    // ALSO 2.x: the device name from NimBLEDevice::init() is NOT auto-added
+    // to the advertisement — Web Bluetooth's namePrefix filter sees a
+    // nameless broadcast otherwise. setName + enableScanResponse fix it.
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    adv->setName("Micromouse26");
     adv->addServiceUUID(SERVICE_UUID);
+    adv->enableScanResponse(true);
     adv->start();
 
     initialized = true;
