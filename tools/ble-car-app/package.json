@@ -8,7 +8,11 @@
     "dev": "vite dev --host",
     "build": "vite build",
     "preview": "vite preview --host",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "start": "sirv build --host 0.0.0.0 --port ${PORT:-8000} --single --quiet"
+  },
+  "dependencies": {
+    "sirv-cli": "^3.0.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
