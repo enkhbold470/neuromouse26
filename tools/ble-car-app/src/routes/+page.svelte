@@ -14,6 +14,12 @@
     let active = $state<Cmd>('S');
     let lastSent = $state<string>('—');
     let log = $state<string[]>([]);
+    let installPrompt = $state<BeforeInstallPromptEvent | null>(null);
+
+    interface BeforeInstallPromptEvent extends Event {
+        prompt: () => Promise<void>;
+        userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+    }
 
     const KEY_MAP: Record<string, Cmd> = {
         ArrowUp: 'F',
@@ -33,7 +39,28 @@
 
     onMount(() => {
         supported = isWebBluetoothSupported();
+
+        const onBip = (ev: Event) => {
+            ev.preventDefault();
+            installPrompt = ev as BeforeInstallPromptEvent;
+        };
+        const onInstalled = () => {
+            installPrompt = null;
+        };
+        window.addEventListener('beforeinstallprompt', onBip);
+        window.addEventListener('appinstalled', onInstalled);
+        return () => {
+            window.removeEventListener('beforeinstallprompt', onBip);
+            window.removeEventListener('appinstalled', onInstalled);
+        };
     });
+
+    async function onInstall() {
+        if (!installPrompt) return;
+        await installPrompt.prompt();
+        const { outcome } = await installPrompt.userChoice;
+        if (outcome === 'accepted') installPrompt = null;
+    }
 
     async function onConnect() {
         try {
@@ -132,6 +159,9 @@
             </button>
         {:else}
             <button class="secondary" onclick={onDisconnect}>disconnect</button>
+        {/if}
+        {#if installPrompt}
+            <button class="install" onclick={onInstall}>install</button>
         {/if}
         <span class="lastsent">last: <b>{lastSent}</b></span>
     </div>
@@ -301,6 +331,14 @@
     button.secondary {
         background: #2a2f3d;
         color: #cfd6e4;
+    }
+    button.install {
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        background: #143324;
+        color: #5cd396;
     }
     .lastsent {
         font-size: 13px;
