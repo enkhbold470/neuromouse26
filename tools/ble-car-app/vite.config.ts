@@ -8,7 +8,7 @@ export default defineConfig({
         strictPort: false
     },
     preview: {
-        port: 3000,
+        port: 8000,
         strictPort: true,
         host: true
     }
