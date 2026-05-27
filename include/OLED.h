@@ -27,7 +27,8 @@ extern MicromouseEncoderPCNT rightEnc;
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
 enum MenuItem {
-    M_EXPLORE = 0,
+    M_BLE_CAR = 0,
+    M_EXPLORE,
     M_FAST,
     M_FAST_SPEED,
     M_ENC,
@@ -37,6 +38,7 @@ enum MenuItem {
 };
 
 static const char* MENU_LABELS[M_COUNT] = {
+    "BLE Car",
     "Explore",
     "Fast Run",
     "Fast Speed",
@@ -45,7 +47,7 @@ static const char* MENU_LABELS[M_COUNT] = {
     "Clear NVS"
 };
 
-static int      menuSel    = M_EXPLORE;
+static int      menuSel    = M_BLE_CAR;
 static long     menuEncRef = 0;
 constexpr long     ENC_PER_STEP       = 80;
 constexpr uint32_t COUNTDOWN_DELAY_MS = 500;
@@ -178,6 +180,26 @@ static void oledIrTest() {
     oled.drawStr(0, 48, buf);
     oled.setFont(u8g2_font_5x7_tf);
     oled.drawStr(0, 63, "btn=back");
+    oled.sendBuffer();
+}
+
+static void oledBleCar(bool connected, char cmd) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 8, "BLE Car");
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 22, connected ? "linked" : "waiting...");
+    const char* cmdN = (cmd == 'F') ? "FORWARD"
+                     : (cmd == 'B') ? "REVERSE"
+                     : (cmd == 'L') ? "LEFT"
+                     : (cmd == 'R') ? "RIGHT" : "STOP";
+    oled.setFont(u8g2_font_8x13B_tf);
+    oled.drawStr(0, 42, cmdN);
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 53, "F/B/L/R/S over NUS");
+    oled.drawStr(0, 63, "btn=exit");
     oled.sendBuffer();
 }
 
