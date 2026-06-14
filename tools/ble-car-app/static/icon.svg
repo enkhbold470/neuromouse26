@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+    <rect width="512" height="512" rx="96" ry="96" fill="#0b0e14"/>
+    <g transform="translate(256 256)" fill="none" stroke="#4a8df5" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="-130" y="-70" width="260" height="140" rx="32" ry="32"/>
+        <circle cx="-80" cy="80" r="34" fill="#4a8df5"/>
+        <circle cx="80" cy="80" r="34" fill="#4a8df5"/>
+        <circle cx="-50" cy="-15" r="14" fill="#4a8df5" stroke="none"/>
+        <circle cx="50" cy="-15" r="14" fill="#4a8df5" stroke="none"/>
+    </g>
+    <text x="256" y="430" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="56" font-weight="700" fill="#4a8df5" text-anchor="middle">mm26</text>
+</svg>

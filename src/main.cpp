@@ -36,8 +36,8 @@
 MicromouseMaze        maze;
 MicromouseMotor       leftMotor (MOTOR_L_IN1, MOTOR_L_IN2, 0, 1, MOTOR_L_INV);
 MicromouseMotor       rightMotor(MOTOR_R_IN3, MOTOR_R_IN4, 2, 3, MOTOR_R_INV);
-MicromouseEncoderPCNT leftEnc   (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/true);
-MicromouseEncoderPCNT rightEnc  (PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/true);
+MicromouseEncoderPCNT leftEnc   (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/false);
+MicromouseEncoderPCNT rightEnc  (PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/false);
 
 static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE); }
 
@@ -142,6 +142,11 @@ struct PID {
 #include "Persistence.h"
 #include "Planner.h"
 #include "OLED.h"
+#include "BLECarControl.h"
+
+// ── BLE car-control PWM (selected for safe indoor RC driving) ───────────────
+constexpr int BLE_CAR_FWD_PWM  = 600;
+constexpr int BLE_CAR_TURN_PWM = 550;
 
 // ── Common helpers tied to hardware ─────────────────────────────────────────
 void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
@@ -205,13 +210,16 @@ static void scriptKick() {
 }
 
 // ── State machine ───────────────────────────────────────────────────────────
-enum State { IDLE, ENC_TEST, IR_TEST, FAST_SPEED_EDIT, EXPLORE_THINK, RUN, GOAL, CRASH };
+enum State { IDLE, ENC_TEST, IR_TEST, FAST_SPEED_EDIT, EXPLORE_THINK, RUN, GOAL, CRASH, BLE_CAR_DRIVE };
 static State state = IDLE;
 
 // ── Setup ───────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     pinMode(BUTTON_1, INPUT_PULLUP);
+
+    pinMode(MOTOR_SLEEP, OUTPUT);
+    digitalWrite(MOTOR_SLEEP, HIGH);
 
     leftMotor.begin(); rightMotor.begin();
     leftEnc.begin();   rightEnc.begin();
@@ -339,6 +347,14 @@ void loop() {
                 Serial.println("[NVS] walls cleared");
                 oledTerminal("NVS", "cleared");
                 delay(600); oledMenu();
+                break;
+            case M_BLE_CAR:
+                BLECar::init();
+                BLECar::lastCmd = 'S';
+                stopMotors();
+                Serial.println("--- BLE CAR mode ---");
+                oledBleCar(BLECar::connected, BLECar::lastCmd);
+                state = BLE_CAR_DRIVE;
                 break;
             }
         }
@@ -967,6 +983,54 @@ void loop() {
         if (buttonEdge()) {
             rgbOff();
             exploreMode = false; fastRunMode = false; returnHomeMode = false;
+            menuEncRef = rightEnc.getTicks();
+            oledMenu();
+            state = IDLE;
+        }
+        break;
+    }
+
+    case BLE_CAR_DRIVE: {
+        // Latching RC drive: lastCmd persists until next BLE write. F/B drive
+        // both wheels same direction; L/R spot-turn opposite directions; S
+        // brakes both. No PID, no encoders, no IR — pure RC.
+        switch (BLECar::lastCmd) {
+        case 'F':
+            leftMotor.drive(-BLE_CAR_FWD_PWM);
+            rightMotor.drive(-BLE_CAR_FWD_PWM);
+            break;
+        case 'B':
+            leftMotor.drive(+BLE_CAR_FWD_PWM);
+            rightMotor.drive(+BLE_CAR_FWD_PWM);
+            break;
+        case 'L':
+            leftMotor.drive(-BLE_CAR_TURN_PWM);
+            rightMotor.drive(+BLE_CAR_TURN_PWM);
+            break;
+        case 'R':
+            leftMotor.drive(+BLE_CAR_TURN_PWM);
+            rightMotor.drive(-BLE_CAR_TURN_PWM);
+            break;
+        case 'S':
+        default:
+            stopMotors();
+            break;
+        }
+
+        static uint32_t lastOled = 0;
+        static bool     lastLinked = false;
+        static char     lastShown  = 0;
+        if (BLECar::connected != lastLinked || BLECar::lastCmd != lastShown
+            || millis() - lastOled > 250) {
+            oledBleCar(BLECar::connected, BLECar::lastCmd);
+            lastOled   = millis();
+            lastLinked = BLECar::connected;
+            lastShown  = BLECar::lastCmd;
+        }
+
+        if (buttonEdge()) {
+            stopMotors();
+            BLECar::lastCmd = 'S';
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
