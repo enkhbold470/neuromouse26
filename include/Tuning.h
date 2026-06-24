@@ -21,12 +21,16 @@ constexpr float CELL_PITCH_MM      = 180.0f;
 constexpr float CELL_INNER_MM      = 170.0f;
 constexpr float CELL_SIDE_GAP_MM   =  45.0f;
 
-// Full IEEE 16×16 maze (MAZE_SIZE in PinConfig.h). Start SW corner (0,0) facing
-// North; goal is centre 2×2 cells (7,7)–(8,8) via setGoalCentre4() in reset().
+// Full 16×16 flood-fill grid (do not shrink — floodFillExplore uses these
+// as the unvisited-cell search bound; shrinking it seeds the robot's own
+// cell as a goal and breaks bestDirectionBiased).
 constexpr uint8_t MAZE_ROWS = MAZE_SIZE;
 constexpr uint8_t MAZE_COLS = MAZE_SIZE;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
+// Physical maze: 6 rows × 3 cols, goal at corner (5,2). Set in setupMaze().
+constexpr uint8_t GOAL_ROW  = 5;
+constexpr uint8_t GOAL_COL  = 2;
 // Added to flood[visited neighbour] during explore so backtracking loses to
 // any path toward unvisited cells (junction after a dead end).
 constexpr uint8_t EXPLORE_VISITED_FLOOD_PENALTY = 64;
@@ -191,17 +195,21 @@ constexpr long  CURVE_MIN_ENTRY_TICKS =
 
 
 // ── [J] ADAPTIVE SIDE-WALL SENSING ──────────────────────────────────────────
-// The weak side IR signal (~330 cts at a 45 mm wall vs ~3500 front) sits in a
-// thin margin, so a fixed absolute threshold (WALL_SIDE_THRESH) gives phantom
-// walls when room light shifts. Pros instead: (1) capture a per-RUN wall
-// reference live (room light divides out), (2) threshold as a FRACTION of that
-// reference, (3) skip the read when ambient is near ADC saturation (the
-// lit−ambient delta collapses), (4) take a MEDIAN of several samples to beat
-// noise on the weak channel. Refs from canonical builders (UKMARS ~0.4×nominal,
-// Pololu QTR normalize, Green Ye saturation + dual-threshold, Harrison per-run cal).
-//   Per-run reference: at start (0,0) facing North the WEST border wall is
-//   guaranteed on the LEFT → captured live in calibrateSideRefs(), right scaled
-//   by the factory L/R ratio. SIDE_ADAPTIVE=false → exact legacy fixed threshold.
+// Side sensors (L45/R45) are at 30° from the robot's forward axis. This causes
+// two problems:
+//   1. WEAK SIGNAL: side wall at 42.5 mm lateral sits at 85 mm from sensor
+//      (vs 42.5 mm for a 90° perpendicular sensor) → only ~330-400 raw cts.
+//   2. FRONT CONTAMINATION: a front wall at 90 mm ahead appears at
+//      90/cos(30°) ≈ 104 mm diagonal to the 30° sensor → ~220 cts, above
+//      the threshold → phantom side wall. Fix: Planner.h senseAndStoreWalls()
+//      skips side sensing when front wall is confirmed (mid-cell sensing at
+//      ~50% already ran with front wall 208 mm away = no contamination).
+// Additional issues: fixed absolute threshold (WALL_SIDE_THRESH) gives phantom
+// walls when room light shifts. Pros: per-RUN calibration (room light divides
+// out) + fractional threshold + saturation skip + median sampling.
+//   Per-run reference: at start (0,0) facing North WEST border wall guaranteed
+//   on LEFT → captured live in calibrateSideRefs(). SIDE_ADAPTIVE=false →
+//   exact legacy fixed-threshold behavior.
 constexpr bool  SIDE_ADAPTIVE  = true;
 constexpr float SIDE_WALL_FRAC = 0.45f;  // wall present if median read > frac × per-run reference
 constexpr int   SIDE_SAT_AMB   = 3500;   // emitter-off ambient (of 4095) above this → read UNKNOWN (skip)

@@ -20,7 +20,8 @@
 extern MicromouseMaze maze;
 
 static void setupMaze() {
-    maze.reset();  // 16×16 borders + traditional centre 2×2 goal
+    maze.reset();                        // 16×16 borders + default centre 2×2 goal
+    maze.setGoalSingle(GOAL_ROW, GOAL_COL);  // physical maze goal (5,2)
 }
 
 // Wall sensing sets AND clears edges from IR each cell arrival. Stale "walls"
@@ -109,20 +110,32 @@ static bool mazeDeadEnd(int r, int c, uint8_t h) {
 static void senseAndStoreWalls() {
     sampleSideMedian();                 // median sides + ambient; also refreshes front irVal[0]/[3]
     bool wF = irFrontBlocked();
-    SideState sL = sideWallState(irVal[1], sideRefL, irAmb[1]);
-    SideState sR = sideWallState(irVal[2], sideRefR, irAmb[2]);
+    // 30° side sensors see the front wall at ~104 mm diagonal when that wall is
+    // 90 mm ahead, producing ~220 raw counts — enough to trip the side threshold
+    // and write a phantom side wall. Mid-cell sensing (senseSideWallsMidCell)
+    // ran with the front wall 208 mm away (safe). Skip re-sensing sides here
+    // and keep whatever mid-cell wrote; only the front wall write is trustworthy.
+    SideState sL, sR;
+    if (wF) {
+        sL = SIDE_UNKNOWN;   // front contaminating 30° side sensors — keep prior
+        sR = SIDE_UNKNOWN;
+    } else {
+        sL = sideWallState(irVal[1], sideRefL, irAmb[1]);
+        sR = sideWallState(irVal[2], sideRefR, irAmb[2]);
+    }
     AbsDir hd = (AbsDir)robotHeading;
     AbsDir lt = (AbsDir)((robotHeading + 3) % 4);
     AbsDir rt = (AbsDir)((robotHeading + 1) % 4);
     setWallSensed(robotRow, robotCol, hd, wF);
     if (sL != SIDE_UNKNOWN) setWallSensed(robotRow, robotCol, lt, sL == SIDE_WALL);
     if (sR != SIDE_UNKNOWN) setWallSensed(robotRow, robotCol, rt, sR == SIDE_WALL);
-    Serial.printf("[SENSE] (%d,%d) hd=%c F=%s(LF=%d RF=%d) L=%s(%d/%d) R=%s(%d/%d) amb=%d/%d\n",
+    Serial.printf("[SENSE] (%d,%d) hd=%c F=%s(LF=%d RF=%d) L=%s(%d/%d) R=%s(%d/%d) amb=%d/%d%s\n",
                   robotRow, robotCol, "NESW"[robotHeading],
                   wF ? "wall" : "open", irVal[0], irVal[3],
                   sL == SIDE_UNKNOWN ? "??" : (sL == SIDE_WALL ? "wall" : "open"), irVal[1], sideRefL,
                   sR == SIDE_UNKNOWN ? "??" : (sR == SIDE_WALL ? "wall" : "open"), irVal[2], sideRefR,
-                  irAmb[1], irAmb[2]);
+                  irAmb[1], irAmb[2],
+                  wF ? " [side-skip:frontwall]" : "");
 }
 
 static bool atDeadEnd() {

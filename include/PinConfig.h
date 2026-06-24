@@ -22,19 +22,21 @@ constexpr uint8_t ENC_R_A          = 38;
 constexpr uint8_t ENC_R_B          = 39;
 
 // ── IR sensors ────────────────────────────────────────────────────────────────
-// Geometry (updated 2026-05-20): ALL 4 sensors point 90° perpendicular to
-// their target wall — no more 30° forward-outward cones on any sensor.
-//   LF, RF : face STRAIGHT FORWARD, mounted 10 mm behind robot front edge
-//            (= wheel center + 45 mm). Used for front-wall detection and
-//            PH_ALIGN_FRONT distance interp.
-//   L,  R  : face perpendicular SIDEWAYS, for wall-follow centering and
-//            side-wall presence (unchanged from 2026-05-19 rotation).
-// At cell center, front sensor → front wall = 90 − 45 = 45 mm.
-// For "X mm front gap" alignment target → robot center sits at
-// cell_center + (45 − X) mm in current heading.
-// IR_CAL_*, IR_DIST_TABLE (IRCalibration.h), and ALIGN_*_TARGET (main.cpp)
-// must be re-captured at the new 90° geometry — old values were for 30°
-// and are STALE.
+// Sensor geometry (as-built, confirmed 2026-06-23):
+//   LF, RF : aimed ~10° from straight-forward (nearly perpendicular to front
+//            wall). Used for front-wall detection and PH_ALIGN_FRONT.
+//   L45, R45 (labelled "45" in netlist, actually 30° from robot axis):
+//            aimed 30° outward from the robot's forward axis. These are the
+//            SIDE sensors. At 30°, a 42.5 mm lateral wall sits at
+//            42.5/sin(30°) = 85 mm sensor distance — twice as far as a
+//            true 90° side sensor, so cal values (330-400 cts) are weak.
+//            IMPORTANT: a front wall at 90 mm ahead is seen at 90/cos(30°)
+//            ≈ 104 mm diagonal by these sensors → ~220 raw counts → above
+//            the side-wall threshold → phantom side wall. Fix in Planner.h:
+//            skip side re-sensing when front wall is confirmed.
+//   L, R (true 90° perpendicular sensors): wired on PCB (netlist signals
+//            L_EMIT/L_RECEIVER, R_EMIT/R_RECEIVER) but NOT in PAIRS[] — the
+//            L45/R45 pair is currently used as the sole side sensor.
 constexpr uint8_t RX_L45             = 6;   //good
 constexpr uint8_t RX_LF            = 4; //good
 constexpr uint8_t RX_RF            = 1; //good
@@ -172,17 +174,18 @@ constexpr float   TURN_CLEAR_FRAC  = 1.15f;
 // change, or surface-reflectivity change. Each value = differential
 // ambient-subtracted reading (no-wall ~0, wall present 1500–3500).
 constexpr int     IR_CAL_LF        = 3483;
-constexpr int     IR_CAL_L45       = 330;    // 2026-05-22, centered in cell, lit-amb formula
-constexpr int     IR_CAL_R45       = 403;    // 2026-05-22, centered in cell, lit-amb formula
+// L45/R45 are the 30°-from-forward side sensors. At 42.5 mm lateral wall
+// the sensor-to-wall path is 42.5/sin(30°) = 85 mm → weak signal.
+// Values captured 2026-05-22 at cell center with side wall present.
+constexpr int     IR_CAL_L45       = 330;    // 30° side-left, centered in cell
+constexpr int     IR_CAL_R45       = 403;    // 30° side-right, centered in cell
 constexpr int     IR_CAL_RF        = 2702;
 
-// Wall-presence thresholds.
-// Side: ~60% of mean side-cal (1491+1648)/2 ≈ 1570 × 0.6 ≈ 940 → 900.
-// Front: front-sweep at 9cm gives RF=1504 (worst). 1400 keeps margin so
-// far-wall detection at full cell distance (≈9cm sensor-to-wall) doesn't
-// flicker. See test/sensor-cal-ble.cpp capture log 2026-05-17.
-constexpr int     WALL_SIDE_THRESH  = 150;   // lit-amb: open~0-80, wall@center~300-400; <150=open
-constexpr int     WALL_FRONT_THRESH = 300;   // lit-amb: open~12-80, wall~500+; <150=open
+// Wall-presence thresholds (legacy fixed; overridden by SIDE_ADAPTIVE in Tuning [J]).
+// Side (SIDE_ADAPTIVE=false only): open~0-80, wall~300-400; <150 = open.
+// Front: open~12-80, wall~500+; 300 gives detection at ~8 cm.
+constexpr int     WALL_SIDE_THRESH  = 150;   // legacy only — SIDE_ADAPTIVE replaces this
+constexpr int     WALL_FRONT_THRESH = 300;   // lit-amb threshold for front-wall detect
 
 // ── Drive loop misc ──────────────────────────────────────────────────────────
 constexpr int     TIMEOUT_MS       = 5000;    // per-cell drive timeout

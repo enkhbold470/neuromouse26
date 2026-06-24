@@ -46,6 +46,7 @@ static inline long rTicks() { return (long)(rightEnc.getTicks() * RIGHT_ENC_SCAL
 // CRASH. Driven non-blocking from inside the loop().
 static CRGB rgbLed[1];
 static uint32_t rgbStateT0 = 0;     // millis snapshot when entering GOAL/CRASH
+static int      recoverCount = 0;   // BOXED recovery attempts; reset on successful move
 
 static void rgbOff() {
     rgbLed[0] = CRGB::Black;
@@ -102,6 +103,7 @@ struct PID {
 #include "Persistence.h"
 #include "Planner.h"
 #include "OLED.h"
+#include "BLETelemetry.h"
 
 // ── Common helpers tied to hardware ─────────────────────────────────────────
 void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
@@ -217,6 +219,8 @@ void setup() {
                   fastRunCruiseTps,
                   fastRunCruiseTps * 180.0f / (float)CELL_TICKS);
 
+    bleInit();
+
     menuEncRef = rightEnc.getTicks();
     oledMenu();
 
@@ -227,6 +231,44 @@ void setup() {
 // ── Loop ────────────────────────────────────────────────────────────────────
 void loop() {
     updateYaw();
+
+    // ── BLE command handler ──────────────────────────────────────────────────
+    {
+        const char* cmd = bleGetCmd();
+        if (cmd) {
+            if (strcmp(cmd, "STOP") == 0) {
+                stopMotors();
+                exploreMode = false; fastRunMode = false;
+                menuEncRef = rightEnc.getTicks(); oledMenu();
+                bleState("IDLE");
+                state = IDLE;
+            } else if (strcmp(cmd, "DUMP") == 0) {
+                bleMazeDump(maze);
+            } else if (strcmp(cmd, "EXPLORE") == 0 && state == IDLE) {
+                setupMaze();
+                robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
+                pendingOffsetTicks = START_OFFSET_TICKS;
+                exploreMode = true; fastRunMode = false; returnHomeMode = false; finalTurnPending = false;
+                autoCalGyroBeforeStart();
+                calibrateSideRefs();
+                bleState("EXPLORE_THINK");
+                state = EXPLORE_THINK;
+            } else if (strcmp(cmd, "FAST") == 0 && state == IDLE) {
+                if (nvsLoadWalls()) {
+                    robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
+                    pendingOffsetTicks = START_OFFSET_TICKS;
+                    fastRunMode = true; exploreMode = false; returnHomeMode = false; finalTurnPending = false;
+                    autoCalGyroBeforeStart();
+                    calibrateSideRefs();
+                    bleState("EXPLORE_THINK");
+                    state = EXPLORE_THINK;
+                }
+            } else if (strcmp(cmd, "CLEAR_NVS") == 0) {
+                nvsClearWalls();
+                bleSend("{\"t\":\"ST\",\"v\":\"NVS_CLEARED\"}");
+            }
+        }
+    }
 
     switch (state) {
 
@@ -471,6 +513,8 @@ void loop() {
             stopMotors();
             oledTerminal("DONE!", returnHomeMode ? "home" : "goal");
             rgbStateT0 = millis();
+            bleMazeDump(maze);
+            bleState("GOAL");
             state = GOAL;
             break;
         }
@@ -481,6 +525,11 @@ void loop() {
         if (exploreMode) {
             if (!maze.visited[robotRow][robotCol]) {
                 senseAndStoreWalls();
+                bleWall(robotRow, robotCol, robotHeading,
+                        maze.walls[robotRow][robotCol],
+                        maze.hasWall(robotRow, robotCol, (AbsDir)robotHeading),
+                        maze.hasWall(robotRow, robotCol, (AbsDir)((robotHeading+3)%4)),
+                        maze.hasWall(robotRow, robotCol, (AbsDir)((robotHeading+1)%4)));
             }
             if (atDeadEnd()) {
                 AbsDir back = (AbsDir)((robotHeading + 2) % 4);
@@ -581,14 +630,21 @@ void loop() {
                                                   routeToUnvisited);
         if (bestDist == FLOOD_INFINITY) {
             if (exploreMode) {
-                // False walls isolated us — force 180° and keep exploring.
-                Serial.printf("[RECOVER] (%d,%d,%c) flood=INF, forcing 180\n",
-                              robotRow, robotCol, "NESW"[robotHeading]);
+                // One 180° recovery attempt if back direction is physically open.
+                // If back is also walled, or we already tried once, give up → CRASH.
                 AbsDir backDir = (AbsDir)((robotHeading + 2) % 4);
-                buildMoveScript(backDir);
-                scriptKick();
-                state = RUN;
-                break;
+                bool backOpen = !maze.hasWall(robotRow, robotCol, backDir);
+                if (backOpen && recoverCount < 1) {
+                    recoverCount++;
+                    Serial.printf("[RECOVER] (%d,%d,%c) flood=INF, attempt %d\n",
+                                  robotRow, robotCol, "NESW"[robotHeading], recoverCount);
+                    buildMoveScript(backDir);
+                    scriptKick();
+                    state = RUN;
+                    break;
+                }
+                recoverCount = 0;  // reset for next time
+                // Fall through to CRASH/BOXED display.
             }
             stopMotors();
             // Re-sample so OLED shows current raw values
@@ -631,6 +687,9 @@ void loop() {
                 oled.sendBuffer();
             }
             rgbStateT0 = millis();
+            bleCrash(robotRow, robotCol, robotHeading, maze.walls[robotRow][robotCol]);
+            bleMazeDump(maze);
+            bleState("CRASH");
             state = CRASH;
             break;
         }
@@ -642,6 +701,7 @@ void loop() {
         }
         buildMoveScript(bestDir);
         scriptKick();
+        bleState("RUN");
         state = RUN;
         break;
     }
@@ -688,12 +748,14 @@ void loop() {
                 if (scriptIdx + 1 >= scriptLen) {
                     robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
                     runTurnDir = TURN_NONE;
+                    recoverCount = 0;  // successful move → reset BOXED recovery counter
                     if (!fastRunMode) {
                         Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
                                       robotRow, robotCol, "NESW"[robotHeading]);
                     }
-                    if (exploreMode || fastRunMode) state = EXPLORE_THINK;
-                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
+                    blePos(robotRow, robotCol, robotHeading);
+                    if (exploreMode || fastRunMode) { bleState("EXPLORE_THINK"); state = EXPLORE_THINK; }
+                    else { menuEncRef = rightEnc.getTicks(); oledMenu(); bleState("IDLE"); state = IDLE; }
                     return;
                 }
                 scriptIdx++;
@@ -731,6 +793,7 @@ void loop() {
             int pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             leftMotor.drive(pwmL);
             rightMotor.drive(pwmR);
+            bleMotion("ALIGN", ALIGN_MAX_TICKS, avgTicks, pwmL, pwmR, yawDeg);
 
             static uint32_t lastOled = 0;
             if (millis() - lastOled > 150) {
@@ -827,11 +890,14 @@ void loop() {
                     Serial.printf("--- MOVE DONE pos=(%d,%d,%c) ---\n",
                                   robotRow, robotCol, "NESW"[robotHeading]);
                 }
+                blePos(robotRow, robotCol, robotHeading);
                 if (exploreMode || fastRunMode) {
+                    bleState("EXPLORE_THINK");
                     state = EXPLORE_THINK;
                 } else {
                     menuEncRef = rightEnc.getTicks();
                     oledMenu();
+                    bleState("IDLE");
                     state = IDLE;
                 }
                 return;
@@ -1067,6 +1133,7 @@ void loop() {
             pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             leftMotor.drive(pwmL); rightMotor.drive(pwmR);
+            bleMotion("FWD", runTarget, avg, pwmL, pwmR, yawDeg);
         } else if (runPhase == PH_CURVE) {
             // ── Constant-curvature FORWARD-ONLY arc (smooth 90° turn) ──────
             // avg = degrees swept (signed-positive in the turn direction, from

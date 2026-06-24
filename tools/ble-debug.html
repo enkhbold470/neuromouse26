@@ -3,358 +3,434 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>pivot-mouse PID tuner</title>
+<title>bromouse — live monitor</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background:#0d0d0d; color:#e0e0e0; font-family:monospace; font-size:13px; padding:14px; }
-  h1 { color:#4fc3f7; font-size:16px; margin-bottom:10px; }
-  h2 { color:#9ca3af; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin:14px 0 6px; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:#0d0d0d; color:#e0e0e0; font-family:monospace; font-size:13px; padding:14px; }
+h1   { color:#4fc3f7; font-size:16px; margin-bottom:10px; }
+h2   { color:#9ca3af; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin:14px 0 6px; }
 
-  #status { display:inline-block; padding:4px 10px; border-radius:4px; font-size:12px;
-            background:#333; color:#aaa; margin-bottom:10px; }
-  #status.connected { background:#1b4332; color:#4ade80; }
-  #status.error     { background:#3b0000; color:#f87171; }
+#status { display:inline-block; padding:4px 10px; border-radius:4px; font-size:12px;
+          background:#333; color:#aaa; margin-bottom:10px; }
+#status.connected { background:#1b4332; color:#4ade80; }
+#status.error     { background:#3b0000; color:#f87171; }
 
-  .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; align-items:center; }
+button { background:#1e1e2e; border:1px solid #444; color:#e0e0e0; padding:6px 12px;
+         border-radius:4px; cursor:pointer; font-family:monospace; font-size:12px; }
+button:hover     { background:#2a2a3e; border-color:#666; }
+button:disabled  { opacity:.35; cursor:not-allowed; }
+button.primary   { background:#1a3a5c; border-color:#4fc3f7; color:#4fc3f7; }
+button.danger    { background:#3b1212; border-color:#f87171; color:#f87171; }
+button.ok        { background:#0f2e1b; border-color:#4ade80; color:#4ade80; }
+button.warn      { background:#3b2a00; border-color:#fbbf24; color:#fbbf24; }
 
-  button { background:#1e1e2e; border:1px solid #444; color:#e0e0e0; padding:6px 12px;
-           border-radius:4px; cursor:pointer; font-family:monospace; font-size:12px; }
-  button:hover { background:#2a2a3e; border-color:#666; }
-  button:disabled { opacity:0.35; cursor:not-allowed; }
-  button.primary { background:#1a3a5c; border-color:#4fc3f7; color:#4fc3f7; }
-  button.danger  { background:#3b1212; border-color:#f87171; color:#f87171; }
-  button.ok      { background:#0f2e1b; border-color:#4ade80; color:#4ade80; }
-  button.warn    { background:#3b2a00; border-color:#fbbf24; color:#fbbf24; }
+.row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; align-items:center; }
+hr   { border:none; border-top:1px solid #222; margin:10px 0; }
 
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px 12px; }
-  .cell { display:flex; flex-direction:column; gap:3px; }
-  .cell label { font-size:11px; color:#888; }
-  .cell input { background:#1a1a1a; border:1px solid #444; color:#e0e0e0;
-                padding:5px 8px; border-radius:3px; font-family:monospace; font-size:13px; width:100%; }
-  .cell input:focus { outline:none; border-color:#4fc3f7; }
+/* ── state badges ── */
+#state-badge { display:inline-block; padding:4px 12px; border-radius:4px; font-weight:bold;
+               font-size:13px; background:#1e1e2e; color:#888; margin-right:8px; }
+#state-badge.IDLE         { background:#1e1e2e; color:#888; }
+#state-badge.EXPLORE_THINK{ background:#1a3a5c; color:#4fc3f7; }
+#state-badge.RUN          { background:#1b4332; color:#4ade80; }
+#state-badge.GOAL         { background:#2a1b6e; color:#a78bfa; }
+#state-badge.CRASH        { background:#3b0000; color:#f87171; }
 
-  #live { background:#0a0a0a; border:1px solid #333; border-radius:4px; padding:10px;
-          margin-bottom:8px; }
-  #live .lr { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px; }
-  #live .lr div { background:#11151c; padding:6px 10px; border-radius:3px; }
-  #live .big { font-size:18px; color:#4fc3f7; font-weight:bold; }
-  #live .lbl { font-size:10px; color:#888; text-transform:uppercase; }
+/* ── top info bar ── */
+#infobar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+           background:#111; border:1px solid #222; border-radius:4px; padding:8px 12px;
+           margin-bottom:10px; }
+.info-chip { display:flex; flex-direction:column; gap:2px; }
+.info-chip .lbl { font-size:10px; color:#666; text-transform:uppercase; }
+.info-chip .val { font-size:16px; color:#4fc3f7; font-weight:bold; }
 
-  #terminal { background:#0a0a0a; border:1px solid #333; border-radius:4px;
-              padding:8px; height:240px; overflow-y:auto; font-size:11px;
-              line-height:1.5; white-space:pre-wrap; word-break:break-all; }
-  .t-rx  { color:#4ade80; }
-  .t-tx  { color:#4fc3f7; }
-  .t-sys { color:#888; font-style:italic; }
-  .t-err { color:#f87171; }
+/* ── main grid ── */
+#main-grid { display:grid; grid-template-columns:auto 1fr; gap:12px; margin-bottom:10px; }
 
-  .cmd-row { display:flex; gap:6px; margin-top:6px; }
-  #custom { flex:1; background:#1a1a1a; border:1px solid #444; color:#e0e0e0;
-            padding:6px 10px; border-radius:4px; font-family:monospace; font-size:13px; }
-  hr { border:none; border-top:1px solid #222; margin:10px 0; }
+/* ── maze ── */
+#maze-wrap { display:flex; flex-direction:column; gap:4px; }
+#maze { display:grid; grid-template-columns:repeat(3, 60px); grid-template-rows:repeat(6, 60px); }
+.cell {
+  width:60px; height:60px; position:relative;
+  border:1px solid #333;  /* default thin border (no wall) */
+  display:flex; align-items:center; justify-content:center;
+  font-size:10px; color:#444;
+}
+.cell.wall-N { border-top:   3px solid #4fc3f7; }
+.cell.wall-E { border-right: 3px solid #4fc3f7; }
+.cell.wall-S { border-bottom:3px solid #4fc3f7; }
+.cell.wall-W { border-left:  3px solid #4fc3f7; }
+.cell.visited  { background:#0a1a1a; }
+.cell.robot    { background:#0f2e1b; }
+.cell .flood   { position:absolute; top:2px; left:3px; font-size:9px; color:#555; }
+.cell .arrow   { font-size:22px; }
+
+/* ── right panel ── */
+#right { display:flex; flex-direction:column; gap:10px; }
+
+/* IR bars */
+#ir-panel { background:#0a0a0a; border:1px solid #222; border-radius:4px; padding:10px; }
+.ir-row   { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.ir-lbl   { width:30px; font-size:11px; color:#888; }
+.ir-bar   { flex:1; height:14px; background:#1a1a1a; border-radius:2px; overflow:hidden; }
+.ir-fill  { height:100%; background:#4fc3f7; transition:width .1s; }
+.ir-val   { width:45px; text-align:right; font-size:11px; color:#ccc; }
+
+/* Motion panel */
+#mot-panel { background:#0a0a0a; border:1px solid #222; border-radius:4px; padding:10px; }
+#mot-panel .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px; }
+.mot-cell .lbl { font-size:10px; color:#666; text-transform:uppercase; }
+.mot-cell .val { font-size:15px; color:#4fc3f7; font-weight:bold; }
+
+/* ── terminal ── */
+#terminal { background:#0a0a0a; border:1px solid #333; border-radius:4px;
+            padding:8px; height:220px; overflow-y:auto; font-size:11px;
+            line-height:1.5; white-space:pre-wrap; word-break:break-all; }
+.t-rx  { color:#4ade80; }
+.t-tx  { color:#4fc3f7; }
+.t-sys { color:#888; font-style:italic; }
+.t-err { color:#f87171; }
+.t-wall { color:#fbbf24; }
+.t-mot  { color:#a78bfa; }
+
+.cmd-row { display:flex; gap:6px; margin-top:6px; }
+#custom { flex:1; background:#1a1a1a; border:1px solid #444; color:#e0e0e0;
+          padding:6px 10px; border-radius:4px; font-family:monospace; font-size:13px; }
 </style>
 </head>
 <body>
-<h1>neuromouse — PID tuner</h1>
-<div id="status">disconnected</div>
+<h1>bromouse — live monitor</h1>
 
 <div class="row">
+  <div id="status">disconnected</div>
   <button class="primary" id="btnConnect">Connect BLE</button>
   <button id="btnDisconnect" disabled>Disconnect</button>
-  <button id="btnQuery" disabled>Pull params (?)</button>
   <button id="btnClear" style="margin-left:auto">Clear log</button>
 </div>
 
-<hr>
+<!-- info bar -->
+<div id="infobar">
+  <span id="state-badge" class="IDLE">IDLE</span>
+  <div class="info-chip"><span class="lbl">pos</span><span class="val" id="i-pos">(0,0) N</span></div>
+  <div class="info-chip"><span class="lbl">phase</span><span class="val" id="i-phase">—</span></div>
+  <div class="info-chip"><span class="lbl">tgt→avg</span><span class="val" id="i-tgt">—</span></div>
+  <div class="info-chip"><span class="lbl">yaw°</span><span class="val" id="i-yaw">—</span></div>
+  <div class="info-chip"><span class="lbl">battery</span><span class="val" id="i-bat">—</span></div>
+</div>
 
-<h2>Live RUN telemetry</h2>
-<div id="live">
-  <div class="lr">
-    <div><span class="lbl">time</span><br><span class="big" id="rtT">--</span> ms</div>
-    <div><span class="lbl">target</span><br><span class="big" id="rtTarget">--</span> mm/s</div>
-    <div><span class="lbl">vL</span><br><span class="big" id="rtVL">--</span> <span style="font-size:11px;color:#888" id="rtPL">pw 0</span></div>
-    <div><span class="lbl">vR</span><br><span class="big" id="rtVR">--</span> <span style="font-size:11px;color:#888" id="rtPR">pw 0</span></div>
-    <div><span class="lbl">straight err (ticks)</span><br><span class="big" id="rtSE">--</span></div>
-    <div><span class="lbl">vbat (V)</span><br><span class="big" id="rtVB">--</span></div>
-    <div><span class="lbl">L/R tape ratio</span><br><span class="big" id="rtRatio">--</span></div>
+<!-- main grid: maze + right panel -->
+<div id="main-grid">
+  <div id="maze-wrap">
+    <h2>maze (6×3)  — N↑</h2>
+    <div id="maze"></div>
+    <div style="font-size:10px;color:#555;margin-top:4px">
+      flood values shown. blue borders = walls. green = robot.
+    </div>
+  </div>
+  <div id="right">
+    <div id="ir-panel">
+      <h2>IR sensors</h2>
+      <div class="ir-row"><span class="ir-lbl">LF</span><div class="ir-bar"><div class="ir-fill" id="bar-lf" style="width:0%"></div></div><span class="ir-val" id="val-lf">0</span></div>
+      <div class="ir-row"><span class="ir-lbl">L45</span><div class="ir-bar"><div class="ir-fill" id="bar-l"  style="width:0%"></div></div><span class="ir-val" id="val-l">0</span></div>
+      <div class="ir-row"><span class="ir-lbl">R45</span><div class="ir-bar"><div class="ir-fill" id="bar-r"  style="width:0%"></div></div><span class="ir-val" id="val-r">0</span></div>
+      <div class="ir-row"><span class="ir-lbl">RF</span><div class="ir-bar"><div class="ir-fill" id="bar-rf" style="width:0%"></div></div><span class="ir-val" id="val-rf">0</span></div>
+    </div>
+    <div id="mot-panel">
+      <h2>motion</h2>
+      <div class="grid2">
+        <div class="mot-cell"><div class="lbl">pwmL</div><div class="val" id="m-pL">—</div></div>
+        <div class="mot-cell"><div class="lbl">pwmR</div><div class="val" id="m-pR">—</div></div>
+        <div class="mot-cell"><div class="lbl">target ticks</div><div class="val" id="m-tg">—</div></div>
+        <div class="mot-cell"><div class="lbl">avg ticks</div><div class="val" id="m-av">—</div></div>
+      </div>
+    </div>
+    <div>
+      <h2>commands</h2>
+      <div class="row">
+        <button class="ok"     id="btnExplore" disabled>Explore</button>
+        <button class="primary"id="btnFast"    disabled>Fast Run</button>
+        <button class="danger" id="btnStop"    disabled>Stop</button>
+        <button id="btnDump"   disabled>Dump Maze</button>
+        <button class="warn"   id="btnClearNvs"disabled>Clear NVS</button>
+      </div>
+    </div>
   </div>
 </div>
 
-<h2>Actions</h2>
-<div class="row">
-  <button class="primary" id="btnCal"  disabled>CALIBRATE (auto)</button>
-  <button class="ok"      id="btnRun"  disabled>RUN PID</button>
-  <button class="danger"  id="btnStop" disabled>STOP</button>
-</div>
-<div class="row">
-  <button id="btnTape" disabled>Tape only</button>
-  <button id="btnChar" disabled>Full CHAR sweep</button>
-</div>
-
-<h2>Targets &amp; calibration</h2>
-<div class="grid">
-  <div class="cell"><label>target mm/s (t)</label><input id="p_t" value="300"></div>
-  <div class="cell"><label>run duration ms (runms)</label><input id="p_runms" value="4000"></div>
-  <div class="cell"><label>R_SCALE (rs)</label><input id="p_rs" value="1.0135"></div>
-</div>
-
-<h2>PID gains</h2>
-<div class="grid">
-  <div class="cell"><label>LOOP_KP (kp)</label><input id="p_kp" value="1.00"></div>
-  <div class="cell"><label>LOOP_KI (ki)</label><input id="p_ki" value="1.50"></div>
-  <div class="cell"><label>INTEG_LIMIT (il)</label><input id="p_il" value="800"></div>
-  <div class="cell"><label>EMA_ALPHA (ema)</label><input id="p_ema" value="0.50"></div>
-</div>
-
-<h2>Straightness coupling</h2>
-<div class="grid">
-  <div class="cell"><label>STRAIGHT_KP (str)</label><input id="p_str" value="6.0"></div>
-  <div class="cell"><label>STRAIGHT_MAX (sm)</label><input id="p_sm" value="500"></div>
-</div>
-
-<h2>Per-wheel bias</h2>
-<div class="grid">
-  <div class="cell"><label>L_PWM_BIAS (lb)</label><input id="p_lb" value="0"></div>
-  <div class="cell"><label>R_PWM_BIAS (rb)</label><input id="p_rb" value="0"></div>
-</div>
-
-<h2>Feedforward (per wheel kV / offset)</h2>
-<div class="grid">
-  <div class="cell"><label>kV_L (kvl)</label><input id="p_kvl" value="2.961"></div>
-  <div class="cell"><label>kV_R (kvr)</label><input id="p_kvr" value="2.749"></div>
-  <div class="cell"><label>off_L (ofl)</label><input id="p_ofl" value="0"></div>
-  <div class="cell"><label>off_R (ofr)</label><input id="p_ofr" value="0"></div>
-</div>
-
-<h2>IR sensor calibration</h2>
-<p style="font-size:11px;color:#888;margin-bottom:6px">
-  Place robot in dead-end (4 walls), centered. Stream → wait stable → Capture IR.
-  Values latch as new cal. Copy into <code>include/PinConfig.h</code> IR_CAL_* to make permanent.
-</p>
-<div class="row">
-  <button class="primary" id="btnIrStream" disabled>Start IR stream</button>
-  <button id="btnIrStop" disabled>Stop stream</button>
-  <button class="ok" id="btnIrCal" disabled>Capture IR cal</button>
-</div>
-<div id="irLive" style="background:#0a0a0a;border:1px solid #333;border-radius:4px;
-     padding:8px;margin-top:6px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
-  <div><span style="font-size:10px;color:#888">LF live</span><br>
-       <span style="font-size:16px;color:#4fc3f7" id="irLF">--</span></div>
-  <div><span style="font-size:10px;color:#888">L  live</span><br>
-       <span style="font-size:16px;color:#4fc3f7" id="irL">--</span></div>
-  <div><span style="font-size:10px;color:#888">R  live</span><br>
-       <span style="font-size:16px;color:#4fc3f7" id="irR">--</span></div>
-  <div><span style="font-size:10px;color:#888">RF live</span><br>
-       <span style="font-size:16px;color:#4fc3f7" id="irRF">--</span></div>
-</div>
-<div class="grid" style="margin-top:8px">
-  <div class="cell"><label>calLF (clf)</label><input id="p_clf" value="3300"></div>
-  <div class="cell"><label>calL  (cl)</label><input id="p_cl"  value="1800"></div>
-  <div class="cell"><label>calR  (cr)</label><input id="p_cr"  value="1800"></div>
-  <div class="cell"><label>calRF (crf)</label><input id="p_crf" value="2500"></div>
-</div>
-
-<div class="row" style="margin-top:10px">
-  <button class="primary" id="btnApplyAll" disabled>Apply ALL params</button>
-  <span style="font-size:11px;color:#888">Changes also apply on Enter/blur per field.</span>
-</div>
-
-<h2>Console</h2>
-<div id="terminal"><span class="t-sys">waiting for connection...</span>
+<hr>
+<h2>event log</h2>
+<div id="terminal"><span class="t-sys">waiting for connection…</span>
 </div>
 <div class="cmd-row">
-  <input id="custom" placeholder="custom NUS cmd, e.g. 'kp 0.8' or 'run'" maxlength="80">
+  <input id="custom" placeholder="raw command, e.g. DUMP or STOP" maxlength="80">
   <button id="btnSend" disabled>Send</button>
 </div>
 
 <script>
-  const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-  const NUS_RX      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-  const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const IR_MAX      = 4095;
 
-  let device = null, rxChar = null;
-  const terminal = document.getElementById('terminal');
-  const statusEl = document.getElementById('status');
-  let rxBuffer = '';
+let device = null, rxChar = null, rxBuffer = '';
+const terminal  = document.getElementById('terminal');
+const statusEl  = document.getElementById('status');
 
-  // Map of input element id → BLE param key
-  const PARAMS = {
-    p_t:'t', p_runms:'runms', p_rs:'rs',
-    p_kp:'kp', p_ki:'ki', p_il:'il', p_ema:'ema',
-    p_str:'str', p_sm:'sm',
-    p_lb:'lb', p_rb:'rb',
-    p_kvl:'kvl', p_kvr:'kvr', p_ofl:'ofl', p_ofr:'ofr',
-    p_clf:'clf', p_cl:'cl', p_cr:'cr', p_crf:'crf'
-  };
+// ── maze state ──────────────────────────────────────────────────────────────
+const ROWS = 6, COLS = 3;
+const WALL_N = 1, WALL_E = 2, WALL_S = 4, WALL_W = 8;
+let mazeWalls   = new Uint8Array(ROWS * COLS); // walls[r*COLS+c]
+let mazeVisited = new Uint8Array(ROWS * COLS);
+let mazeFlood   = new Uint8Array(ROWS * COLS).fill(255);
+let robotRow = 0, robotCol = 0, robotHead = 'N';
 
-  function ts() {
-    const d = new Date();
-    return d.toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'})
-         + '.' + String(d.getMilliseconds()).padStart(3,'0');
-  }
-  function log(text, cls='t-sys') {
-    const span = document.createElement('span');
-    span.className = cls;
-    span.textContent = `[${ts()}] ${text}\n`;
-    terminal.appendChild(span);
-    terminal.scrollTop = terminal.scrollHeight;
-    while (terminal.childElementCount > 800) terminal.removeChild(terminal.firstChild);
-  }
-  function setConnected(ok) {
-    statusEl.textContent = ok ? 'connected — neuromouse' : 'disconnected';
-    statusEl.className = ok ? 'connected' : '';
-    document.getElementById('btnConnect').disabled    = ok;
-    document.getElementById('btnDisconnect').disabled = !ok;
-    document.getElementById('btnSend').disabled       = !ok;
-    document.getElementById('btnQuery').disabled      = !ok;
-    document.getElementById('btnApplyAll').disabled   = !ok;
-    ['btnCal','btnRun','btnTape','btnChar','btnStop',
-     'btnIrStream','btnIrStop','btnIrCal'].forEach(id =>
-      document.getElementById(id).disabled = !ok);
-  }
+const ARROWS = { N:'↑', E:'→', S:'↓', W:'←' };
 
-  async function connect() {
-    try {
-      log('scanning…');
-      // Filters are OR'd. Show only devices that either advertise the NUS
-      // service UUID, or whose name starts with "neuro" — keeps the chooser
-      // clean of phones, AirPods, smartwatches, etc.
-      device = await navigator.bluetooth.requestDevice({
-        filters: [
-          { services: [NUS_SERVICE] },
-          { namePrefix: 'neuro' }
-        ],
-        optionalServices: [NUS_SERVICE]
-      });
-      device.addEventListener('gattserverdisconnected', () => {
-        log('disconnected','t-err');
-        setConnected(false);
-        rxChar = null;
-      });
-      const server  = await device.gatt.connect();
-      const service = await server.getPrimaryService(NUS_SERVICE);
-      rxChar        = await service.getCharacteristic(NUS_RX);
-      const txChar  = await service.getCharacteristic(NUS_TX);
-      await txChar.startNotifications();
-      txChar.addEventListener('characteristicvaluechanged', e => {
-        const chunk = new TextDecoder().decode(e.target.value);
-        rxBuffer += chunk;
-        let nl;
-        while ((nl = rxBuffer.indexOf('\n')) >= 0) {
-          const line = rxBuffer.slice(0, nl).trimEnd();
-          rxBuffer = rxBuffer.slice(nl + 1);
-          if (line.length) handleRxLine(line);
-        }
-      });
-      setConnected(true);
-      log('connected','t-sys');
-      // ask device to dump current params so the UI reflects truth
-      setTimeout(() => send('?'), 200);
-    } catch(e) {
-      log(`error: ${e.message}`,'t-err');
-      statusEl.className = 'error';
+// Build initial maze grid DOM (row 5 = top/north, row 0 = bottom/south)
+(function buildMazeDom() {
+  const grid = document.getElementById('maze');
+  grid.innerHTML = '';
+  for (let r = ROWS - 1; r >= 0; r--) {
+    for (let c = 0; c < COLS; c++) {
+      const div = document.createElement('div');
+      div.className = 'cell';
+      div.id = `cell-${r}-${c}`;
+      div.innerHTML = `<span class="flood" id="fl-${r}-${c}">?</span>`;
+      grid.appendChild(div);
     }
   }
+})();
 
-  async function send(cmd) {
-    if (!rxChar) return;
-    try {
-      await rxChar.writeValueWithoutResponse(new TextEncoder().encode(cmd));
-      log(`→ ${cmd}`,'t-tx');
-    } catch(e) {
-      log(`send err: ${e.message}`,'t-err');
-    }
-  }
-
-  function handleRxLine(line) {
-    log(line, 't-rx');
-    // Parse live telemetry: "rt t=NNN vL=NN vR=NN pL=NN pR=NN sE=NN"
-    if (line.startsWith('rt ')) {
-      const m = Object.fromEntries(line.slice(3).split(/\s+/)
-        .map(kv => kv.split('=')));
-      if (m.t)  document.getElementById('rtT').textContent  = m.t;
-      if (m.vL) document.getElementById('rtVL').textContent = m.vL;
-      if (m.vR) document.getElementById('rtVR').textContent = m.vR;
-      if (m.pL) document.getElementById('rtPL').textContent = 'pw '+m.pL;
-      if (m.pR) document.getElementById('rtPR').textContent = 'pw '+m.pR;
-      if (m.sE) document.getElementById('rtSE').textContent = m.sE;
-      if (m.vb) document.getElementById('rtVB').textContent = m.vb;
-      return;
-    }
-    if (line.startsWith('run start')) {
-      const m = line.match(/T=(\d+)/); if (m) document.getElementById('rtTarget').textContent = m[1];
-    }
-    if (line.startsWith('tape done')) {
-      const m = line.match(/ratio=([0-9.]+)/);
-      if (m) document.getElementById('rtRatio').textContent = m[1];
-    }
-    // Auto-calibrate done: pull params so all inputs reflect new kV / rs.
-    if (line.startsWith('cal done')) {
-      setTimeout(() => send('?'), 200);
-    }
-    // IR live stream — push into 4 readout boxes.
-    if (line.startsWith('ir LF=')) {
-      const m = Object.fromEntries(line.slice(3).split(/\s+/).map(kv => kv.split('=')));
-      if (m.LF) document.getElementById('irLF').textContent = m.LF;
-      if (m.L)  document.getElementById('irL').textContent  = m.L;
-      if (m.R)  document.getElementById('irR').textContent  = m.R;
-      if (m.RF) document.getElementById('irRF').textContent = m.RF;
-    }
-    // IR cal capture acknowledged — pull params so cal fields update.
-    if (line.startsWith('ircal done')) {
-      setTimeout(() => send('?'), 200);
-    }
-    // Parse param dump: "p kp=1.00 ki=1.50 il=800 ..."
-    if (line.startsWith('p ')) {
-      const m = Object.fromEntries(line.slice(2).split(/\s+/)
-        .map(kv => kv.split('=')));
-      for (const id in PARAMS) {
-        const k = PARAMS[id];
-        if (m[k] !== undefined) document.getElementById(id).value = m[k];
+function updateMazeDom() {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cell = document.getElementById(`cell-${r}-${c}`);
+      const w    = mazeWalls[r * COLS + c];
+      const fl   = document.getElementById(`fl-${r}-${c}`);
+      if (!cell) continue;
+      // Walls
+      cell.className = 'cell';
+      if (w & WALL_N) cell.classList.add('wall-N');
+      if (w & WALL_E) cell.classList.add('wall-E');
+      if (w & WALL_S) cell.classList.add('wall-S');
+      if (w & WALL_W) cell.classList.add('wall-W');
+      if (mazeVisited[r * COLS + c]) cell.classList.add('visited');
+      // Robot
+      const isRobot = (r === robotRow && c === robotCol);
+      if (isRobot) cell.classList.add('robot');
+      // Arrow + flood
+      fl.textContent = mazeFlood[r * COLS + c] === 255 ? '∞' : mazeFlood[r * COLS + c];
+      // Remove old arrow span if any
+      const old = cell.querySelector('.arrow');
+      if (old) old.remove();
+      if (isRobot) {
+        const a = document.createElement('span');
+        a.className = 'arrow';
+        a.textContent = ARROWS[robotHead] || '?';
+        cell.appendChild(a);
       }
     }
   }
+}
 
-  // Wire actions
-  document.getElementById('btnConnect').onclick    = connect;
-  document.getElementById('btnDisconnect').onclick = () => device?.gatt.connected && device.gatt.disconnect();
-  document.getElementById('btnClear').onclick      = () => { terminal.innerHTML = ''; };
-  document.getElementById('btnQuery').onclick      = () => send('?');
-  document.getElementById('btnCal').onclick        = () => send('cal');
-  document.getElementById('btnRun').onclick        = () => send('run');
-  document.getElementById('btnTape').onclick       = () => send('tape');
-  document.getElementById('btnChar').onclick       = () => send('char');
-  document.getElementById('btnStop').onclick       = () => send('stop');
-  document.getElementById('btnIrStream').onclick   = () => send('irstream');
-  document.getElementById('btnIrStop').onclick     = () => send('irstop');
-  document.getElementById('btnIrCal').onclick      = () => send('ircal');
+// ── helpers ──────────────────────────────────────────────────────────────────
+function ts() {
+  const d = new Date();
+  return d.toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'})
+       + '.' + String(d.getMilliseconds()).padStart(3,'0');
+}
+function log(text, cls='t-sys') {
+  const sp = document.createElement('span');
+  sp.className = cls;
+  sp.textContent = `[${ts()}] ${text}\n`;
+  terminal.appendChild(sp);
+  terminal.scrollTop = terminal.scrollHeight;
+  while (terminal.childElementCount > 600) terminal.removeChild(terminal.firstChild);
+}
+function setBar(id, val, max=4095) {
+  document.getElementById('bar-'+id).style.width = Math.min(100, val/max*100).toFixed(1)+'%';
+  document.getElementById('val-'+id).textContent  = val;
+}
+function setConnected(ok) {
+  statusEl.textContent = ok ? 'connected — bromouse' : 'disconnected';
+  statusEl.className   = ok ? 'connected' : '';
+  document.getElementById('btnConnect').disabled    =  ok;
+  document.getElementById('btnDisconnect').disabled = !ok;
+  document.getElementById('btnSend').disabled       = !ok;
+  ['btnExplore','btnFast','btnStop','btnDump','btnClearNvs'].forEach(id =>
+    document.getElementById(id).disabled = !ok);
+}
 
-  function applyOne(id) {
-    const v = document.getElementById(id).value.trim();
-    if (v.length) send(`${PARAMS[id]} ${v}`);
+// ── JSON telemetry handler ────────────────────────────────────────────────────
+function handleJson(msg) {
+  const t = msg.t;
+
+  if (t === 'ST') {
+    const badge = document.getElementById('state-badge');
+    badge.textContent = msg.v;
+    badge.className   = msg.v;
+    log(`state → ${msg.v}`, 't-sys');
+    return;
   }
-  document.getElementById('btnApplyAll').onclick = async () => {
-    for (const id in PARAMS) {
-      applyOne(id);
-      await new Promise(r => setTimeout(r, 40));   // pace BLE writes
+
+  if (t === 'POS') {
+    robotRow  = msg.r;
+    robotCol  = msg.c;
+    robotHead = msg.h;
+    document.getElementById('i-pos').textContent = `(${msg.r},${msg.c}) ${msg.h}`;
+    updateMazeDom();
+    log(`pos (${msg.r},${msg.c}) ${msg.h}`, 't-sys');
+    return;
+  }
+
+  if (t === 'WALL') {
+    const idx = msg.r * COLS + msg.c;
+    if (idx >= 0 && idx < ROWS * COLS) {
+      mazeWalls[idx]   = msg.w;
+      mazeVisited[idx] = 1;
     }
-  };
-  // Per-field auto-apply on Enter / blur
-  for (const id in PARAMS) {
-    const el = document.getElementById(id);
-    el.addEventListener('keydown', e => { if (e.key === 'Enter') { applyOne(id); el.blur(); } });
-    el.addEventListener('change', () => applyOne(id));
+    updateMazeDom();
+    log(`wall (${msg.r},${msg.c})${msg.h} w=0x${msg.w.toString(16).padStart(2,'0')} F=${msg.f} L=${msg.l} R=${msg.rv}`, 't-wall');
+    return;
   }
 
-  // Custom command
-  const custom = document.getElementById('custom');
-  document.getElementById('btnSend').onclick = () => {
-    const v = custom.value.trim();
-    if (v) { send(v); custom.value = ''; }
-  };
-  custom.addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('btnSend').click();
-  });
+  if (t === 'MOT') {
+    document.getElementById('i-phase').textContent = msg.ph;
+    document.getElementById('i-tgt').textContent   = `${msg.tg}→${msg.av}`;
+    document.getElementById('i-yaw').textContent   = msg.yw.toFixed(1);
+    document.getElementById('m-pL').textContent    = msg.pL;
+    document.getElementById('m-pR').textContent    = msg.pR;
+    document.getElementById('m-tg').textContent    = msg.tg;
+    document.getElementById('m-av').textContent    = msg.av;
+    if (msg.lf !== undefined) { setBar('lf', msg.lf); setBar('l', msg.l); setBar('r', msg.r); setBar('rf', msg.rf); }
+    return; // motion is high-rate; don't log each packet
+  }
+
+  if (t === 'BAT') {
+    document.getElementById('i-bat').textContent = msg.v + '%';
+    log(`battery ${msg.v}%`, 't-sys');
+    return;
+  }
+
+  if (t === 'CRASH') {
+    const badge = document.getElementById('state-badge');
+    badge.textContent = 'CRASH/BOXED';
+    badge.className   = 'CRASH';
+    log(`CRASH/BOXED at (${msg.r},${msg.c}) ${msg.h} walls=0x${msg.w.toString(16)}`, 't-err');
+    return;
+  }
+
+  if (t === 'MAZE') {
+    // Full maze dump: w = hex string 36 chars (18 bytes), v = hex 12 chars (6 bytes visited), f = array
+    const wh = msg.w;
+    for (let i = 0; i < 18; i++) {
+      mazeWalls[i] = parseInt(wh.substr(i*2, 2), 16);
+    }
+    const vh = msg.v;
+    for (let r = 0; r < ROWS; r++) {
+      const vb = parseInt(vh.substr(r*2, 2), 16);
+      for (let c = 0; c < COLS; c++) {
+        mazeVisited[r * COLS + c] = (vb >> c) & 1;
+      }
+    }
+    if (msg.f) {
+      for (let i = 0; i < 18 && i < msg.f.length; i++) mazeFlood[i] = msg.f[i];
+    }
+    updateMazeDom();
+    log('maze dump received', 't-sys');
+    return;
+  }
+
+  // Unknown — just log raw
+  log(JSON.stringify(msg), 't-rx');
+}
+
+// ── BLE RX line handler ───────────────────────────────────────────────────────
+function handleLine(line) {
+  if (!line.length) return;
+  // Try JSON first
+  if (line.startsWith('{')) {
+    try {
+      handleJson(JSON.parse(line));
+    } catch(e) {
+      log(line, 't-rx');
+    }
+    return;
+  }
+  // Legacy text telemetry (old wall-follow-pcnt firmware)
+  log(line, 't-rx');
+}
+
+// ── BLE connect/send ─────────────────────────────────────────────────────────
+async function connect() {
+  try {
+    log('scanning…');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [
+        { namePrefix: 'bromouse' },
+        { namePrefix: 'neuro' }
+      ],
+      optionalServices: [NUS_SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected', () => {
+      log('disconnected', 't-err');
+      setConnected(false);
+      rxChar = null;
+    });
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE);
+    rxChar        = await service.getCharacteristic(NUS_RX);
+    const txChar  = await service.getCharacteristic(NUS_TX);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', e => {
+      const chunk = new TextDecoder().decode(e.target.value);
+      rxBuffer += chunk;
+      let nl;
+      while ((nl = rxBuffer.indexOf('\n')) >= 0) {
+        handleLine(rxBuffer.slice(0, nl).trimEnd());
+        rxBuffer = rxBuffer.slice(nl + 1);
+      }
+      // If no newline but looks like complete JSON, handle it
+      if (rxBuffer.startsWith('{') && rxBuffer.endsWith('}')) {
+        handleLine(rxBuffer);
+        rxBuffer = '';
+      }
+    });
+    setConnected(true);
+    log('connected', 't-sys');
+    setTimeout(() => send('DUMP'), 400);  // request maze dump on connect
+  } catch(e) {
+    log(`error: ${e.message}`, 't-err');
+    statusEl.className = 'error';
+  }
+}
+
+async function send(cmd) {
+  if (!rxChar) return;
+  try {
+    await rxChar.writeValueWithoutResponse(new TextEncoder().encode(cmd));
+    log(`→ ${cmd}`, 't-tx');
+  } catch(e) {
+    log(`send err: ${e.message}`, 't-err');
+  }
+}
+
+// Wire buttons
+document.getElementById('btnConnect').onclick    = connect;
+document.getElementById('btnDisconnect').onclick = () => device?.gatt.connected && device.gatt.disconnect();
+document.getElementById('btnClear').onclick      = () => { terminal.innerHTML = ''; };
+document.getElementById('btnExplore').onclick    = () => send('EXPLORE');
+document.getElementById('btnFast').onclick       = () => send('FAST');
+document.getElementById('btnStop').onclick       = () => send('STOP');
+document.getElementById('btnDump').onclick       = () => send('DUMP');
+document.getElementById('btnClearNvs').onclick   = () => send('CLEAR_NVS');
+
+const custom = document.getElementById('custom');
+document.getElementById('btnSend').onclick = () => { const v=custom.value.trim(); if(v){send(v);custom.value='';} };
+custom.addEventListener('keydown', e => { if(e.key==='Enter') document.getElementById('btnSend').click(); });
+
+// Initial maze render
+updateMazeDom();
 </script>
 </body>
 </html>

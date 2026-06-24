@@ -18,6 +18,7 @@ Domain code is split into header-only modules in `include/`, each text-included 
 | `include/Pose.h` | `robotRow/Col/Heading`, mode flags, `fastRunCruiseTps`, `pendingOffsetTicks`. |
 | `include/MotionScript.h` | `RunPhase`/`TurnDir` enums, `PhaseStep`, `script[]`, `scriptPush*` helpers. |
 | `include/Persistence.h` | NVS save/load (walls + fast-run speed, namespace `mm26`). |
+| `include/BLETelemetry.h` | NimBLE GATT server (Nordic UART Service). `bleInit()` in setup; `bleGetCmd()` polled in loop; `bleState/blePos/bleWall/bleMotion/bleCrash/bleMazeDump` called at key events. |
 | `include/Planner.h` | `setupMaze`, `senseAndStoreWalls`, `buildMoveScript` (+ fast-run chain fusion). |
 | `include/OLED.h` | U8G2 + menu + run + diag screens + `autoCalGyroBeforeStart()`. |
 | `src/main.cpp` | Hardware objects, IR-centering PID, `rTicks`/`stopMotors`/`buttonEdge`, `onPhaseActivate`/`phaseEnter`/`scriptKick`, `setup()`, `loop()` state machine. |
@@ -117,6 +118,8 @@ GOAL / CRASH    → IDLE      (button)
 - **`BOXED` state** — when `bestDist == FLOOD_INFINITY` in fast run, OLED shows `!! BOXED !!` (maze has no reachable path from current cell); in explore mode a 180° recovery is attempted first.
 - **`SIDE_ADAPTIVE=true`** — side IR uses per-run live calibration (`calibrateSideRefs()`) + relative threshold + saturation skip + 5-sample median. Set `false` to revert to legacy fixed threshold.
 - **`g_smoothMode`** (in `Pose.h`) — runtime toggle (OLED "Mode: Smooth/Classic") enabling `PH_CURVE` continuous arcs in fast run. Off by default; arc code is gated behind `CURVE_ENABLE` in `Tuning.h [I]`.
+- **BLE device name** — robot advertises as `"bromouse"`. Browser connects via `tools/ble-debug.html` using Web Bluetooth (NUS UUIDs). Commands: `EXPLORE`, `FAST`, `STOP`, `DUMP`, `CLEAR_NVS`. Telemetry JSON types: `ST` (state), `POS`, `WALL`, `MOT` (motion, gated 10 Hz), `BAT`, `CRASH`, `MAZE`.
+- **Side sensor contamination** — L45/R45 sensors at 45° (PCB-verified from pick-and-place U6=45°, U9=315°). Front wall at 90 mm appears at 127 mm diagonal → phantom side reads. Fix: `senseAndStoreWalls()` skips side re-sensing when front wall confirmed; mid-cell sense (at 50% forward) already ran without contamination.
 
 ---
 
