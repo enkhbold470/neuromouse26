@@ -136,7 +136,10 @@ static void onPhaseActivate() {
     }
 }
 
-static bool midCellSensed = false;  // reset by phaseEnter, fired once per FWD leg
+static bool  midCellSensed = false;  // reset by phaseEnter, fired once per FWD leg
+static float flowEntryTps   = 0.0f;  // body speed (tps) carried into a FWD entered
+                                     // continuously from a curve (no-brake handoff)
+                                     // so its trapezoid doesn't command a slowdown.
 
 static void phaseEnter() {
     phaseStartTL     = leftEnc.getTicks();
@@ -162,6 +165,7 @@ static void scriptKick() {
     runTarget  = script[0].target;
     runTurnDir = script[0].dir;
     pid.reset();
+    flowEntryTps  = 0.0f;   // first step always starts from rest
     irFirstSample = true;   // re-seed IR centering EMA on each new script
     phaseEnter();
 }
@@ -245,6 +249,7 @@ void loop() {
                 pendingOffsetTicks = START_OFFSET_TICKS;
                 exploreMode = true; fastRunMode = false; returnHomeMode = false; finalTurnPending = false;
                 autoCalGyroBeforeStart();
+                calibrateSideRefs();   // capture this run's side wall refs (start cell, west wall on left)
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- EXPLORE START (round trip) ---");
                 state = EXPLORE_THINK;
@@ -261,6 +266,7 @@ void loop() {
                 pendingOffsetTicks = START_OFFSET_TICKS;
                 exploreMode = false; fastRunMode = true; returnHomeMode = false; finalTurnPending = false;
                 autoCalGyroBeforeStart();
+                calibrateSideRefs();   // capture this run's side wall refs (start cell, west wall on left)
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
                 Serial.println("--- FAST RUN START ---");
                 state = EXPLORE_THINK;
@@ -269,6 +275,13 @@ void loop() {
                 menuEncRef = rightEnc.getTicks();
                 state = FAST_SPEED_EDIT;
                 oledFastSpeedEdit();
+                break;
+            case M_SMOOTH:
+                g_smoothMode = !g_smoothMode;
+                Serial.printf("[SMOOTH] %s\n",
+                              g_smoothMode ? "ON (fast run = continuous arc turns)"
+                                           : "OFF (classic stop-pivot)");
+                oledMenu();
                 break;
             case M_ENC:
                 leftEnc.reset(); rightEnc.reset();
@@ -598,21 +611,22 @@ void loop() {
             Serial.printf("[CRASH] IR F=%d(LF=%d RF=%d) L=%d(%d) R=%d(%d) thr=%d\n",
                           dbgF, irVal[0], irVal[3],
                           dbgL, irVal[1], dbgR, irVal[2], WALL_FRONT_THRESH);
-            // OLED: walls bitmask + flood distances of neighbours
+            // OLED: big "BOXED" label + debug detail underneath
             {
-                char line1[24], line2[24], line3[24];
-                snprintf(line1, sizeof(line1), "BOX(%d,%d)%c w=%02X f=%d", robotRow, robotCol, "NESW"[robotHeading], maze.walls[robotRow][robotCol], maze.flood[robotRow][robotCol]);
+                char detail[32];
                 uint8_t fN = (nr_N>=0&&nr_N<MAZE_SIZE) ? maze.flood[nr_N][nc_N] : 255;
                 uint8_t fS = (nr_S>=0&&nr_S<MAZE_SIZE) ? maze.flood[nr_S][nc_S] : 255;
                 uint8_t fE = (nc_E>=0&&nc_E<MAZE_SIZE) ? maze.flood[nr_E][nc_E] : 255;
-                snprintf(line2, sizeof(line2), "fN=%d fS=%d fE=%d", fN, fS, fE);
-                snprintf(line3, sizeof(line3), "w4=%02X L=%d R=%d", (nr_S>=0&&nr_S<MAZE_SIZE)?maze.walls[nr_S][nc_S]:0, irVal[1], irVal[2]);
+                snprintf(detail, sizeof(detail), "(%d,%d)%c w=%02X fNSE=%d%d%d",
+                         robotRow, robotCol, "NESW"[robotHeading],
+                         maze.walls[robotRow][robotCol], fN, fS, fE);
                 oled.clearBuffer();
+                oled.setFont(u8g2_font_10x20_tf);
+                oled.drawStr(0, 20, "!! BOXED !!");
                 oled.setFont(u8g2_font_5x7_tf);
-                oled.drawStr(0, 8,  line1);
-                oled.drawHLine(0, 10, 128);
-                oled.drawStr(0, 22, line2);
-                oled.drawStr(0, 34, line3);
+                oled.drawHLine(0, 24, 128);
+                oled.drawStr(0, 36, detail);
+                oled.drawStr(0, 50, "maze has no path");
                 oled.drawStr(0, 63, "btn=back");
                 oled.sendBuffer();
             }
@@ -779,6 +793,8 @@ void loop() {
         uint32_t effStallMs   = imuMode ? YAW_STALL_MS      : POS_STALL_MS;
         float    effStallEmax = imuMode ? YAW_STALL_ERR_MAX : (float)POS_STALL_ERR_MAX;
         float    effStkSoft   = imuMode ? YAW_STK_SOFT_BAND : (float)POS_STK_SOFT_BAND;
+        // PH_CURVE settles on its degree-sweep, not the yaw hold band.
+        if (runPhase == PH_CURVE) effHb = CURVE_HEAD_DEADBAND;
 
         static float    posAvgPrev  = 0.0f;
         static uint32_t posPrevUs   = 0;
@@ -795,6 +811,7 @@ void loop() {
 
         auto endPhase = [&](const char* reason) {
             stopMotors();
+            flowEntryTps = 0.0f;   // braked → next phase starts from rest
             const char* phN = (runPhase == PH_FORWARD) ? "FWD"
                             : (runPhase == PH_PIVOT)   ? "PIV" : "SPOT";
             if (!fastRunMode) {
@@ -829,7 +846,70 @@ void loop() {
             phaseEnter();
         };
 
+        // No-brake handoff: when both the current and next steps are flow
+        // phases (FWD/CURVE) and Smooth mode is on, advance WITHOUT braking so
+        // the mouse carries velocity across the cell/curve boundary. Mirrors
+        // endPhase but skips stopMotors() and the settle dwell.
+        auto endPhaseNoBrake = [&]() {
+            bool fromCurve = (runPhase == PH_CURVE);
+            if (scriptIdx + 1 >= scriptLen) {
+                robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
+                resetPidState();
+                runTurnDir = TURN_NONE;
+                flowEntryTps = 0.0f;
+                if (exploreMode || fastRunMode) state = EXPLORE_THINK;
+                else { menuEncRef = rightEnc.getTicks(); oledMenu(); state = IDLE; }
+                return;
+            }
+            scriptIdx++;
+            PhaseStep& nxt = script[scriptIdx];
+            runPhase   = nxt.phase;
+            runTarget  = nxt.target;
+            runTurnDir = nxt.dir;
+            resetPidState();
+            pid.reset();
+            // A straight entered continuously from a curve is already rolling at
+            // ~the curve exit speed; carry that so its trapezoid doesn't dip.
+            if (nxt.phase == PH_FORWARD && fromCurve) {
+                float v = CURVE_V_EXIT_TPS;
+                if (fastRunMode && fastRunCruiseTps < v) v = fastRunCruiseTps;
+                flowEntryTps = v;
+            } else {
+                flowEntryTps = 0.0f;
+            }
+            phaseEnter();
+        };
+
+        // PH_CURVE completion backstops.
+        if (runPhase == PH_CURVE) {
+            long arcAvg = labs((tL + tR) / 2);
+            if (arcAvg >= CURVE_ARC_TICKS + CURVE_TICK_MARGIN) {
+                // Drove the full arc length (gyro may have under-read): treat as
+                // complete and let the normal settle/handoff run.
+                posErr = 0.0f;
+            } else if (micros() - phaseStartUs > 3000000UL) {
+                // Jam: 3 s with no completion and no distance. Do NOT hand off
+                // forward (that would ram whatever stalled us) — hard stop + abort.
+                stopMotors();
+                Serial.println("[CURVE] jam timeout — abort to menu");
+                exploreMode = false; fastRunMode = false; returnHomeMode = false;
+                menuEncRef = rightEnc.getTicks();
+                oledMenu();
+                state = IDLE;
+                break;
+            }
+        }
+
         if (fabsf(posErr) < effHb) {
+            // Smooth flow handoff (FWD/CURVE → FWD/CURVE): no brake, no dwell.
+            bool flowNow  = (runPhase == PH_FORWARD || runPhase == PH_CURVE);
+            bool nextFlow = (scriptIdx + 1 < scriptLen) &&
+                            (script[scriptIdx + 1].phase == PH_FORWARD ||
+                             script[scriptIdx + 1].phase == PH_CURVE);
+            if (g_smoothMode && flowNow && nextFlow) {
+                endPhaseNoBrake();
+                break;
+            }
             stopMotors();
             if (settleStart == 0) settleStart = millis();
             if (millis() - settleStart > effSettleMs) {
@@ -858,7 +938,8 @@ void loop() {
             }
         }
 
-        if (fabsf(velFilt) < effStallVel && fabsf(posErr) < effStallEmax) {
+        if (runPhase != PH_CURVE
+                && fabsf(velFilt) < effStallVel && fabsf(posErr) < effStallEmax) {
             if (stallStart == 0) stallStart = millis();
             if (millis() - stallStart > effStallMs) {
                 endPhase("STALL");
@@ -885,7 +966,20 @@ void loop() {
             float xDoneEff = absAvg < 30.0f ? 30.0f : absAvg;
             float vCruise  = fastRunMode ? fastRunCruiseTps : FWD_V_CRUISE_TPS;
             float vAccel   = sqrtf(2.0f * FWD_ACCEL_TPS2 * xDoneEff);
-            float vDecel   = sqrtf(2.0f * FWD_DECEL_TPS2 * xRem);
+            // Continuous entry: a FWD entered from a curve (no-brake handoff) is
+            // already moving — floor vAccel at that entry speed so the trapezoid
+            // doesn't command a slowdown at the start of the straight.
+            if (flowEntryTps > vAccel) vAccel = flowEntryTps;
+            // Terminal-velocity trapezoid: when the next step is a curve, the
+            // straight bleeds to the arc-entry speed (not 0) so it never stops.
+            // Clamp to cruise so a slow cruise never demands a speed-up.
+            float vEnd     = 0.0f;
+            if (g_smoothMode && scriptIdx + 1 < scriptLen
+                    && script[scriptIdx + 1].phase == PH_CURVE) {
+                vEnd = CURVE_V_ENTRY_TPS;
+                if (vEnd > vCruise) vEnd = vCruise;
+            }
+            float vDecel   = sqrtf(2.0f * FWD_DECEL_TPS2 * xRem + vEnd * vEnd);
             float vAbsCmd  = vCruise;
             if (vAccel < vAbsCmd) vAbsCmd = vAccel;
             if (vDecel < vAbsCmd) vAbsCmd = vDecel;
@@ -909,6 +1003,9 @@ void loop() {
             if (dynMax > POS_MAX_PWM) dynMax = POS_MAX_PWM;
             if (dynMax < (int)FWD_STICTION_FF + 20) dynMax = (int)FWD_STICTION_FF + 20;
             throttle = constrain((int)u, -dynMax, dynMax);
+        } else if (runPhase == PH_CURVE) {
+            // Arc computes per-wheel PWM directly in the drive section below.
+            throttle = 0;
         } else {
             // PIVOT/SPOT: position PID with soft stiction floor.
             float u   = effKp * posErr - effKd * velFilt;
@@ -969,6 +1066,61 @@ void loop() {
             int bias = (int)corr + encBalance + yawBias;
             pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
             pwmR = constrain(throttle + bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
+            leftMotor.drive(pwmL); rightMotor.drive(pwmR);
+        } else if (runPhase == PH_CURVE) {
+            // ── Constant-curvature FORWARD-ONLY arc (smooth 90° turn) ──────
+            // avg = degrees swept (signed-positive in the turn direction, from
+            // the imuMode branch). Both wheels roll forward; the gyro closes
+            // the heading against the distance progress. Feed-forward is in
+            // TICK-SPACE (reuses the proven FWD FF), not the mm/s KV domain.
+            float sweptDeg  = avg;                          // ≥ 0 as it turns
+            float targetDeg = fabsf((float)runTarget);      // 90
+            long  arcAvg    = labs((tL + tR) / 2);
+            float fracDist  = constrain((float)arcAvg / (float)CURVE_ARC_TICKS, 0.0f, 1.0f);
+
+            // Body speed (tps) with an end-of-sweep taper; never commands 0.
+            // Cap the arc at the straight cruise so a slow cruise never makes
+            // the arc faster than the straight feeding it.
+            float vArcEff  = CURVE_V_ARC_TPS;
+            if (fastRunMode && fastRunCruiseTps < vArcEff) vArcEff = fastRunCruiseTps;
+            float vExitEff = (CURVE_V_EXIT_TPS < vArcEff) ? CURVE_V_EXIT_TPS : vArcEff;
+            float vBody  = vArcEff;
+            float remDeg = targetDeg - sweptDeg;
+            if (remDeg < CURVE_TAPER_DEG) {
+                float t = remDeg / CURVE_TAPER_DEG; if (t < 0.0f) t = 0.0f;
+                float vTaper = vExitEff + (vArcEff - vExitEff) * t;
+                if (vTaper < vBody) vBody = vTaper;
+            }
+
+            // Geometric differential split for radius R (tps).
+            float bOverR = (WHEEL_TRACK_MM * 0.5f) / CURVE_RADIUS_MM;
+            float vOuter = vBody * (1.0f + bOverR);
+            float vInner = vBody * (1.0f - bOverR);
+
+            // Tick-space feed-forward (proven FWD model).
+            int ffOuter = (int)((float)FWD_STICTION_FF + FWD_KV_SLOPE * vOuter);
+            int ffInner = (int)((float)FWD_STICTION_FF + FWD_KV_SLOPE * vInner);
+
+            // Gyro heading-vs-progress PD trim (PWM). Expected sweep ∝ distance.
+            float headErr  = fracDist * targetDeg - sweptDeg;          // + = turned too little
+            float omegaExp = ((vBody / TICKS_PER_MM) / CURVE_RADIUS_MM) * 57.29578f;  // °/s
+            float turnRate = (runTurnDir == TURN_RIGHT) ? -gzFilt : gzFilt;  // + while turning correctly
+            int   hb = (int)(CURVE_HEAD_KP * headErr - CURVE_HEAD_KD * (turnRate - omegaExp));
+
+            // More turn → speed the outer wheel, slow the inner.
+            int pwmOuter = ffOuter + hb;
+            int pwmInner = ffInner - hb;
+            // FORWARD-ONLY clamp ★ (the PH_PIVOT-killer: inner never reverses).
+            pwmOuter = constrain(pwmOuter, 0, MOTOR_PWM_MAX);
+            pwmInner = constrain(pwmInner, 0, MOTOR_PWM_MAX);
+            // Arc stiction floor on the INNER wheel only (the slow one that can
+            // buzz without turning). The outer wheel's FF is well above breakaway
+            // in a normal arc; flooring it too would cap the heading controller's
+            // authority to *slow* the outer wheel when the arc has over-rotated.
+            if (vInner > 1.0f && pwmInner < BASE_BREAKAWAY_PWM) pwmInner = BASE_BREAKAWAY_PWM;
+
+            if (runTurnDir == TURN_RIGHT) { pwmL = pwmOuter; pwmR = pwmInner; }
+            else                          { pwmL = pwmInner; pwmR = pwmOuter; }
             leftMotor.drive(pwmL); rightMotor.drive(pwmR);
         } else if (runPhase == PH_PIVOT) {
             // Pivot: one wheel drives, the other brakes. Clamp throttle ≥ 0

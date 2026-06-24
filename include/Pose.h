@@ -36,4 +36,10 @@ static float fastRunCruiseTps = FAST_RUN_CRUISE_TPS_DEFAULT;
 // next forward leg, then clears itself.
 static long pendingOffsetTicks = 0;
 
+// Runtime Smooth/Classic toggle (OLED menu). Default OFF so a fresh flash is
+// the proven legacy stop-pivot firmware; the user enables Smooth from the menu
+// after bench-tuning. When ON (and CURVE_ENABLE), fast run uses continuous
+// arc turns. Phase 1 wires this to FAST RUN only; explore stays stop-pivot.
+static bool g_smoothMode = false;
+
 #endif

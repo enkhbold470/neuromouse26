@@ -30,6 +30,7 @@ enum MenuItem {
     M_EXPLORE = 0,
     M_FAST,
     M_FAST_SPEED,
+    M_SMOOTH,
     M_ENC,
     M_IR_TEST,
     M_CAL_IR,
@@ -43,6 +44,7 @@ static const char* MENU_LABELS[M_COUNT] = {
     "Explore",
     "Fast Run",
     "Fast Speed",
+    "Mode",            // M_SMOOTH — label rendered dynamically (Smooth ON/OFF)
     "Encoder Test",
     "IR Test",
     "Cal IR",
@@ -89,13 +91,19 @@ static void oledMenu() {
         int idx = top + i;
         if (idx >= M_COUNT) break;
         int y = 12 + i * LH;
+        const char* lbl = MENU_LABELS[idx];
+        char dynBuf[20];
+        if (idx == M_SMOOTH) {
+            snprintf(dynBuf, sizeof(dynBuf), "Smooth: %s", g_smoothMode ? "ON" : "OFF");
+            lbl = dynBuf;
+        }
         if (idx == menuSel) {
             oled.drawBox(0, y, 128, LH);
             oled.setDrawColor(0);
-            oled.drawStr(3, y + 8, MENU_LABELS[idx]);
+            oled.drawStr(3, y + 8, lbl);
             oled.setDrawColor(1);
         } else {
-            oled.drawStr(3, y + 8, MENU_LABELS[idx]);
+            oled.drawStr(3, y + 8, lbl);
         }
     }
     oled.sendBuffer();
@@ -105,6 +113,7 @@ static void oledRun(long avg, long tgt, long tL, long tR) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
     const char* phN = (runPhase == PH_FORWARD)         ? "FWD"
+                    : (runPhase == PH_CURVE)           ? "CRV"
                     : (runPhase == PH_PIVOT)           ? "PIV"
                     : (runPhase == PH_ALIGN_FRONT)     ? "ALN"
                     : (runPhase == PH_REVERSE_TO_BACK) ? "RTB"

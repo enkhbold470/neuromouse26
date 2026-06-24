@@ -139,6 +139,74 @@ constexpr long  PIVOT_TICKS_FALLBACK   =  900;   // used only if USE_IMU=false
 constexpr long  SPOT180_TICKS_FALLBACK =  906;   // used only if USE_IMU=false
 constexpr float BACKUP_OFFSET_MM       =   0.0f; // PH_REVERSE_TO_BACK
 
+// ── [I] SMOOTH-CURVE ARC (continuous motion / fast run) ──────────────────────
+// A PH_CURVE is a constant-curvature, FORWARD-ONLY arc that replaces a
+// stop-and-pivot SPOT 90° turn. Both wheels keep rolling forward (the inner
+// wheel only *slows*, never reverses → the old "fastFwdRoll breaks R-turns"
+// failure is impossible by construction). The arc is closed on the gyro
+// (heading-vs-distance-progress PD) and feed-forwarded in TICK-SPACE so it
+// reuses the proven FWD feed-forward (FWD_STICTION_FF + FWD_KV_SLOPE), NOT the
+// mm/s KV_L/KV_R domain (which is a different, separately-calibrated unit).
+//
+// TICK↔mm: use TICKS_PER_MM below (derived from hand-measured CELL_TICKS).
+// Do NOT use PinConfig::MM_PER_TICK for continuous-motion math — it is the
+// legacy single-channel value and is ~4× off against the 4× PCNT CELL_TICKS.
+//
+// Geometry (your reference diagram): R is the corner knob. Smaller R hugs the
+// inner post (clips inner); larger R sweeps wide (clips the OUTER wall). The
+// bracketing straights are shortened by CURVE_PRE/POST_TICKS so the centerline
+// path is continuous. WALL-CLIP MITIGATION ORDER (strict): lower CURVE_V_ARC
+// first → nudge CURVE_PRE/POST → NEVER raise R to fix an inner clip.
+//
+// ALL of this is gated at runtime by g_smoothMode (OLED Smooth/Classic toggle);
+// with the toggle OFF the robot is byte-for-byte the legacy stop-pivot firmware.
+constexpr bool  CURVE_ENABLE      = true;     // master compile gate; false → no arc code path ever
+constexpr bool  EXPLORE_CONTINUOUS = false;   // Phase 2 (continuous explore) — not yet wired; reserved
+
+constexpr float TICKS_PER_MM      = (float)CELL_TICKS / CELL_PITCH_MM;   // 7.778 (authoritative)
+constexpr float CURVE_RADIUS_MM   = 90.0f;    // = half cell pitch, centerline-to-centerline
+constexpr long  CURVE_ARC_TICKS   = (long)(CURVE_RADIUS_MM * 1.5707963f * TICKS_PER_MM + 0.5f); // R·π/2 ≈ 1100
+constexpr long  CURVE_PRE_TICKS   = (long)(CURVE_RADIUS_MM * TICKS_PER_MM + 0.5f);  // shorten approach straight ≈ 700
+constexpr long  CURVE_POST_TICKS  = (long)(CURVE_RADIUS_MM * TICKS_PER_MM + 0.5f);  // shorten exit straight ≈ 700
+
+// Body speeds in TPS (match the FWD trapezoid units). Conversion in THIS
+// codebase: mm/s = tps / TICKS_PER_MM = tps × 180 / 1400 (so 150 tps ≈ 19 mm/s,
+// matching the shipping explore cruise). START LOW — bench-verify wall
+// clearance before raising (stage F4). 1000 tps ≈ 129 mm/s; a_lat = v²/R ≈
+// 0.18 m/s² at R=90 mm (very gentle, safe first arc).
+constexpr float CURVE_V_ARC_TPS   = 1000.0f;  // arc body cruise (≈129 mm/s)
+constexpr float CURVE_V_ENTRY_TPS = 1000.0f;  // FWD decel terminal speed into the arc (= vArc)
+constexpr float CURVE_V_EXIT_TPS  =  700.0f;  // body speed at the end of the taper (≈90 mm/s)
+constexpr float CURVE_TAPER_DEG   = 20.0f;    // taper body speed over the last N° of the sweep
+
+// Heading closed loop on the arc (PWM domain, like YAW_HOLD_*).
+constexpr float CURVE_HEAD_KP       = 8.0f;   // PWM per ° of heading-vs-progress error
+constexpr float CURVE_HEAD_KD       = 0.8f;   // PWM per (°/s) of turn-rate deviation
+constexpr float CURVE_HEAD_DEADBAND = 2.0f;   // ° remaining → sweep complete (settle)
+constexpr long  CURVE_TICK_MARGIN   = 250;    // distance backstop: force-end if avg ticks exceed arc + this
+// Min approach-straight ticks to reach arc-entry speed from rest (d = v²/2a).
+// A first turn from a standstill with less room than this stays a SPOT.
+constexpr long  CURVE_MIN_ENTRY_TICKS =
+    (long)((CURVE_V_ENTRY_TPS * CURVE_V_ENTRY_TPS) / (2.0f * FWD_ACCEL_TPS2));
+
+
+// ── [J] ADAPTIVE SIDE-WALL SENSING ──────────────────────────────────────────
+// The weak side IR signal (~330 cts at a 45 mm wall vs ~3500 front) sits in a
+// thin margin, so a fixed absolute threshold (WALL_SIDE_THRESH) gives phantom
+// walls when room light shifts. Pros instead: (1) capture a per-RUN wall
+// reference live (room light divides out), (2) threshold as a FRACTION of that
+// reference, (3) skip the read when ambient is near ADC saturation (the
+// lit−ambient delta collapses), (4) take a MEDIAN of several samples to beat
+// noise on the weak channel. Refs from canonical builders (UKMARS ~0.4×nominal,
+// Pololu QTR normalize, Green Ye saturation + dual-threshold, Harrison per-run cal).
+//   Per-run reference: at start (0,0) facing North the WEST border wall is
+//   guaranteed on the LEFT → captured live in calibrateSideRefs(), right scaled
+//   by the factory L/R ratio. SIDE_ADAPTIVE=false → exact legacy fixed threshold.
+constexpr bool  SIDE_ADAPTIVE  = true;
+constexpr float SIDE_WALL_FRAC = 0.45f;  // wall present if median read > frac × per-run reference
+constexpr int   SIDE_SAT_AMB   = 3500;   // emitter-off ambient (of 4095) above this → read UNKNOWN (skip)
+constexpr int   SIDE_SAMPLES   = 5;      // samples per side decision; median used (odd ≥3)
+constexpr int   SIDE_REF_MIN   = 120;    // captured start ref below this = implausible → keep factory IR_CAL
 
 // ── [H] DEBUG FLAGS ─────────────────────────────────────────────────────────
 constexpr bool USE_IMU   = true;   // false = encoder-tick turns

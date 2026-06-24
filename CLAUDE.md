@@ -95,7 +95,7 @@ FAST_SPEED_EDIT → IDLE      (button saves NVS)
 EXPLORE_THINK   → RUN       (script kicked)
 RUN             → EXPLORE_THINK (script done)
 EXPLORE_THINK   → GOAL      (at goal; explore saves NVS)
-EXPLORE_THINK   → CRASH     (bestDist == FLOOD_INFINITY)
+EXPLORE_THINK   → CRASH/BOXED (bestDist == FLOOD_INFINITY; explore tries 180° recovery first)
 GOAL / CRASH    → IDLE      (button)
 ```
 
@@ -114,3 +114,18 @@ GOAL / CRASH    → IDLE      (button)
 - **`TELEMETRY=true` in `Tuning.h` slows the RUN loop** — set false before competition.
 - **`WifiDebug.h` is not compiled into `main`** — don't assume WiFi runs.
 - **No `fastFwdRoll`** — fast run brakes at every FWD-settle, exactly like explore. Don't reintroduce continuous-roll; it breaks R-turns when the right motor can't reverse against forward inertia.
+- **`BOXED` state** — when `bestDist == FLOOD_INFINITY` in fast run, OLED shows `!! BOXED !!` (maze has no reachable path from current cell); in explore mode a 180° recovery is attempted first.
+- **`SIDE_ADAPTIVE=true`** — side IR uses per-run live calibration (`calibrateSideRefs()`) + relative threshold + saturation skip + 5-sample median. Set `false` to revert to legacy fixed threshold.
+- **`g_smoothMode`** (in `Pose.h`) — runtime toggle (OLED "Mode: Smooth/Classic") enabling `PH_CURVE` continuous arcs in fast run. Off by default; arc code is gated behind `CURVE_ENABLE` in `Tuning.h [I]`.
+
+---
+
+## Hardware files
+
+PCB design exports are in `hardware/` (KiCad / EasyEDA outputs, 2026-06-23):
+
+| File | Contents |
+|---|---|
+| `Netlist_Schematic1_2026-06-23.tel` | Schematic netlist |
+| `Netlist_PCB1_2026-06-23.tel` | PCB netlist |
+| `PickAndPlace_PCB1_2026-06-23.csv` | SMT pick-and-place coordinates |

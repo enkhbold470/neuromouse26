@@ -15,6 +15,10 @@ enum TurnDir { TURN_NONE, TURN_RIGHT, TURN_LEFT };
 
 // PH_FORWARD          — tick-target forward (signed; negative = reverse).
 //                       IR centering + IMU yaw hold + encoder balance bias.
+// PH_CURVE            — constant-curvature FORWARD-ONLY arc (smooth turn).
+//                       Target = degrees (90). Both wheels roll forward; the
+//                       inner wheel only slows, never reverses. Gyro-closed.
+//                       Only emitted when g_smoothMode && CURVE_ENABLE.
 // PH_PIVOT            — single-wheel pivot. Inner wheel braked, outer drives.
 //                       Target in degrees (IMU mode) or ticks (fallback).
 // PH_SPOT             — both wheels opposite, rotates about chassis centre.
@@ -24,7 +28,7 @@ enum TurnDir { TURN_NONE, TURN_RIGHT, TURN_LEFT };
 //                       the standard PID drives it.
 // PH_ALIGN_FRONT      — creeps fwd/rev until front IR LF/RF read the target
 //                       row (ALIGN_LF_TARGET / ALIGN_RF_TARGET).
-enum RunPhase { PH_FORWARD, PH_PIVOT, PH_SPOT,
+enum RunPhase { PH_FORWARD, PH_CURVE, PH_PIVOT, PH_SPOT,
                 PH_REVERSE_TO_BACK, PH_ALIGN_FRONT };
 
 struct PhaseStep {
@@ -33,7 +37,10 @@ struct PhaseStep {
     TurnDir  dir;
 };
 
-constexpr int MAX_SCRIPT = 8;
+// 64 lets a full continuous fast-run route (FWD CURVE FWD CURVE …) fit in one
+// script so the mouse flows start→goal without an inter-move brake. A route
+// that exceeds this just brakes once at the seam and re-plans. (≥4 preserved.)
+constexpr int MAX_SCRIPT = 64;
 
 static PhaseStep script[MAX_SCRIPT];
 static int       scriptLen = 0;
@@ -61,6 +68,12 @@ static void scriptPushFwd(long ticks) {
 static void scriptPushSpot(TurnDir d, float deg) {
     long target = USE_IMU ? (long)(deg + 0.5f) : SPOT180_TICKS_FALLBACK;
     scriptPush(PH_SPOT, target, d);
+}
+
+// Smooth 90° arc. Target carried in degrees (like SPOT). Executed by the
+// PH_CURVE branch in main.cpp; only pushed when g_smoothMode && CURVE_ENABLE.
+static void scriptPushCurve(TurnDir d) {
+    scriptPush(PH_CURVE, (long)(PIVOT_90_DEG + 0.5f), d);
 }
 
 static void scriptPushPivot(TurnDir d, float deg) {

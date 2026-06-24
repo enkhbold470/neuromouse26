@@ -28,8 +28,43 @@ static void setupMaze() {
 // Readings above WALL_SIDE_MAX are skipped (saturation / too close).
 constexpr int WALL_SIDE_MAX = 2000;
 
+// Legacy fixed-threshold side test (used when SIDE_ADAPTIVE=false).
 static inline bool sideWallPresent(int raw) {
     return raw > WALL_SIDE_THRESH && raw < WALL_SIDE_MAX;
+}
+
+// Adaptive side-wall decision (see Tuning.h [J]). Tri-state so an untrustworthy
+// read (ambient near ADC saturation → lit−ambient delta collapses) is SKIPPED
+// rather than guessed — the prior map value is kept. Threshold is a FRACTION of
+// the per-run reference, so room lighting divides out.
+enum SideState { SIDE_OPEN, SIDE_WALL, SIDE_UNKNOWN };
+
+static SideState sideWallState(int raw, int ref, int amb) {
+    if (!SIDE_ADAPTIVE) return sideWallPresent(raw) ? SIDE_WALL : SIDE_OPEN;
+    if (amb > SIDE_SAT_AMB) return SIDE_UNKNOWN;                 // saturated → don't trust
+    if (ref < SIDE_REF_MIN) ref = SIDE_REF_MIN;                 // guard a bad reference
+    return (raw > (int)(SIDE_WALL_FRAC * (float)ref)) ? SIDE_WALL : SIDE_OPEN;
+}
+
+// Capture this run's side WALL references live so room lighting divides out.
+// Robot must be in the start cell (0,0) facing North, where the WEST border
+// wall is guaranteed on the LEFT. Right is captured if a wall is there too,
+// else scaled from the left by the factory L/R ratio. Implausible reads keep
+// the factory IR_CAL. Call once at run start (robot stationary in start cell).
+static void calibrateSideRefs() {
+    if (!SIDE_ADAPTIVE) return;
+    sampleSideMedian();
+    int   liveL = irVal[1], liveR = irVal[2];
+    float ratio = (float)IR_CAL_R45 / (float)IR_CAL_L45;
+    if (liveL >= SIDE_REF_MIN) {
+        sideRefL = liveL;
+        sideRefR = (liveR >= SIDE_REF_MIN) ? liveR : (int)(liveL * ratio + 0.5f);
+    } else {
+        sideRefL = IR_CAL_L45;
+        sideRefR = (liveR >= SIDE_REF_MIN) ? liveR : IR_CAL_R45;
+    }
+    Serial.printf("[SIDECAL] live L=%d R=%d amb=%d/%d -> refL=%d refR=%d\n",
+                  liveL, liveR, irAmb[1], irAmb[2], sideRefL, sideRefR);
 }
 
 // Do not clear perimeter borders (neighbor out of bounds).
@@ -46,13 +81,18 @@ static void setWallSensed(int r, int c, AbsDir d, bool present) {
 // side walls of the destination cell without front-wall contamination.
 static void senseSideWallsMidCell(int r, int c, int heading) {
     if (!maze.inBounds(r, c)) return;
-    sampleIR();
+    sampleSideMedian();
     AbsDir lt = (AbsDir)((heading + 3) % 4);
     AbsDir rt = (AbsDir)((heading + 1) % 4);
-    setWallSensed(r, c, lt, sideWallPresent(irVal[1]));
-    setWallSensed(r, c, rt, sideWallPresent(irVal[2]));
-    Serial.printf("[MID] (%d,%d) hd=%c L=%d R=%d\n",
-                  r, c, "NESW"[heading], irVal[1], irVal[2]);
+    SideState sL = sideWallState(irVal[1], sideRefL, irAmb[1]);
+    SideState sR = sideWallState(irVal[2], sideRefR, irAmb[2]);
+    if (sL != SIDE_UNKNOWN) setWallSensed(r, c, lt, sL == SIDE_WALL);
+    if (sR != SIDE_UNKNOWN) setWallSensed(r, c, rt, sR == SIDE_WALL);
+    Serial.printf("[MID] (%d,%d) hd=%c L=%d/%d%s R=%d/%d%s amb=%d/%d\n",
+                  r, c, "NESW"[heading],
+                  irVal[1], sideRefL, sL == SIDE_UNKNOWN ? "?" : (sL == SIDE_WALL ? "W" : "o"),
+                  irVal[2], sideRefR, sR == SIDE_UNKNOWN ? "?" : (sR == SIDE_WALL ? "W" : "o"),
+                  irAmb[1], irAmb[2]);
 }
 
 static bool irFrontBlocked() {
@@ -67,20 +107,22 @@ static bool mazeDeadEnd(int r, int c, uint8_t h) {
 }
 
 static void senseAndStoreWalls() {
-    sampleIR();
+    sampleSideMedian();                 // median sides + ambient; also refreshes front irVal[0]/[3]
     bool wF = irFrontBlocked();
-    bool wL = sideWallPresent(irVal[1]);
-    bool wR = sideWallPresent(irVal[2]);
+    SideState sL = sideWallState(irVal[1], sideRefL, irAmb[1]);
+    SideState sR = sideWallState(irVal[2], sideRefR, irAmb[2]);
     AbsDir hd = (AbsDir)robotHeading;
     AbsDir lt = (AbsDir)((robotHeading + 3) % 4);
     AbsDir rt = (AbsDir)((robotHeading + 1) % 4);
     setWallSensed(robotRow, robotCol, hd, wF);
-    setWallSensed(robotRow, robotCol, lt, wL);
-    setWallSensed(robotRow, robotCol, rt, wR);
-    Serial.printf("[SENSE] (%d,%d) hd=%c F=%s LF=%d RF=%d L=%s R=%s\n",
+    if (sL != SIDE_UNKNOWN) setWallSensed(robotRow, robotCol, lt, sL == SIDE_WALL);
+    if (sR != SIDE_UNKNOWN) setWallSensed(robotRow, robotCol, rt, sR == SIDE_WALL);
+    Serial.printf("[SENSE] (%d,%d) hd=%c F=%s(LF=%d RF=%d) L=%s(%d/%d) R=%s(%d/%d) amb=%d/%d\n",
                   robotRow, robotCol, "NESW"[robotHeading],
                   wF ? "wall" : "open", irVal[0], irVal[3],
-                  wL ? "wall" : "open", wR ? "wall" : "open");
+                  sL == SIDE_UNKNOWN ? "??" : (sL == SIDE_WALL ? "wall" : "open"), irVal[1], sideRefL,
+                  sR == SIDE_UNKNOWN ? "??" : (sR == SIDE_WALL ? "wall" : "open"), irVal[2], sideRefR,
+                  irAmb[1], irAmb[2]);
 }
 
 static bool atDeadEnd() {
@@ -95,7 +137,67 @@ static bool atDeadEnd() {
 // `pendingOffsetTicks` is added to the forward target then cleared — lets
 // the first leg from start (or after a 180° re-anchor) compensate for the
 // −4.1 cm rear-against-wall reference pose.
+// Continuous fast-run route compiler (Smooth mode). Walks the flood gradient
+// from the current pose to the goal and emits ONE script of FWD/CURVE segments
+// so the mouse flows start→goal with no inter-cell brake. Straights are
+// shortened by CURVE_PRE/POST_TICKS around each arc so the centerline path is
+// continuous. The first turn from a standstill stays a SPOT (can't arc from
+// rest); 180°s stay SPOT. A route longer than MAX_SCRIPT brakes once at the
+// seam and EXPLORE_THINK re-plans the remainder.
+static void buildFastSmoothRoute() {
+    scriptReset();
+    long acc = pendingOffsetTicks;          // straight ticks pending → current cell centre
+    pendingOffsetTicks = 0;
+    int   r = robotRow, c = robotCol;
+    AbsDir h = (AbsDir)robotHeading;
+    bool  rolling = false;                   // true once the robot is moving at a turn
+    int   cap = MAZE_CELLS;
+    while (cap-- > 0 && scriptLen < MAX_SCRIPT - 3) {
+        if (maze.isGoal(r, c)) break;
+        uint8_t dd;
+        AbsDir nd = maze.bestDirectionBiased(r, c, h, dd);
+        if (dd == FLOOD_INFINITY) break;
+        int diff = ((int)nd - (int)h + 4) % 4;
+
+        if (diff == 0) {                     // straight-through: accumulate one cell
+            acc += CELL_TICKS;
+            r += DIR_DR[h]; c += DIR_DC[h];
+        } else if (diff == 1 || diff == 3) { // 90° turn → arc (or SPOT if from rest)
+            TurnDir td = (diff == 1) ? TURN_RIGHT : TURN_LEFT;
+            long approach = acc - CURVE_PRE_TICKS;          // straight up to the arc entry
+            // Arc if already rolling, or if there's room to accelerate from rest
+            // to arc-entry speed before the arc (else a stationary in-place spin).
+            bool canArc = rolling || approach >= CURVE_MIN_ENTRY_TICKS;
+            if (!canArc) {
+                scriptPushSpot(td, PIVOT_90_DEG);           // stationary corner → in-place spin
+                h = nd;                                     // stay in cell; next iter drives out
+            } else {
+                if (approach > 20) { scriptPushFwd(approach); }
+                scriptPushCurve(td);
+                rolling = true;
+                h = nd;
+                r += DIR_DR[h]; c += DIR_DC[h];
+                acc = CELL_TICKS - CURVE_POST_TICKS;        // exit straight already POST-covered
+            }
+        } else {                             // diff==2: 180° (rare on optimal path) → SPOT
+            if (acc > 20) { scriptPushFwd(acc); }
+            acc = 0; rolling = false;
+            scriptPushSpot(TURN_RIGHT, SPOT_180_DEG);
+            h = (AbsDir)(((int)h + 2) % 4);
+        }
+    }
+    if (acc > 20 && scriptLen < MAX_SCRIPT) scriptPushFwd(acc);
+    plannedRow     = r;
+    plannedCol     = c;
+    plannedHeading = h;
+}
+
 static void buildMoveScript(AbsDir bestDir) {
+    // Smooth fast run: compile the whole continuous route at once.
+    if (fastRunMode && g_smoothMode && CURVE_ENABLE) {
+        buildFastSmoothRoute();
+        return;
+    }
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
 
