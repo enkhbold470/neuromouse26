@@ -388,7 +388,10 @@ async function connect(showAll = false) {
     const opts = showAll
       ? { acceptAllDevices: true, optionalServices: [NUS_SERVICE] }
       : {
-          filters: [{ namePrefix: 'bromouse' }],
+          filters: [
+            { namePrefix: 'bromouse' },
+            { namePrefix: 'Micromouse26' }
+          ],
           optionalServices: [NUS_SERVICE]
         };
     device = await navigator.bluetooth.requestDevice(opts);

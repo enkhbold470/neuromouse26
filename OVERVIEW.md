@@ -35,6 +35,10 @@ neuromouse26/
 ├── platformio.ini
 ├── CLAUDE.md                       agent guide (Claude)
 ├── GEMINI.md                       agent guide (Gemini)
+├── AGENTS.md                       Cursor agent entry + doc index
+├── docs/
+│   ├── 2026-06-24-firmware-progress.md   session progress (explore, BLE, cal)
+│   └── IR-CALIBRATION.md                 front/side IR bench values
 └── OVERVIEW.md                     this file
 ```
 
@@ -84,32 +88,26 @@ Other menu leaves: `ENC_TEST` (live tick stream), `IR_TEST` (live sensor read-ou
 
 ## One move cycle (EXPLORE_THINK → RUN → EXPLORE_THINK)
 
+> **2026-06-24:** Simple safe explore — one cell per script, full stop, no arcs. Full detail: `docs/2026-06-24-firmware-progress.md`.
+
 ```
 EXPLORE_THINK:
-  yawDeg / yawTargetDeg ← 0          // bound drift to a single move
-  if exploreMode: senseAndStoreWalls()
+  yawDeg / yawTargetDeg ← 0
+  senseAndStoreWalls() on first visit
   maze.visited[r][c] = true
-  if isGoal:
-      if exploreMode: nvsSaveWalls()
-      state = GOAL ; break
-  maze.floodFill()
-  bestDir = maze.bestDirectionBiased(r, c, heading, &bestDist)
-  if bestDist == FLOOD_INFINITY:
-      state = CRASH ; break
+  if first goal (5,2): save NVS, exploreFwdGoalSaved, keep sweeping
+  if sweep done: returnHomeMode → flood home to (0,0)
+  if home (0,0): 180° spin → GOAL
+  floodFillExplore (forward) or floodFill (return home)
   buildMoveScript(bestDir):
-      diff = (bestDir - heading + 4) % 4
-      diff==0: FWD(cellTicks + pendingOffset)
-      diff==1: SPOT_R 90 + FWD(cellTicks)
-      diff==3: SPOT_L 90 + FWD(cellTicks)
-      diff==2: ALIGN_FRONT + SPOT_R 180 + FWD(−2 cm) + FWD(1 cell pitch)
-      [fast run] extend trailing FWD through consecutive straight cells
-  scriptKick()
-  state = RUN
+      one cell — SPOT 90° if needed + FWD(CELL_TICKS)
+      dead end: SPOT 180 + reverse 20 mm + forward 180 mm (no ALIGN in explore)
+  scriptKick() → RUN
 
 RUN:
-  walks script[] phase-by-phase
-  endPhase brakes + advances scriptIdx (or commits planned pose + returns
-  to EXPLORE_THINK on the last step)
+  explore: FWD_V_CRUISE_TPS (150), POS_SETTLE_MS brake, no IR centering
+  front IR hard stop @ 530 during forward explore
+  fast run: optional Smooth arcs + straight-chain via buildFastSmoothRoute()
 ```
 
 ---
@@ -128,13 +126,17 @@ A move is a sequence of `PhaseStep`s. Each step picks a `RunPhase` and a target.
 
 All phases share the same stall-escape + settle-band exit logic in the RUN executor — the `imuMode` flag selects gain banks (`POS_*` for forward, `YAW_*` for rotation).
 
-### Fast run = explore + faster cruise + straight-chain fusion
+### Fast run vs explore (2026-06-24)
 
-Fast run differs from explore in only two ways:
-1. `vCruise = fastRunCruiseTps` (runtime-adjustable via the Fast Speed menu, NVS-persisted) instead of `FWD_V_CRUISE_TPS`.
-2. `buildMoveScript` fuses consecutive straight cells into one `PH_FORWARD` so the trapezoid stretches accel→cruise→decel over the whole chain.
+| | Explore | Fast run |
+|---|---|---|
+| Speed | `FWD_V_CRUISE_TPS` (150) | `fastRunCruiseTps` (menu/NVS) |
+| Cells per script | **1** | 1 (Classic) or fused straights (Smooth) |
+| Turns | SPOT 90° / 180° | SPOT or PH_CURVE arcs when Smooth ON |
+| IR centering | **Off** | On (fast run forward) |
+| Settle | Full `POS_SETTLE_MS` every cell | 0 ms on fast-run FWD (trapezoid parks) |
 
-`endPhase()` always brakes at settle — wheels are stationary before any SPOT. (A prior `fastFwdRoll` continuous-roll flag was removed because it left the right wheel spinning forward into the start of a SPOT R, which the reverse PWM couldn't overcome.)
+`g_smoothMode` default **OFF** — opt-in via OLED **Mode** menu for fast run only.
 
 ---
 
@@ -168,12 +170,13 @@ All tunables are `constexpr` in `include/Tuning.h`. Sections:
 | `MOTOR_PWM_FREQ_HZ` | 200 | Empirical sweet spot for stiction + this DRV8833 + N20 |
 | `MOTOR_PWM_BITS` | 10 | |
 | `BAT_VDIV_MULT` | 3.751f | 39k / (39k + 100k) divider, calibrated 2026-05-17 |
-| `IR_CAL_LF` | 3483 | Front-wall pose, 2026-05-17 |
-| `IR_CAL_RF` | 2702 | Front-wall pose, 2026-05-17 |
-| `IR_CAL_L` | 1800 | Centered, 2026-05-19 |
-| `IR_CAL_R` | 2000 | Centered, 2026-05-19 |
-| `WALL_FRONT_THRESH` | 1400 | LF/RF threshold for wall classification |
-| `WALL_SIDE_THRESH` | 900 | L/R threshold for wall classification |
+| `IR_CAL_LF` / `IR_CAL_RF` | 570 / 570 | Cell centre front gap, 2026-06-24 |
+| `IR_CAL_L45` / `IR_CAL_R45` | 522 / 690 | Side @ cell centre, 2026-06-24 |
+| `WALL_FRONT_THRESH` | 300 | Front detect (stall path) |
+| `WALL_FRONT_STOP_THRESH` | 530 | Explore hard stop (Tuning.h) |
+| `SIDE_OPEN_CEIL` | 350 | Below = open side (Tuning.h) |
+
+Full IR doc: `docs/IR-CALIBRATION.md`. Legacy values in older docs are superseded.
 
 `CELL_TICKS=1400` and `START_OFFSET_TICKS=322` live in `Tuning.h` (section [F]) — both hand-measured on this chassis. Do NOT derive them from `TICKS_PER_REV`.
 

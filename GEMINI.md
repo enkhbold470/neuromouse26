@@ -73,24 +73,19 @@ A "move" is a list of `PhaseStep`s (max 8) built by `buildMoveScript` (in `Plann
 
 Stall-escape, settle-band exit, and SETTLE timing are shared across all phases via the `imuMode` gain selector (encoder gains for forward, yaw gains for rotation).
 
-### Fast run = explore semantics + faster cruise + straight-chain fusion
-Fast run differs from explore in two ways only:
-1. `vCruise = fastRunCruiseTps` (runtime-adjustable, NVS-persisted) instead of `FWD_V_CRUISE_TPS`.
-2. `buildMoveScript` fuses consecutive straight cells into one `PH_FORWARD` so the trapezoid stretches accel→cruise→decel over the whole chain.
-
-`endPhase()` always brakes at settle for both modes — there is no continuous-roll across cell boundaries. (A prior `fastFwdRoll` flag did skip the brake; it broke R-turns because the right motor couldn't reverse against forward inertia. Don't re-introduce it.)
+### Fast run vs explore (2026-06-24)
+See `docs/2026-06-24-firmware-progress.md`. Explore: one cell, full stop, no IR centering, no arcs. Fast run: optional Smooth mode (`g_smoothMode`, default OFF) with `buildFastSmoothRoute()` arcs and straight-chain fusion.
 
 ### Hardware Constants (in `include/PinConfig.h` + `include/Tuning.h`)
 - `WHEEL_DIAMETER` = 33.4 mm (PinConfig.h).
-- `CELL_TICKS` = **1400** (Tuning.h, [F]) — hand-measured by rolling 180 mm. Do NOT derive from `TICKS_PER_REV`.
+- `ROBOT_LEN_MM` = 100, `ROBOT_WIDTH_MM` = 88, `WHEELBASE_MM` = 80, axle→front 67 mm (Tuning.h [A]).
+- `CELL_TICKS` = **1400** (Tuning.h, [F]) — hand-measured by rolling 180 mm.
 - `START_OFFSET_TICKS` = **322** (Tuning.h, [F]) — first-leg offset from rear-against-wall pose.
-- `WHEEL_TRACK_MM` = 80 mm (PinConfig.h).
-- PWM is 10-bit (0–1023). `MOTOR_PWM_MAX` = 1023, `MOTOR_PWM_FREQ_HZ` = 200.
-- `BAT_VDIV_MULT` = 3.751f.
+- `MOTOR_PWM_MAX` = 1023, `MOTOR_PWM_FREQ_HZ` = 200.
 - `RIGHT_ENC_SCALE` = 1.0135f. All distance math goes through `rTicks()`.
-- IR cal (PinConfig.h): `IR_CAL_LF=3483`, `IR_CAL_RF=2702` (dead-end pose, 2026-05-17); `IR_CAL_L=1800`, `IR_CAL_R=2000` (centered, 2026-05-19).
-- Wall thresholds (PinConfig.h): `WALL_SIDE_THRESH=900`, `WALL_FRONT_THRESH=1400`.
-- Dead-end align targets (Tuning.h, [E]): `ALIGN_LF_TARGET=3660`, `ALIGN_RF_TARGET=2940` at 37.5 mm gap.
+- IR cal (2026-06-24): `IR_CAL_LF/RF=570`, `IR_CAL_L45/R45=522/690`. See `docs/IR-CALIBRATION.md`.
+- Align targets (Tuning.h [E]): `ALIGN_LF/RF_TARGET=570`, `ALIGN_TOL=40`.
+- Explore: `EXPLORE_CONTINUOUS=false`, `FWD_V_CRUISE_TPS=150`.
 
 ---
 

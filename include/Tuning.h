@@ -11,26 +11,29 @@
 #include "PinConfig.h"
 
 // ── [A] ROBOT + MAZE GEOMETRY (mm) ──────────────────────────────────────────
-// Chassis 95×85, wheel center 55 mm from front edge. Cell pitch 180 mm
-// centre-to-centre, wall-to-wall opening 170 mm. Robot 85 mm wide in 170 mm
-// cell → 42.5 mm side clearance each side.
+// Body 100×88 mm, wheel track 80 mm, axle→front 67 mm, axle→rear 33 mm.
+// Cell pitch 180 mm centre-to-centre, wall opening 170 mm.
 constexpr float ROBOT_LEN_MM       =  100.0f;
-constexpr float ROBOT_WIDTH_MM     =  80.0f;
-constexpr float WHEEL_FRONT_OFF_MM =  65.0f;
+constexpr float ROBOT_WIDTH_MM     =  88.0f;
+constexpr float WHEELBASE_MM       =  80.0f;
+constexpr float WHEEL_FRONT_OFF_MM =  67.0f;
+constexpr float WHEEL_REAR_OFF_MM  =  33.0f;
 constexpr float CELL_PITCH_MM      = 180.0f;
 constexpr float CELL_INNER_MM      = 170.0f;
 constexpr float CELL_SIDE_GAP_MM   =  45.0f;
 
-// Full 16×16 flood-fill grid (do not shrink — floodFillExplore uses these
-// as the unvisited-cell search bound; shrinking it seeds the robot's own
-// cell as a goal and breaks bestDirectionBiased).
-constexpr uint8_t MAZE_ROWS = MAZE_SIZE;
-constexpr uint8_t MAZE_COLS = MAZE_SIZE;
+// Active physical maze region inside the 16×16 flood grid. setupMaze() seals
+// the border around this rectangle so flood-fill cannot route through the
+// unused tail of the array (cols 3–15, rows 6–15 would otherwise look open).
+constexpr uint8_t MAZE_ROWS = 6;
+constexpr uint8_t MAZE_COLS = 3;
 constexpr uint8_t START_ROW = 0;
 constexpr uint8_t START_COL = 0;
-// Physical maze: 6 rows × 3 cols, goal at corner (5,2). Set in setupMaze().
+// Single goal cell (5,2) — top-right of the 6×3 test maze.
 constexpr uint8_t GOAL_ROW  = 5;
 constexpr uint8_t GOAL_COL  = 2;
+// true = (5,2) → save NVS → sweep all unvisited → go home (0,0) → GOAL blink.
+constexpr bool  EXPLORE_RETURN_HOME = true;
 // Added to flood[visited neighbour] during explore so backtracking loses to
 // any path toward unvisited cells (junction after a dead end).
 constexpr uint8_t EXPLORE_VISITED_FLOOD_PENALTY = 64;
@@ -71,7 +74,9 @@ constexpr int YAW_MAX_PWM      = ((BASE_BREAKAWAY_PWM * 16) / 10 < MOTOR_PWM_MAX
 //   - Raise FWD_ACCEL_TPS2 if accel feels sluggish (lower if it skids).
 //   - FWD_KV_SLOPE is PWM-per-(ticks/s) FF slope.
 //   - Stiction-related PWMs are DERIVED from BASE_BREAKAWAY_PWM in [B0].
-constexpr float    FWD_V_CRUISE_TPS = 150.0f;  // EXPLORE cruise (slow for sense reliability)
+constexpr float    FWD_V_CRUISE_TPS = 150.0f;  // classic explore (stop-pivot)
+
+// Explore always uses FWD_V_CRUISE_TPS — one cell, full stop, SPOT turns only.
 
 // FAST RUN cruise speed is RUNTIME-ADJUSTABLE via the "Fast Speed" menu and
 // persisted to NVS (key "fspeed"). Default == FWD_V_CRUISE_TPS. EXPLORE
@@ -114,20 +119,35 @@ constexpr float    PIVOT_90_DEG      =  90.0f;
 constexpr float    SPOT_180_DEG      = 180.0f;
 
 // ── [D] IR CENTERING (forward phase only) ───────────────────────────────────
-// Trims L/R PWM bias to keep robot mid-corridor matching L/R raw counts to
-// IR_CAL_L / IR_CAL_R from PinConfig.h.
-constexpr float    IR_CENTER_KP  =   1.0f;
+// Trims L/R PWM bias to keep robot mid-corridor. wallConf in main.cpp scales
+// to per-run sideRef; IR_CENTER_MAX scales with vAbsCmd at higher cruise.
+constexpr float    IR_CENTER_KP  =   2.0f;
 constexpr float    IR_CENTER_KI  =   0.0f;
-constexpr float    IR_CENTER_KD  =   2.0f;
-constexpr int      IR_CENTER_MAX =  15;
+constexpr float    IR_CENTER_KD  =   1.0f;
+constexpr int      IR_CENTER_MAX =  35;
 
-// ── [E] PH_ALIGN_FRONT (optional creep primitive; not used in explore script) ─
-// Creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET. Dead ends use SPOT 180 only.
-constexpr int      ALIGN_LF_TARGET   = 3660;
-constexpr int      ALIGN_RF_TARGET   = 2940;
-constexpr int      ALIGN_TOL         =  150;
-constexpr long     ALIGN_MAX_TICKS   =  800;
-constexpr uint32_t ALIGN_SETTLE_MS   =   80;
+// Front IR proactive stop during explore (ALIGN target 570 @ cell center).
+constexpr int      WALL_FRONT_BRAKE_THRESH = 480;  // begin slowing (~84% of align)
+constexpr int      WALL_FRONT_STOP_THRESH  = 530;  // ALIGN_LF − ALIGN_TOL; hard stop
+constexpr uint32_t POS_BUMP_MS              =   80;
+constexpr int      POS_BUMP_BACKUP_PWM      =  130;
+constexpr uint32_t POS_BUMP_BACKUP_MS       =  250;
+constexpr uint32_t POS_BUMP_BACKUP_TIMEOUT_MS = 3000;
+constexpr uint32_t POS_HARD_STALL_MS        = 4000;
+// Front-IR distance (mm) when centered in cell; ~45 mm matches LF/RF≈570 via IRCal.
+constexpr float    CELL_CENTER_FRONT_MM     =  45.0f;
+
+// ── [E] DEAD-END + PH_ALIGN_FRONT ───────────────────────────────────────────
+// Dead-end exit: ALIGN → SPOT 180° → reverse DEADEND_REVERSE_MM → forward
+// DEADEND_FWD_MM. Pre-turn 90°: optional ALIGN when front wall present.
+// ALIGN_* captured 2026-06-24: robot centered in cell, correct front gap → LF=570 RF=570.
+constexpr int      ALIGN_LF_TARGET   =  570;
+constexpr int      ALIGN_RF_TARGET   =  570;
+constexpr int      ALIGN_TOL         =   40;
+constexpr int      ALIGN_MOVE_DEADBAND = 25;   // |errMean| below → hold still (anti-hunt)
+constexpr float    ALIGN_ERR_KP      = 0.012f; // proportional creep PWM per count
+constexpr long     ALIGN_MAX_TICKS   =  500;   // cap align travel (was 800 → fewer oscillations)
+constexpr uint32_t ALIGN_SETTLE_MS   =  120;
 constexpr float    DEADEND_REVERSE_MM =  20.0f;
 constexpr float    DEADEND_FWD_MM     = 180.0f;
 
@@ -156,16 +176,15 @@ constexpr float BACKUP_OFFSET_MM       =   0.0f; // PH_REVERSE_TO_BACK
 // Do NOT use PinConfig::MM_PER_TICK for continuous-motion math — it is the
 // legacy single-channel value and is ~4× off against the 4× PCNT CELL_TICKS.
 //
-// Geometry (your reference diagram): R is the corner knob. Smaller R hugs the
-// inner post (clips inner); larger R sweeps wide (clips the OUTER wall). The
-// bracketing straights are shortened by CURVE_PRE/POST_TICKS so the centerline
-// path is continuous. WALL-CLIP MITIGATION ORDER (strict): lower CURVE_V_ARC
-// first → nudge CURVE_PRE/POST → NEVER raise R to fix an inner clip.
+// CURVE_RADIUS_MM = CELL_PITCH/2 (90 mm centerline), NOT from PCB netlist.
+// Body 100×88 mm, track 80 mm, axle→front 67 mm — fast-run arcs only (explore
+// uses SPOT pivots). WALL-CLIP MITIGATION: lower CURVE_V_ARC first → nudge
+// CURVE_PRE/POST → NEVER raise R to fix an inner clip.
 //
 // ALL of this is gated at runtime by g_smoothMode (OLED Smooth/Classic toggle);
 // with the toggle OFF the robot is byte-for-byte the legacy stop-pivot firmware.
 constexpr bool  CURVE_ENABLE      = true;     // master compile gate; false → no arc code path ever
-constexpr bool  EXPLORE_CONTINUOUS = false;   // Phase 2 (continuous explore) — not yet wired; reserved
+constexpr bool  EXPLORE_CONTINUOUS = false;   // false = simple safe explore (1 cell, stop, sense, turn)
 
 constexpr float TICKS_PER_MM      = (float)CELL_TICKS / CELL_PITCH_MM;   // 7.778 (authoritative)
 constexpr float CURVE_RADIUS_MM   = 90.0f;    // = half cell pitch, centerline-to-centerline
@@ -212,9 +231,10 @@ constexpr long  CURVE_MIN_ENTRY_TICKS =
 //   exact legacy fixed-threshold behavior.
 constexpr bool  SIDE_ADAPTIVE  = true;
 constexpr float SIDE_WALL_FRAC = 0.45f;  // wall present if median read > frac × per-run reference
+constexpr int   SIDE_OPEN_CEIL = 350;    // below = open side (user cal: L=180 R=270 opposite touch)
 constexpr int   SIDE_SAT_AMB   = 3500;   // emitter-off ambient (of 4095) above this → read UNKNOWN (skip)
 constexpr int   SIDE_SAMPLES   = 5;      // samples per side decision; median used (odd ≥3)
-constexpr int   SIDE_REF_MIN   = 120;    // captured start ref below this = implausible → keep factory IR_CAL
+constexpr int   SIDE_REF_MIN   = 300;    // captured start ref below this = implausible → keep factory IR_CAL
 
 // ── [H] DEBUG FLAGS ─────────────────────────────────────────────────────────
 constexpr bool USE_IMU   = true;   // false = encoder-tick turns

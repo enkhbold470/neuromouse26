@@ -19,7 +19,10 @@
 #include "IRCalibration.h"
 #include "MotionScript.h"
 #include "Pose.h"
+#include "MicromouseMaze.h"
 #include "MicromouseEncoderPCNT.h"
+
+extern MicromouseMaze maze;
 
 extern MicromouseEncoderPCNT leftEnc;
 extern MicromouseEncoderPCNT rightEnc;
@@ -120,8 +123,10 @@ static void oledRun(long avg, long tgt, long tL, long tR) {
                     : "SPOT";
     const char* dN  = (runTurnDir == TURN_RIGHT) ? "R"
                     : (runTurnDir == TURN_LEFT)  ? "L" : "-";
-    char hdr[24];
-    snprintf(hdr, sizeof(hdr), "%s/%s %d/%d", phN, dN, scriptIdx + 1, scriptLen);
+    const char* modeN = returnHomeMode ? "HOME"
+                      : (exploreFwdGoalSaved ? "SWEEP" : "EXPLORE");
+    char hdr[28];
+    snprintf(hdr, sizeof(hdr), "%s %s/%s %d/%d", modeN, phN, dN, scriptIdx + 1, scriptLen);
     oled.drawStr(0, 8, hdr);
     drawBatteryTopRight();
     oled.drawHLine(0, 10, 128);
@@ -156,6 +161,27 @@ static void oledTerminal(const char* title, const char* msg) {
     snprintf(buf, sizeof(buf), "cell (%d,%d)", robotRow, robotCol);
     oled.drawStr(0, 50, buf);
     oled.drawStr(0, 63, "btn=back");
+    oled.sendBuffer();
+}
+
+// Shown during EXPLORE_THINK between moves (always-on explore indication).
+static void oledExploreThink(const char* status) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    const char* modeN = returnHomeMode ? "HOME"
+                      : (exploreFwdGoalSaved ? "SWEEP" : "EXPLORE");
+    oled.drawStr(0, 8, modeN);
+    drawBatteryTopRight();
+    oled.drawHLine(0, 10, 128);
+    oled.setFont(u8g2_font_8x13B_tf);
+    if (status) oled.drawStr(0, 30, status);
+    oled.setFont(u8g2_font_5x7_tf);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "(%d,%d) hd=%c", robotRow, robotCol, "NESW"[robotHeading]);
+    oled.drawStr(0, 46, buf);
+    int uv = maze.countUnvisited(MAZE_ROWS, MAZE_COLS);
+    snprintf(buf, sizeof(buf), "unvisited=%d", uv);
+    oled.drawStr(0, 58, buf);
     oled.sendBuffer();
 }
 

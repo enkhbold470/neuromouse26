@@ -88,7 +88,8 @@ static void bleInit() {
 
 static void bleSendRaw(const uint8_t* data, size_t len) {
     if (!g_bleConn || !g_bleTx || len == 0) return;
-    const size_t maxChunk = 20;  // safe default ATT payload before MTU exchange
+    size_t maxChunk = NimBLEDevice::getMTU() - 3;
+    if (maxChunk < 20) maxChunk = 20;
     size_t offset = 0;
     while (offset < len) {
         size_t chunk = min(maxChunk, len - offset);

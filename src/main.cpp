@@ -84,17 +84,17 @@ static void rgbBlinkCrash(uint32_t elapsedMs) {
 struct PID {
     float integral = 0, prevError = 0;
     unsigned long prevUs = 0;
-    float compute(float err) {
+    float compute(float err, float outMax = (float)IR_CENTER_MAX) {
         unsigned long now = micros();
         float dt = (prevUs == 0) ? 0.001f
                                  : constrain((now - prevUs) / 1e6f, 0.0001f, 0.05f);
         prevUs = now;
         integral += err * dt;
-        integral  = constrain(integral, -2000.0f, 2000.0f);
+        integral  = constrain(integral, -800.0f, 800.0f);
         float deriv = (err - prevError) / dt;
         prevError = err;
         float out = IR_CENTER_KP * err + IR_CENTER_KI * integral + IR_CENTER_KD * deriv;
-        return constrain(out, -(float)IR_CENTER_MAX, (float)IR_CENTER_MAX);
+        return constrain(out, -outMax, outMax);
     }
     void reset() { integral = 0; prevError = 0; prevUs = 0; }
 } pid;
@@ -138,10 +138,9 @@ static void onPhaseActivate() {
     }
 }
 
-static bool  midCellSensed = false;  // reset by phaseEnter, fired once per FWD leg
-static float flowEntryTps   = 0.0f;  // body speed (tps) carried into a FWD entered
-                                     // continuously from a curve (no-brake handoff)
-                                     // so its trapezoid doesn't command a slowdown.
+static bool  midCellSensed = false;
+static bool  bumpedFrontWallSticky = false;
+static float flowEntryTps   = 0.0f;
 
 static void phaseEnter() {
     phaseStartTL     = leftEnc.getTicks();
@@ -179,6 +178,7 @@ static State state = IDLE;
 // ── Setup ───────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    Serial.println("[FW] 2026-06-24 simple-safe explore maze6x3");
     pinMode(BUTTON_1, INPUT_PULLUP);
 
     pinMode(MOTOR_SLEEP, OUTPUT);
@@ -248,7 +248,8 @@ void loop() {
                 setupMaze();
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
-                exploreMode = true; fastRunMode = false; returnHomeMode = false; finalTurnPending = false;
+                exploreMode = true; fastRunMode = false; returnHomeMode = false;
+                exploreFwdGoalSaved = false; finalTurnPending = false;
                 autoCalGyroBeforeStart();
                 calibrateSideRefs();
                 bleState("EXPLORE_THINK");
@@ -289,7 +290,8 @@ void loop() {
                 setupMaze();
                 robotRow = START_ROW; robotCol = START_COL; robotHeading = DIR_NORTH;
                 pendingOffsetTicks = START_OFFSET_TICKS;
-                exploreMode = true; fastRunMode = false; returnHomeMode = false; finalTurnPending = false;
+                exploreMode = true; fastRunMode = false; returnHomeMode = false;
+                exploreFwdGoalSaved = false; finalTurnPending = false;
                 autoCalGyroBeforeStart();
                 calibrateSideRefs();   // capture this run's side wall refs (start cell, west wall on left)
                 for (int n = 3; n >= 1; n--) { oledCountdown(n); delay(COUNTDOWN_DELAY_MS); }
@@ -533,63 +535,48 @@ void loop() {
             }
             if (atDeadEnd()) {
                 AbsDir back = (AbsDir)((robotHeading + 2) % 4);
-                Serial.printf("[DEADEND] (%d,%d,%c) → 180 + exit cell\n",
+                Serial.printf("[DEADEND] (%d,%d,%c) → align + 180 + exit\n",
                               robotRow, robotCol, "NESW"[robotHeading]);
                 maze.visited[robotRow][robotCol] = true;
-                // Spin 180° then drive back one full cell. EXPLORE_THINK
-                // re-senses from the previous cell where L/R branches exist.
                 scriptReset();
-                scriptPushSpot(TURN_RIGHT, 180.0f);
-                long fwd = CELL_TICKS + pendingOffsetTicks;
-                pendingOffsetTicks = 0;
-                scriptPushFwd(fwd);
-                plannedHeading = (uint8_t)back;
-                plannedRow     = robotRow + DIR_DR[back];
-                plannedCol     = robotCol + DIR_DC[back];
+                scriptPushDeadEndExit(back);
                 scriptKick();
                 state = RUN;
                 break;
             }
         }
+        if (bumpedFrontWallSticky) {
+            maze.setWall(robotRow, robotCol, (AbsDir)robotHeading, true);
+            bumpedFrontWallSticky = false;
+            Serial.println("[BUMP] re-asserted front wall after sense");
+        }
         maze.visited[robotRow][robotCol] = true;
+
+        // Sweep complete → single return leg to start.
+        if (exploreMode && exploreFwdGoalSaved && !returnHomeMode
+                && maze.countUnvisited(MAZE_ROWS, MAZE_COLS) == 0) {
+            Serial.println("--- sweep complete, going home ---");
+            oledTerminal("SWEEP DONE", "go home");
+            maze.setGoalSingle(START_ROW, START_COL);
+            returnHomeMode = true;
+        }
+
         if (maze.isGoal(robotRow, robotCol)) {
             if (exploreMode && !returnHomeMode) {
-                // First leg done — flip the goal to home (0,0) and keep
-                // exploring back. Walls accumulated on the return leg fill
-                // in anything missed on the way out.
-                //
-                // Save NVS immediately so a crash during return-home doesn't
-                // lose the forward map. The home-arrival save below will
-                // overwrite with the more complete round-trip map.
-                Serial.printf("--- FWD GOAL reached (%d,%d), returning home ---\n",
-                              robotRow, robotCol);
-                if (nvsSaveWalls()) Serial.println("[NVS] walls saved (forward leg done)");
-                maze.setGoalSingle(START_ROW, START_COL);
-                returnHomeMode = true;
-                // Fall through into floodFill / planning with the new goal.
-            } else if (exploreMode && returnHomeMode) {
-                // Back home — check for any unvisited cells before stopping.
-                int ur = -1, uc = -1, bestManhattan = 9999;
-                for (int r = 0; r < MAZE_ROWS; r++) {
-                    for (int c = 0; c < MAZE_COLS; c++) {
-                        if (!maze.visited[r][c]) {
-                            int d = abs(r - (int)robotRow) + abs(c - (int)robotCol);
-                            if (d < bestManhattan) { bestManhattan = d; ur = r; uc = c; }
-                        }
-                    }
+                if (!exploreFwdGoalSaved) {
+                    Serial.printf("--- FWD GOAL (%d,%d) saved, sweeping ---\n",
+                                  robotRow, robotCol);
+                    if (nvsSaveWalls()) Serial.println("[NVS] walls saved (forward goal)");
+                    exploreFwdGoalSaved = true;
+                    oledTerminal("GOAL OK", "sweeping...");
                 }
-                if (ur >= 0) {
-                    Serial.printf("--- home reached, unvisited (%d,%d) remain, targeting (%d,%d) ---\n",
-                                  MAZE_ROWS * MAZE_COLS - /* rough */ 0, 0, ur, uc);
-                    maze.setGoalSingle(ur, uc);
-                    // returnHomeMode stays true; we'll re-check each time we hit a goal
-                    // Fall through to floodFill / planning below.
-                } else {
-                    // All reachable cells visited — wrap up.
-                    maze.setGoalCentre4();
-                    if (nvsSaveWalls()) Serial.println("[NVS] walls saved (full explore done)");
-                    Serial.printf("--- FULLY EXPLORED, spinning 180 ---\n");
-                    oledTerminal("DONE!", "full");
+                // Keep sweeping — do not flip returnHome yet.
+            } else if (exploreMode && returnHomeMode) {
+                if (robotRow == START_ROW && robotCol == START_COL) {
+                    Serial.printf("--- HOME reached (%d,%d), done ---\n",
+                                  robotRow, robotCol);
+                    if (nvsSaveWalls()) Serial.println("[NVS] walls saved");
+                    oledTerminal("HOME OK", "spin");
                     scriptReset();
                     scriptPushSpot(TURN_RIGHT, 180.0f);
                     plannedRow     = robotRow;
@@ -627,8 +614,26 @@ void loop() {
         uint8_t bestDist;
         AbsDir bestDir = maze.bestDirectionBiased(robotRow, robotCol,
                                                   (AbsDir)robotHeading, bestDist,
-                                                  routeToUnvisited);
+                                                  routeToUnvisited || returnHomeMode);
         if (bestDist == FLOOD_INFINITY) {
+            if (exploreMode && !returnHomeMode) {
+                Serial.printf("--- explore path done, returning home ---\n");
+                if (nvsSaveWalls()) Serial.println("[NVS] walls saved");
+                maze.setGoalSingle(START_ROW, START_COL);
+                returnHomeMode = true;
+                recoverCount = 0;
+                maze.floodFill();
+                bestDir = maze.bestDirectionBiased(robotRow, robotCol,
+                                                   (AbsDir)robotHeading, bestDist,
+                                                   true);
+                if (bestDist != FLOOD_INFINITY) {
+                    buildMoveScript(bestDir);
+                    scriptKick();
+                    bleState("RUN");
+                    state = RUN;
+                    break;
+                }
+            }
             if (exploreMode) {
                 // One 180° recovery attempt if back direction is physically open.
                 // If back is also walled, or we already tried once, give up → CRASH.
@@ -700,6 +705,7 @@ void loop() {
                           maze.flood[robotRow][robotCol], "NESW"[bestDir]);
         }
         buildMoveScript(bestDir);
+        oledExploreThink("plan");
         scriptKick();
         bleState("RUN");
         state = RUN;
@@ -711,6 +717,7 @@ void loop() {
             stopMotors();
             Serial.println("--- RUN aborted ---");
             exploreMode = false; fastRunMode = false; returnHomeMode = false;
+            exploreFwdGoalSaved = false;
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
@@ -737,6 +744,7 @@ void loop() {
             int errDiff = errLF - errRF;
             long avgTicks = (tL + tR) / 2;
             static uint32_t alignSettleStart = 0;
+            static uint32_t alignIdleStart   = 0;
 
             auto endNow = [&](const char* reason) {
                 stopMotors();
@@ -745,6 +753,7 @@ void loop() {
                                   scriptIdx + 1, scriptLen, reason, irVal[0], irVal[3], tL, tR);
                 }
                 alignSettleStart = 0;
+                alignIdleStart   = 0;
                 if (scriptIdx + 1 >= scriptLen) {
                     robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
                     runTurnDir = TURN_NONE;
@@ -778,10 +787,24 @@ void loop() {
             alignSettleStart = 0;
             if (labs(avgTicks) >= ALIGN_MAX_TICKS) { endNow("ALIGN_CAP"); break; }
 
-            // errMean > 0 → both IR brighter than target → wall closer than
-            // target → REVERSE. errMean < 0 → wall farther → FORWARD.
-            int dir = (errMean > 0) ? -1 : +1;
-            int throttle = dir * ALIGN_PWM;
+            if (abs(errMean) < ALIGN_MOVE_DEADBAND) {
+                stopMotors();
+                if (alignIdleStart == 0) alignIdleStart = millis();
+                // Deadband without ending phase used to stall forever facing the wall.
+                if (abs(errLF) <= (int)(ALIGN_TOL * 1.5f)
+                        && abs(errRF) <= (int)(ALIGN_TOL * 1.5f)
+                        && millis() - alignIdleStart > 200) {
+                    endNow("ALIGN_NEAR");
+                } else if (millis() - alignIdleStart > 800) {
+                    endNow("ALIGN_IDLE");
+                }
+                break;
+            }
+            alignIdleStart = 0;
+            int throttle = constrain((int)(-ALIGN_ERR_KP * (float)errMean),
+                                     -ALIGN_PWM, ALIGN_PWM);
+            if (throttle != 0 && abs(throttle) < POS_STICTION_PWM)
+                throttle = (throttle > 0) ? POS_STICTION_PWM : -POS_STICTION_PWM;
             // Angular correction from front-sensor mismatch.
             constexpr float ALIGN_DIFF_KP = 0.05f;
             int angleBias = (int)(ALIGN_DIFF_KP * (float)errDiff);
@@ -803,8 +826,8 @@ void loop() {
             if (TELEMETRY && !fastRunMode) {
                 static uint32_t lastTel = 0;
                 if (millis() - lastTel > 80) {
-                    Serial.printf("t=%lu ph=ALIGN LF=%d RF=%d errLF=%+d errRF=%+d dir=%+d tL=%ld tR=%ld\n",
-                                  (unsigned long)millis(), irVal[0], irVal[3], errLF, errRF, dir, tL, tR);
+                    Serial.printf("t=%lu ph=ALIGN LF=%d RF=%d errLF=%+d errRF=%+d thr=%+d tL=%ld tR=%ld\n",
+                                  (unsigned long)millis(), irVal[0], irVal[3], errLF, errRF, throttle, tL, tR);
                     lastTel = millis();
                 }
             }
@@ -849,9 +872,8 @@ void loop() {
         // 80 ms wait shows up as a visible "pause" at every turn cell.
         // Rotation phases (PH_SPOT) keep the full YAW_SETTLE_MS dwell so
         // the heading doesn't commit before the gyro has actually settled.
-        uint32_t effSettleMs  = imuMode             ? YAW_SETTLE_MS
-                              : fastRunMode         ? 0u
-                                                    : POS_SETTLE_MS;
+        uint32_t effSettleMs  = imuMode ? YAW_SETTLE_MS
+                              : (fastRunMode ? 0u : POS_SETTLE_MS);
         float    effStallVel  = imuMode ? YAW_STALL_VEL     : POS_STALL_VEL;
         uint32_t effStallMs   = imuMode ? YAW_STALL_MS      : POS_STALL_MS;
         float    effStallEmax = imuMode ? YAW_STALL_ERR_MAX : (float)POS_STALL_ERR_MAX;
@@ -864,12 +886,13 @@ void loop() {
         static float    velFilt     = 0.0f;
         static uint32_t settleStart = 0;
         static uint32_t stallStart  = 0;
+        static uint32_t bumpStart   = 0;
 
         float posErr = (float)runTarget - avg;
 
         auto resetPidState = [&]() {
             posAvgPrev = 0.0f; posPrevUs = 0; velFilt = 0.0f;
-            settleStart = 0; stallStart = 0;
+            settleStart = 0; stallStart = 0; bumpStart = 0;
         };
 
         auto endPhase = [&](const char* reason) {
@@ -883,7 +906,12 @@ void loop() {
             }
 
             if (scriptIdx + 1 >= scriptLen) {
+                uint8_t prevRow = robotRow, prevCol = robotCol;
                 robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
+                if ((exploreMode || fastRunMode) &&
+                    (prevRow != robotRow || prevCol != robotCol)) {
+                    clearTraversedWall(prevRow, prevCol, robotRow, robotCol);
+                }
                 resetPidState();
                 runTurnDir = TURN_NONE;
                 if (!fastRunMode) {
@@ -919,7 +947,12 @@ void loop() {
         auto endPhaseNoBrake = [&]() {
             bool fromCurve = (runPhase == PH_CURVE);
             if (scriptIdx + 1 >= scriptLen) {
+                uint8_t prevRow = robotRow, prevCol = robotCol;
                 robotRow = plannedRow; robotCol = plannedCol; robotHeading = plannedHeading;
+                if ((exploreMode || fastRunMode) &&
+                    (prevRow != robotRow || prevCol != robotCol)) {
+                    clearTraversedWall(prevRow, prevCol, robotRow, robotCol);
+                }
                 resetPidState();
                 runTurnDir = TURN_NONE;
                 flowEntryTps = 0.0f;
@@ -959,6 +992,7 @@ void loop() {
                 stopMotors();
                 Serial.println("[CURVE] jam timeout — abort to menu");
                 exploreMode = false; fastRunMode = false; returnHomeMode = false;
+            exploreFwdGoalSaved = false;
                 menuEncRef = rightEnc.getTicks();
                 oledMenu();
                 state = IDLE;
@@ -972,7 +1006,7 @@ void loop() {
             bool nextFlow = (scriptIdx + 1 < scriptLen) &&
                             (script[scriptIdx + 1].phase == PH_FORWARD ||
                              script[scriptIdx + 1].phase == PH_CURVE);
-            if (g_smoothMode && flowNow && nextFlow) {
+            if (g_smoothMode && fastRunMode && flowNow && nextFlow) {
                 endPhaseNoBrake();
                 break;
             }
@@ -1015,9 +1049,91 @@ void loop() {
             stallStart = 0;
         }
 
+        // Shared bump / front-wall recovery — abort FWD without committing a
+        // far planned pose; mark front wall and re-plan from current cell.
+        auto doWallBumpRecovery = [&](bool frontWall, float frontMm) {
+            Serial.printf("[BUMP] %s front=%.1fmm posErr=%+.1f — stop, no cell chase\n",
+                          frontWall ? "IR-stop" : "hard-stall", frontMm, posErr);
+            if (frontWall) {
+                maze.setWall(robotRow, robotCol, (AbsDir)robotHeading, true);
+                bumpedFrontWallSticky = true;
+            }
+            rgbLed[0] = CRGB::Yellow;
+            FastLED.show();
+            stopMotors();
+            delay(50);
+
+            bool irReadOk = frontWall && frontMm > 1.0f && frontMm < CELL_CENTER_FRONT_MM;
+            if (irReadOk) {
+                float backupMm   = CELL_CENTER_FRONT_MM - frontMm;
+                float ticksPerMm = (float)CELL_TICKS / CELL_PITCH_MM;
+                long  backTicks  = (long)(backupMm * ticksPerMm + 0.5f);
+                long  startTicks = leftEnc.getTicks();
+                Serial.printf("[BUMP] IR backup %.1f mm (%ld ticks)\n", backupMm, backTicks);
+                leftMotor.drive(-POS_BUMP_BACKUP_PWM);
+                rightMotor.drive(-POS_BUMP_BACKUP_PWM);
+                uint32_t t0 = millis();
+                while (millis() - t0 < POS_BUMP_BACKUP_TIMEOUT_MS) {
+                    if (startTicks - leftEnc.getTicks() >= backTicks) break;
+                    delay(2);
+                }
+                stopMotors();
+            } else if (frontWall) {
+                Serial.println("[BUMP] blind backup");
+                leftMotor.drive(-POS_BUMP_BACKUP_PWM);
+                rightMotor.drive(-POS_BUMP_BACKUP_PWM);
+                delay(POS_BUMP_BACKUP_MS);
+                stopMotors();
+            }
+
+            resetPidState();
+            pid.reset();
+            runTurnDir = TURN_NONE;
+            bleState("EXPLORE_THINK");
+            state = EXPLORE_THINK;
+        };
+
+        int   frontPeak   = 0;
+        float frontMmLive = 999.0f;
+        bool  frontBrake  = false;
+        if (runPhase == PH_FORWARD && runTarget > 0 && USE_IR
+                && exploreMode && !returnHomeMode) {
+            sampleIR();
+            frontPeak = max(irVal[0], irVal[3]);
+            frontMmLive = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+            if (frontPeak >= WALL_FRONT_STOP_THRESH) {
+                doWallBumpRecovery(true, frontMmLive);
+                break;
+            }
+            if (frontPeak > WALL_FRONT_BRAKE_THRESH)
+                frontBrake = true;
+        }
+
+        // Stall bump fallback (map said open but we jammed without early IR stop).
+        if (runPhase == PH_FORWARD && runTarget > 0
+            && posErr > (float)(POS_HOLD_BAND * 2)
+            && fabsf(velFilt) < POS_STALL_VEL) {
+            if (bumpStart == 0) bumpStart = millis();
+            uint32_t bumpElapsed = millis() - bumpStart;
+            if (bumpElapsed > POS_BUMP_MS) {
+                if (frontPeak == 0) sampleIR();
+                bool frontWall = (irVal[0] > WALL_FRONT_THRESH) || (irVal[3] > WALL_FRONT_THRESH);
+                bool hardStall = bumpElapsed > POS_HARD_STALL_MS;
+                if (frontWall || hardStall) {
+                    if (frontPeak == 0)
+                        frontMmLive = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
+                    doWallBumpRecovery(frontWall, frontMmLive);
+                    break;
+                }
+            }
+        } else {
+            bumpStart = 0;
+        }
+
         int throttle;
         float vCmdSigned = 0.0f;
         float xCmdSigned = (float)runTarget;
+        float fwdVAbsCmd = 0.0f;
         if (runPhase == PH_FORWARD) {
             // Position-based trapezoidal velocity command:
             //   vAccel = sqrt(2·a·xDone)  → smooth ramp from rest
@@ -1040,15 +1156,30 @@ void loop() {
             // straight bleeds to the arc-entry speed (not 0) so it never stops.
             // Clamp to cruise so a slow cruise never demands a speed-up.
             float vEnd     = 0.0f;
-            if (g_smoothMode && scriptIdx + 1 < scriptLen
-                    && script[scriptIdx + 1].phase == PH_CURVE) {
-                vEnd = CURVE_V_ENTRY_TPS;
-                if (vEnd > vCruise) vEnd = vCruise;
+            if (g_smoothMode && scriptIdx + 1 < scriptLen) {
+                PhaseStep& nxtPh = script[scriptIdx + 1];
+                if (nxtPh.phase == PH_CURVE) {
+                    vEnd = CURVE_V_ENTRY_TPS;
+                    if (vEnd > vCruise) vEnd = vCruise;
+                } else if (nxtPh.phase == PH_FORWARD && fastRunMode) {
+                    vEnd = vCruise;
+                }
             }
             float vDecel   = sqrtf(2.0f * FWD_DECEL_TPS2 * xRem + vEnd * vEnd);
             float vAbsCmd  = vCruise;
             if (vAccel < vAbsCmd) vAbsCmd = vAccel;
             if (vDecel < vAbsCmd) vAbsCmd = vDecel;
+            // Front IR brake: don't chase remaining ticks into the wall.
+            if (frontBrake && runTarget > 0) {
+                float span = (float)(ALIGN_LF_TARGET - WALL_FRONT_BRAKE_THRESH);
+                float t    = (float)(frontPeak - WALL_FRONT_BRAKE_THRESH) / span;
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                float cap = vCruise * (1.0f - t);
+                if (cap < 60.0f) cap = 60.0f;
+                if (vAbsCmd > cap) vAbsCmd = cap;
+            }
+            fwdVAbsCmd     = vAbsCmd;
             float dirSign  = ((float)runTarget - avg >= 0) ? +1.0f : -1.0f;
             vCmdSigned     = dirSign * vAbsCmd;
             xCmdSigned     = (float)runTarget;
@@ -1059,7 +1190,8 @@ void loop() {
             // Residual stiction floor: trapezoid at v=0 but robot still
             // outside the settle band. PID alone gives sub-breakaway PWM.
             if (vAbsCmd <= 5.0f && fabsf(posErr) > (float)POS_HOLD_BAND
-                && fabsf(u) < (float)FWD_STICTION_FF) {
+                && fabsf(u) < (float)FWD_STICTION_FF
+                && frontPeak < WALL_FRONT_THRESH) {
                 u = ((posErr >= 0) ? +1.0f : -1.0f) * (float)FWD_STICTION_FF;
             }
             // Dynamic cap: PWM ≤ FF(vCmd) + small PID headroom so commanded
@@ -1088,11 +1220,9 @@ void loop() {
 
         // IR centering (forward phase only).
         float corr = 0.0f;
-        if (runPhase == PH_FORWARD && USE_IR) {
-            sampleIR();
-            constexpr float IR_CONF_LO    = 10.0f;   // above noise floor
-            constexpr float IR_CONF_HI    = 150.0f;  // full conf well below cal@center(~330-403)
-            constexpr float IR_EDGE_DELTA = 60.0f;   // wall appear/vanish in 0-400 range
+        if (runPhase == PH_FORWARD && USE_IR && !exploreMode) {
+            if (frontPeak == 0) sampleIR();
+            constexpr float IR_EDGE_DELTA = 60.0f;
 
             if (irFirstSample) {
                 irLSm = irVal[1]; irRSm = irVal[2];
@@ -1110,24 +1240,42 @@ void loop() {
                 if (dR >  IR_EDGE_DELTA) Serial.println("[EVENT] R wall appeared");
             }
 
-            auto wallConf = [](float v) -> float {
-                if (v < IR_CONF_LO) return 0.0f;
-                if (v > IR_CONF_HI) return 1.0f;
-                return (v - IR_CONF_LO) / (IR_CONF_HI - IR_CONF_LO);
+            int tgtL = SIDE_ADAPTIVE ? sideRefL : calL;
+            int tgtR = SIDE_ADAPTIVE ? sideRefR : calR;
+            // Ref-relative wall confidence (main-branch pattern, scaled for L45/R45).
+            auto wallConf = [](float v, int ref) -> float {
+                if (v < (float)SIDE_OPEN_CEIL) return 0.0f;  // open side — don't steer
+                if (ref < SIDE_REF_MIN) ref = IR_CAL_L45;
+                float lo = ref * 0.15f;
+                float hi = ref * 0.70f;
+                if (v < lo) return 0.0f;
+                if (v > hi) return 1.0f;
+                return (v - lo) / (hi - lo);
             };
-            float cL = wallConf(irLSm);
-            float cR = wallConf(irRSm);
-            float fErrL = cL * (irLSm - (float)calL);
-            float fErrR = cR * (irRSm - (float)calR);
+            float cL = wallConf(irLSm, tgtL);
+            float cR = wallConf(irRSm, tgtR);
+            float fErrL = cL * (irLSm - (float)tgtL);
+            float fErrR = cR * (irRSm - (float)tgtR);
             float fErr  = fErrR - fErrL;
-            corr = (cL > 0.05f || cR > 0.05f) ? pid.compute(fErr) : 0.0f;
+            if (cL > 0.05f || cR > 0.05f) {
+                float irMax = (float)IR_CENTER_MAX;
+                if (fwdVAbsCmd > FWD_V_CRUISE_TPS)
+                    irMax *= constrain(fwdVAbsCmd / FWD_V_CRUISE_TPS, 1.0f, 2.5f);
+                corr = pid.compute(fErr, irMax);
+            }
         }
 
         int pwmL, pwmR;
         if (runPhase == PH_FORWARD) {
-            // Hold against the commanded heading.
+            // Hold against the commanded heading. Back off yaw hold when IR is
+            // actively steering — otherwise IMU fights the L/R bias and the
+            // robot drifts into the wall.
+            float yawScale = 1.0f;
+            if (fabsf(corr) > 8.0f) yawScale = 0.30f;
+            else if (fabsf(corr) > 3.0f) yawScale = 0.55f;
             int yawBias    = (USE_IMU && imuReady)
-                              ? (int)(-YAW_HOLD_KP * (yawDeg - yawTargetDeg) - YAW_HOLD_KD * gzFilt) : 0;
+                              ? (int)(yawScale * (-YAW_HOLD_KP * (yawDeg - yawTargetDeg)
+                                                  - YAW_HOLD_KD * gzFilt)) : 0;
             int encBalance = (int)((tL - tR) * BALANCE_KP);
             int bias = (int)corr + encBalance + yawBias;
             pwmL = constrain(throttle - bias, -MOTOR_PWM_MAX, MOTOR_PWM_MAX);
@@ -1247,6 +1395,7 @@ void loop() {
         if (buttonEdge()) {
             rgbOff();
             exploreMode = false; fastRunMode = false; returnHomeMode = false;
+            exploreFwdGoalSaved = false;
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;

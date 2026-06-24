@@ -20,6 +20,7 @@ public:
     uint8_t goalCount;
     uint8_t goalRow[4];
     uint8_t goalCol[4];
+    bool    provenOpen[MAZE_SIZE][MAZE_SIZE][4];
 
     MicromouseMaze() { reset(); }
 
@@ -40,7 +41,16 @@ public:
 
     bool hasWall(int r, int c, AbsDir d) const {
         if (!inBounds(r, c)) return true;
+        if (provenOpen[r][c][d]) return false;
         return (walls[r][c] & DIR_WALL[d]) != 0;
+    }
+
+    void markProvenOpen(int r, int c, AbsDir d) {
+        if (!inBounds(r, c)) return;
+        provenOpen[r][c][d] = true;
+        int nr = r + DIR_DR[d], nc = c + DIR_DC[d];
+        if (inBounds(nr, nc))
+            provenOpen[nr][nc][DIR_OPPOSITE[d]] = true;
     }
 
     void reset() {
@@ -49,6 +59,8 @@ public:
                 walls[r][c]   = 0;
                 flood[r][c]   = FLOOD_INFINITY;
                 visited[r][c] = false;
+                for (int d = 0; d < 4; d++)
+                    provenOpen[r][c][d] = false;
             }
         // Border walls
         for (int c = 0; c < MAZE_SIZE; c++) {

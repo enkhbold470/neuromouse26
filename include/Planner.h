@@ -20,8 +20,17 @@
 extern MicromouseMaze maze;
 
 static void setupMaze() {
-    maze.reset();                        // 16×16 borders + default centre 2×2 goal
-    maze.setGoalSingle(GOAL_ROW, GOAL_COL);  // physical maze goal (5,2)
+    maze.reset();                        // 16×16 outer border + default centre goal
+    maze.setGoalSingle(GOAL_ROW, GOAL_COL);
+
+    // Seal the 6×3 physical maze inside the 16×16 grid. reset() only walls
+    // the outer edge at row/col 15; without this, flood-fill treats rows 6+
+    // and cols 3+ as wide-open and routes through fantasy space → ping-pong
+    // and BOXED at the goal end of a return leg.
+    for (int c = 0; c < MAZE_SIZE; c++)
+        maze.setWall(MAZE_ROWS - 1, c, DIR_NORTH, true);
+    for (int r = 0; r < MAZE_SIZE; r++)
+        maze.setWall(r, MAZE_COLS - 1, DIR_EAST, true);
 }
 
 // Wall sensing sets AND clears edges from IR each cell arrival. Stale "walls"
@@ -41,6 +50,7 @@ static inline bool sideWallPresent(int raw) {
 enum SideState { SIDE_OPEN, SIDE_WALL, SIDE_UNKNOWN };
 
 static SideState sideWallState(int raw, int ref, int amb) {
+    if (raw < SIDE_OPEN_CEIL) return SIDE_OPEN;                   // user: open when well below touch cal
     if (!SIDE_ADAPTIVE) return sideWallPresent(raw) ? SIDE_WALL : SIDE_OPEN;
     if (amb > SIDE_SAT_AMB) return SIDE_UNKNOWN;                 // saturated → don't trust
     if (ref < SIDE_REF_MIN) ref = SIDE_REF_MIN;                 // guard a bad reference
@@ -142,6 +152,41 @@ static bool atDeadEnd() {
     return mazeDeadEnd(robotRow, robotCol, robotHeading);
 }
 
+// Dead-end exit sequence (main-branch): front IR align → 180° → short reverse →
+// one cell forward along exitDir. fromR/fromC default to live robot pose.
+static void scriptPushDeadEndExit(AbsDir exitDir, int fromR = -1, int fromC = -1) {
+    if (fromR < 0) { fromR = robotRow; fromC = robotCol; }
+    float ticksPerMm = (float)CELL_TICKS / CELL_PITCH_MM;
+    long  revTicks   = (long)(DEADEND_REVERSE_MM * ticksPerMm + 0.5f);
+    long  fwdTicks   = (long)(DEADEND_FWD_MM     * ticksPerMm + 0.5f);
+    // Explore: skip ALIGN creep — spot 180 and go (ALIGN was a common stall source).
+    if (!exploreMode) scriptPushAlignFront();
+    scriptPushSpot(TURN_RIGHT, SPOT_180_DEG);
+    scriptPushFwd(-revTicks);
+    scriptPushFwd( fwdTicks);
+    pendingOffsetTicks = 0;
+    plannedHeading = exitDir;
+    plannedRow     = fromR + DIR_DR[exitDir];
+    plannedCol     = fromC + DIR_DC[exitDir];
+}
+
+static bool preTurnAlignNeeded(int r, int c, AbsDir h, int diff) {
+    (void)r; (void)c; (void)h; (void)diff;
+    return false;   // simple safe: never creep-align before turns
+}
+
+// Successful drive from → to proves that passage is open; clear any phantom
+// wall IR may have written before the cell was first entered from another heading.
+static void clearTraversedWall(uint8_t fromR, uint8_t fromC, uint8_t toR, uint8_t toC) {
+    for (int d = 0; d < 4; d++) {
+        if (toR == fromR + DIR_DR[d] && toC == fromC + DIR_DC[d]) {
+            maze.setWall(fromR, fromC, (AbsDir)d, false);
+            maze.markProvenOpen(fromR, fromC, (AbsDir)d);
+            return;
+        }
+    }
+}
+
 // Build a one-cell-move script: optional spot turn, then forward 1 cell (or
 // chain of consecutive straight cells in fast run).
 //
@@ -168,7 +213,7 @@ static void buildFastSmoothRoute() {
     while (cap-- > 0 && scriptLen < MAX_SCRIPT - 3) {
         if (maze.isGoal(r, c)) break;
         uint8_t dd;
-        AbsDir nd = maze.bestDirectionBiased(r, c, h, dd);
+        AbsDir nd = maze.bestDirectionBiased(r, c, h, dd, returnHomeMode);
         if (dd == FLOOD_INFINITY) break;
         int diff = ((int)nd - (int)h + 4) % 4;
 
@@ -206,28 +251,25 @@ static void buildFastSmoothRoute() {
 }
 
 static void buildMoveScript(AbsDir bestDir) {
-    // Smooth fast run: compile the whole continuous route at once.
+    // Fast run smooth: multi-cell FWD+CURVE arcs.
     if (fastRunMode && g_smoothMode && CURVE_ENABLE) {
         buildFastSmoothRoute();
         return;
     }
+    // Explore: always falls through to one-cell stop-pivot below.
     int diff = ((int)bestDir - (int)robotHeading + 4) % 4;
     scriptReset();
 
     if (diff == 1) {
-        // Spot at cell center (no translation). Same in explore and fast run.
+        if (preTurnAlignNeeded(robotRow, robotCol, (AbsDir)robotHeading, diff))
+            scriptPushAlignFront();
         scriptPushSpot(TURN_RIGHT, 90.0f);
     } else if (diff == 3) {
+        if (preTurnAlignNeeded(robotRow, robotCol, (AbsDir)robotHeading, diff))
+            scriptPushAlignFront();
         scriptPushSpot(TURN_LEFT, 90.0f);
     } else if (diff == 2) {
-        // Dead end: face the exit, then drive one cell back out.
-        scriptPushSpot(TURN_RIGHT, 180.0f);
-        long fwd = CELL_TICKS + pendingOffsetTicks;
-        pendingOffsetTicks = 0;
-        scriptPushFwd(fwd);
-        plannedHeading = bestDir;
-        plannedRow     = robotRow + DIR_DR[bestDir];
-        plannedCol     = robotCol + DIR_DC[bestDir];
+        scriptPushDeadEndExit(bestDir);
         return;
     }
 
@@ -240,23 +282,24 @@ static void buildMoveScript(AbsDir bestDir) {
     plannedRow     = robotRow + DIR_DR[bestDir];
     plannedCol     = robotCol + DIR_DC[bestDir];
 
-    // Fast-run straight-chain extension: fuse consecutive straight cells into
-    // one PH_FORWARD. The trapezoid in the executor naturally stretches
-    // accel → cruise → decel over the whole chain, so longer straights hit
-    // higher peak speed. Chain breaks at any turn; endPhase brakes before
-    // the next SPOT so wheels are stationary at the turn.
-    if (fastRunMode && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
+    // Straight-chain: fast run only. Explore always one cell per script.
+    bool chainAllowed = fastRunMode;
+    if (chainAllowed && scriptLen > 0 && script[scriptLen - 1].phase == PH_FORWARD) {
         int rr = plannedRow, cc = plannedCol;
         AbsDir hh = (AbsDir)plannedHeading;
-        int safetyCap = MAZE_CELLS;
+        int safetyCap = MAZE_ROWS * MAZE_COLS;
         while (safetyCap-- > 0) {
-            if (maze.isGoal(rr, cc)) break;
+            if (returnHomeMode) {
+                if (rr == (int)START_ROW && cc == (int)START_COL) break;
+            } else if (maze.isGoal((uint8_t)rr, (uint8_t)cc)) {
+                break;
+            }
             if (maze.hasWall(rr, cc, hh)) break;
-            int nr = rr + DIR_DR[hh];
-            int nc = cc + DIR_DC[hh];
-            if (!maze.inBounds(nr, nc)) break;
+            int nr = rr + DIR_DR[hh], nc = cc + DIR_DC[hh];
+            if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) break;
+            if (!fastRunMode && !maze.visited[nr][nc]) break;
             uint8_t d;
-            AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d);
+            AbsDir next = maze.bestDirectionBiased(nr, nc, hh, d, returnHomeMode);
             if (d == FLOOD_INFINITY) break;
             if (next != hh) break;
 
@@ -266,8 +309,6 @@ static void buildMoveScript(AbsDir bestDir) {
         plannedRow     = rr;
         plannedCol     = cc;
         plannedHeading = hh;
-        // [FAST chained] print intentionally omitted — fast run keeps serial
-        // quiet so the control loop isn't blocked by UART writes at 115200 baud.
     }
 }
 

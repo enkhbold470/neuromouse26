@@ -18,16 +18,21 @@ to clear the white tick marks.
 
 ## `ble-debug.html`
 
-Web Bluetooth dashboard for `pivot-mouse-v1` (`test/motor-ble-drive.cpp` etc).
-Sends single-char commands (`1`-`5` cells, `R`/`L` turns, `s` stop, `?`
-status) and streams TX notifications.
+Web Bluetooth dashboard for production firmware device **`bromouse`** (`env:main`).
+
+- 6×3 maze grid, IR bars, motion panel, state badge
+- Commands: `EXPLORE`, `FAST`, `STOP`, `DUMP`, `CLEAR_NVS`
+- Telemetry JSON: `ST`, `POS`, `WALL`, `MOT`, `BAT`, `CRASH`, `MAZE`
 
 ```bash
-open tools/ble-debug.html          # macOS
-# or serve any HTTP and open in Chrome/Edge (Web BT needs https/localhost)
+# Must use localhost or HTTPS — not file://
+python3 -m http.server 8080
+# open http://localhost:8080/tools/ble-debug.html in Chrome
 ```
 
-Requires browser with Web Bluetooth (Chrome, Edge, Opera; Safari ✗).
+**macOS:** System Settings → Privacy & Security → Bluetooth → enable **Google Chrome** if the device picker is empty.
+
+See also: `docs/2026-06-24-firmware-progress.md` (BLE section).
 
 ## `notify_upload.py`
 

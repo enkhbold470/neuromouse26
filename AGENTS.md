@@ -9,6 +9,8 @@ Micromouse26: ESP32-S3 maze robot (flood-fill explore + NVS fast run, IR wall se
 | `CLAUDE.md` | Module map, state machine, build commands, BLE status, invariants |
 | `GEMINI.md` | Architecture deep-dive, hardware table, motor/IR/PID patterns |
 | `OVERVIEW.md` | High-level summary |
+| `docs/2026-06-24-firmware-progress.md` | **Session progress** — explore flow, cal, experiments, current banner |
+| `docs/IR-CALIBRATION.md` | Front/side IR values and thresholds |
 | `include/README` | Header inventory |
 
 ## Build

@@ -23,7 +23,10 @@ static uint8_t plannedHeading = DIR_NORTH;
 
 static bool exploreMode = false;
 static bool fastRunMode = false;
-static bool returnHomeMode = false;    // after explore reaches goal, flips to head back to start
+static bool returnHomeMode = false;    // after full sweep, flood toward (0,0)
+
+// Set after first arrival at (5,2): NVS saved, keep sweeping unvisited cells.
+static bool exploreFwdGoalSaved = false;
 
 // Set when the final 180° celebration spin has been pushed. Next time
 // EXPLORE_THINK runs, transition straight to GOAL instead of sensing/planning.
@@ -36,10 +39,7 @@ static float fastRunCruiseTps = FAST_RUN_CRUISE_TPS_DEFAULT;
 // next forward leg, then clears itself.
 static long pendingOffsetTicks = 0;
 
-// Runtime Smooth/Classic toggle (OLED menu). Default OFF so a fresh flash is
-// the proven legacy stop-pivot firmware; the user enables Smooth from the menu
-// after bench-tuning. When ON (and CURVE_ENABLE), fast run uses continuous
-// arc turns. Phase 1 wires this to FAST RUN only; explore stays stop-pivot.
+// Runtime Smooth/Classic toggle (OLED menu). Fast run only — explore is always stop-pivot.
 static bool g_smoothMode = false;
 
 #endif

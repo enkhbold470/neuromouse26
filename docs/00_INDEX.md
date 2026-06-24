@@ -1,10 +1,23 @@
-# Micromouse Motor-Control — Doc Index
+# Micromouse26 — Doc Index
 
-> Engineering decisions documented. Future-you can understand *why* code is way it is.
+> Engineering decisions documented. Future-you can understand *why* code is the way it is.
 
 ---
 
-## Docs
+## Project docs (2026-06-24)
+
+| File | Covers |
+|---|---|
+| `../CLAUDE.md` | Agent guide — modules, state machine, build, invariants |
+| `../OVERVIEW.md` | High-level firmware overview |
+| `../GEMINI.md` | Architecture deep-dive |
+| `2026-06-24-firmware-progress.md` | Explore/fast-run/BLE progress, simple-safe baseline, lessons learned |
+| `IR-CALIBRATION.md` | Front + side IR bench values and thresholds |
+| `../tools/README.md` | BLE debug page (`ble-debug.html`) |
+
+---
+
+## Motor-control reference (legacy bring-up)
 
 | File | Covers |
 |---|---|

@@ -1,6 +1,8 @@
 Micromouse26 header layout
 ==========================
 
+**Docs (2026-06-24):** `docs/2026-06-24-firmware-progress.md`, `docs/IR-CALIBRATION.md`, `CLAUDE.md`.
+
 Domain code is split into header-only modules (single TU — every header is
 text-included exactly once into src/main.cpp). To touch any subsystem, open
 the matching header. Sections [A]–[H] referenced below are the tuning blocks
@@ -32,7 +34,8 @@ Project-owned headers (this directory)
 
   Pose.h             Robot pose + mode flags. Owns: robotRow/Col/Heading,
                      plannedRow/Col/Heading, exploreMode, fastRunMode,
-                     fastRunCruiseTps, pendingOffsetTicks.
+                     returnHomeMode, exploreFwdGoalSaved, finalTurnPending,
+                     fastRunCruiseTps, pendingOffsetTicks, g_smoothMode.
 
   MotionScript.h     Phase-script data + simple pushers. Owns: RunPhase /
                      TurnDir enums, PhaseStep, script[], scriptLen/Idx,

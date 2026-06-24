@@ -173,13 +173,13 @@ constexpr float   TURN_CLEAR_FRAC  = 1.15f;
 // `ircal` or on-device "Cal IR" menu after a sensor swap, mount-angle
 // change, or surface-reflectivity change. Each value = differential
 // ambient-subtracted reading (no-wall ~0, wall present 1500–3500).
-constexpr int     IR_CAL_LF        = 3483;
-// L45/R45 are the 30°-from-forward side sensors. At 42.5 mm lateral wall
-// the sensor-to-wall path is 42.5/sin(30°) = 85 mm → weak signal.
-// Values captured 2026-05-22 at cell center with side wall present.
-constexpr int     IR_CAL_L45       = 330;    // 30° side-left, centered in cell
-constexpr int     IR_CAL_R45       = 403;    // 30° side-right, centered in cell
-constexpr int     IR_CAL_RF        = 2702;
+// Front LF/RF at cell center with correct front-wall gap (2026-06-24 bench: 570/570).
+constexpr int     IR_CAL_LF        = 570;
+// L45/R45 side sensors @ cell center (2026-06-24 bench: L45=522 R45=690).
+// Touching left wall L45≈3600; touching right wall R45≈4000; open side <350.
+constexpr int     IR_CAL_L45       = 522;
+constexpr int     IR_CAL_R45       = 690;
+constexpr int     IR_CAL_RF        = 570;
 
 // Wall-presence thresholds (legacy fixed; overridden by SIDE_ADAPTIVE in Tuning [J]).
 // Side (SIDE_ADAPTIVE=false only): open~0-80, wall~300-400; <150 = open.
