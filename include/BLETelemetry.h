@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <NimBLEAdvertisementData.h>
 #include "IRSensors.h"
 #include "Pose.h"
 
@@ -55,7 +56,8 @@ struct BLERxCB : public NimBLECharacteristicCallbacks {
 
 static void bleInit() {
     NimBLEDevice::init("bromouse");
-    NimBLEDevice::setPower(9);  // max TX power for reliable discovery
+    NimBLEDevice::setPower(9);   // max TX power for reliable discovery
+    NimBLEDevice::setMTU(517);   // larger ATT payloads once connected
 
     g_bleServer = NimBLEDevice::createServer();
     g_bleServer->setCallbacks(new BLESrvCB());
@@ -70,17 +72,35 @@ static void bleInit() {
 
     svc->start();
 
+    // Web Bluetooth namePrefix filter needs the name in a discoverable packet.
+    // 128-bit service UUID alone fills most of the 31-byte ADV payload, so put
+    // the name in the primary advertisement and the NUS UUID in scan response.
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-    adv->addServiceUUID(BLE_SVC_UUID);
+    adv->setName("bromouse");
+    adv->enableScanResponse(true);
+    NimBLEAdvertisementData scanResp;
+    scanResp.addServiceUUID(BLE_SVC_UUID);
+    adv->setScanResponseData(scanResp);
     adv->start();
 
     Serial.println("[BLE] advertising as 'bromouse'");
 }
 
+static void bleSendRaw(const uint8_t* data, size_t len) {
+    if (!g_bleConn || !g_bleTx || len == 0) return;
+    const size_t maxChunk = 20;  // safe default ATT payload before MTU exchange
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunk = min(maxChunk, len - offset);
+        g_bleTx->setValue(data + offset, chunk);
+        g_bleTx->notify();
+        offset += chunk;
+        if (offset < len) delay(2);
+    }
+}
+
 static void bleSend(const char* msg) {
-    if (!g_bleConn || !g_bleTx) return;
-    g_bleTx->setValue((const uint8_t*)msg, strlen(msg));
-    g_bleTx->notify();
+    bleSendRaw((const uint8_t*)msg, strlen(msg));
 }
 
 static void bleSendf(const char* fmt, ...) {
@@ -88,8 +108,12 @@ static void bleSendf(const char* fmt, ...) {
     char buf[256];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    int n = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
     va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n >= sizeof(buf) - 2) n = (int)sizeof(buf) - 3;
+    buf[n++] = '\n';
+    buf[n] = '\0';
     bleSend(buf);
 }
 
@@ -145,8 +169,8 @@ static void bleMazeDump(MicromouseMaze& maze) {
     for (int r = 0; r < 6; r++)
         for (int c = 0; c < 3; c++)
             len += snprintf(buf + len, sizeof(buf) - len,
-                            "%d%s", maze.flood[r][c], (r==5&&c==2)?"":",");
-    snprintf(buf + len, sizeof(buf) - len, "]}");
+                    "%d%s", maze.flood[r][c], (r==5&&c==2)?"":",");
+    len += snprintf(buf + len, sizeof(buf) - len, "]}\n");
     bleSend(buf);
 }
 

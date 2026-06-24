@@ -265,7 +265,7 @@ void loop() {
                 }
             } else if (strcmp(cmd, "CLEAR_NVS") == 0) {
                 nvsClearWalls();
-                bleSend("{\"t\":\"ST\",\"v\":\"NVS_CLEARED\"}");
+                bleSendf("{\"t\":\"ST\",\"v\":\"NVS_CLEARED\"}");
             }
         }
     }

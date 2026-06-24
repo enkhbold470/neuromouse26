@@ -93,7 +93,10 @@ hr   { border:none; border-top:1px solid #222; margin:10px 0; }
 .t-wall { color:#fbbf24; }
 .t-mot  { color:#a78bfa; }
 
-.cmd-row { display:flex; gap:6px; margin-top:6px; }
+#setup-banner { display:none; background:#3b2a00; border:1px solid #fbbf24;
+               color:#fde68a; padding:10px 12px; border-radius:4px; margin-bottom:10px;
+               line-height:1.5; font-size:12px; }
+#setup-banner code { background:#1a1a1a; padding:1px 4px; border-radius:2px; }
 #custom { flex:1; background:#1a1a1a; border:1px solid #444; color:#e0e0e0;
           padding:6px 10px; border-radius:4px; font-family:monospace; font-size:13px; }
 </style>
@@ -101,9 +104,19 @@ hr   { border:none; border-top:1px solid #222; margin:10px 0; }
 <body>
 <h1>bromouse — live monitor</h1>
 
+<div id="setup-banner">
+  Web Bluetooth needs a secure page — not <code>file://</code>.
+  From the repo root run:
+  <code>python3 -m http.server 8765 --directory tools</code>
+  then open
+  <a href="http://localhost:8765/ble-debug.html" style="color:#4fc3f7">http://localhost:8765/ble-debug.html</a>
+  in Chrome. On macOS also enable Bluetooth for Google Chrome in System Settings → Privacy &amp; Security → Bluetooth.
+</div>
+
 <div class="row">
   <div id="status">disconnected</div>
-  <button class="primary" id="btnConnect">Connect BLE</button>
+  <button class="primary" id="btnConnect">Connect bromouse</button>
+  <button id="btnConnectAll" title="If filtered scan shows nothing">Show all devices</button>
   <button id="btnDisconnect" disabled>Disconnect</button>
   <button id="btnClear" style="margin-left:auto">Clear log</button>
 </div>
@@ -362,16 +375,23 @@ function handleLine(line) {
 }
 
 // ── BLE connect/send ─────────────────────────────────────────────────────────
-async function connect() {
+async function connect(showAll = false) {
+  if (!window.isSecureContext) {
+    document.getElementById('setup-banner').style.display = 'block';
+    log('Web Bluetooth blocked on file:// — use http://localhost (see banner)', 't-err');
+    statusEl.textContent = 'needs localhost';
+    statusEl.className = 'error';
+    return;
+  }
   try {
-    log('scanning…');
-    device = await navigator.bluetooth.requestDevice({
-      filters: [
-        { namePrefix: 'bromouse' },
-        { namePrefix: 'neuro' }
-      ],
-      optionalServices: [NUS_SERVICE]
-    });
+    log(showAll ? 'scanning all BLE devices…' : 'scanning for bromouse…');
+    const opts = showAll
+      ? { acceptAllDevices: true, optionalServices: [NUS_SERVICE] }
+      : {
+          filters: [{ namePrefix: 'bromouse' }],
+          optionalServices: [NUS_SERVICE]
+        };
+    device = await navigator.bluetooth.requestDevice(opts);
     device.addEventListener('gattserverdisconnected', () => {
       log('disconnected', 't-err');
       setConnected(false);
@@ -390,18 +410,22 @@ async function connect() {
         handleLine(rxBuffer.slice(0, nl).trimEnd());
         rxBuffer = rxBuffer.slice(nl + 1);
       }
-      // If no newline but looks like complete JSON, handle it
-      if (rxBuffer.startsWith('{') && rxBuffer.endsWith('}')) {
-        handleLine(rxBuffer);
-        rxBuffer = '';
-      }
     });
     setConnected(true);
-    log('connected', 't-sys');
+    log(`connected to ${device.name || 'device'}`, 't-sys');
     setTimeout(() => send('DUMP'), 400);  // request maze dump on connect
   } catch(e) {
-    log(`error: ${e.message}`, 't-err');
+    const msg = e.message || String(e);
+    log(`error: ${msg}`, 't-err');
+    statusEl.textContent = 'connect failed';
     statusEl.className = 'error';
+    if (msg.includes('User cancelled')) return;
+    if (!showAll && (msg.includes('found') || msg.includes('No device'))) {
+      log('tip: try "Show all devices" and pick bromouse', 't-sys');
+    }
+    if (msg.includes('not available') || msg.includes('permission')) {
+      document.getElementById('setup-banner').style.display = 'block';
+    }
   }
 }
 
@@ -416,7 +440,8 @@ async function send(cmd) {
 }
 
 // Wire buttons
-document.getElementById('btnConnect').onclick    = connect;
+document.getElementById('btnConnect').onclick    = () => connect(false);
+document.getElementById('btnConnectAll').onclick  = () => connect(true);
 document.getElementById('btnDisconnect').onclick = () => device?.gatt.connected && device.gatt.disconnect();
 document.getElementById('btnClear').onclick      = () => { terminal.innerHTML = ''; };
 document.getElementById('btnExplore').onclick    = () => send('EXPLORE');
@@ -431,6 +456,12 @@ custom.addEventListener('keydown', e => { if(e.key==='Enter') document.getElemen
 
 // Initial maze render
 updateMazeDom();
+
+if (!window.isSecureContext || location.protocol === 'file:') {
+  document.getElementById('setup-banner').style.display = 'block';
+} else if (!navigator.bluetooth) {
+  log('Web Bluetooth not supported — use Chrome/Edge on desktop', 't-err');
+}
 </script>
 </body>
 </html>
