@@ -1,0 +1,54 @@
+---
+description: Micromouse26 ESP32-S3 firmware — module map, build, invariants
+alwaysApply: true
+---
+
+# Micromouse26 (neuromouse26)
+
+ESP32-S3 micromouse firmware: Arduino + PlatformIO, single-TU (`src/main.cpp` text-includes header modules in `include/`).
+
+**Full guides:** `CLAUDE.md` (agent ops) · `GEMINI.md` (architecture + embedded patterns)
+
+## Where to change what
+
+| File | Owns |
+|---|---|
+| `include/Tuning.h` | All `constexpr` knobs; `BASE_BREAKAWAY_PWM` is master power |
+| `include/IMU.h` | MPU-6500, `yawDeg`/`gzFilt`/`updateYaw()` |
+| `include/IRSensors.h` | IR pairs, EMA, `readIR`/`sampleIR` |
+| `include/Pose.h` | Pose, mode flags, `fastRunCruiseTps` |
+| `include/MotionScript.h` | `RunPhase`, `script[]`, push helpers |
+| `include/Persistence.h` | NVS (`mm26` namespace) |
+| `include/BLETelemetry.h` | NimBLE NUS server (`bromouse`) |
+| `include/Planner.h` | Maze setup, wall sense, `buildMoveScript` |
+| `include/OLED.h` | U8G2 UI, `autoCalGyroBeforeStart()` |
+| `src/main.cpp` | Hardware, PID, state machine, `rTicks()` |
+
+New tuning → `Tuning.h`. New screen → `OLED.h`. Motion numerics → `Tuning.h`; PID/settle behavior → `main.cpp` RUN case. Always use `rTicks()`, never `rightEnc.getTicks()` directly.
+
+## Build & flash
+
+```bash
+~/.platformio/penv/bin/pio run -e main -t upload   # production
+~/.platformio/penv/bin/pio device monitor             # 115200 baud
+```
+
+After any firmware change: build + upload without asking. Tune drivetrain in `wall-follow-pcnt` env first.
+
+## Critical invariants
+
+- `frictionZone ≤ holdBand` — else stall dead zone
+- `MAX_SCRIPT ≥ 4` (180° dead-end needs 4 steps)
+- LEDC = Arduino 2.x: `ledcSetup` + `ledcAttachPin` (not 3.x `ledcAttach`)
+- `yawDeg` resets at every phase boundary
+- Encoder `inverted=true` on both PCNT; flip with `MOTOR_*_INV` together
+- `MOTOR_SLEEP=GPIO41` must be HIGH in every env's `setup()`
+- Reverse = `PH_FORWARD` with negative target
+- `CELL_TICKS=1400` hand-measured — re-roll if wheels change
+- No `fastFwdRoll` — brake at every FWD settle
+- `TELEMETRY=false` before competition
+- BLE: device `bromouse`; debug UI `tools/ble-debug.html`; macOS must grant Chrome Bluetooth access
+
+## State machine (short)
+
+`IDLE` → Explore/Fast → `EXPLORE_THINK` → `RUN` → `EXPLORE_THINK` | `GOAL` | `CRASH`/`BOXED`. BLE `EXPLORE`/`FAST` from IDLE mirror button presses.

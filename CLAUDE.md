@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-@GEMINI.md
+See also: [GEMINI.md](GEMINI.md) (architecture + embedded patterns). Cursor rules: `.cursor/rules/`, entry point: [AGENTS.md](AGENTS.md).
 
 ---
 
@@ -100,6 +100,8 @@ EXPLORE_THINK   → CRASH/BOXED (bestDist == FLOOD_INFINITY; explore tries 180°
 GOAL / CRASH    → IDLE      (button)
 ```
 
+BLE commands `EXPLORE` and `FAST` also trigger state transitions from IDLE (same as button presses).
+
 ---
 
 ## Critical invariants
@@ -120,6 +122,43 @@ GOAL / CRASH    → IDLE      (button)
 - **`g_smoothMode`** (in `Pose.h`) — runtime toggle (OLED "Mode: Smooth/Classic") enabling `PH_CURVE` continuous arcs in fast run. Off by default; arc code is gated behind `CURVE_ENABLE` in `Tuning.h [I]`.
 - **BLE device name** — robot advertises as `"bromouse"`. Browser connects via `tools/ble-debug.html` using Web Bluetooth (NUS UUIDs). Commands: `EXPLORE`, `FAST`, `STOP`, `DUMP`, `CLEAR_NVS`. Telemetry JSON types: `ST` (state), `POS`, `WALL`, `MOT` (motion, gated 10 Hz), `BAT`, `CRASH`, `MAZE`.
 - **Side sensor contamination** — L45/R45 sensors at 45° (PCB-verified from pick-and-place U6=45°, U9=315°). Front wall at 90 mm appears at 127 mm diagonal → phantom side reads. Fix: `senseAndStoreWalls()` skips side re-sensing when front wall confirmed; mid-cell sense (at 50% forward) already ran without contamination.
+
+---
+
+## BLE telemetry — implementation status (2026-06-24)
+
+### What works
+- `include/BLETelemetry.h` — full NimBLE GATT server with NUS UUIDs. Compiles and advertises (`[BLE] advertising as 'bromouse'` confirmed on serial).
+- `src/main.cpp` — fully wired: `bleInit()` in setup; `bleGetCmd()` in loop for RX commands; `bleState/blePos/bleWall/bleMotion/bleCrash/bleMazeDump` at all key state transitions.
+- `tools/ble-debug.html` — complete single-file monitor: 6×3 maze grid visualization, IR bars, motion panel, state badge, command buttons (Explore/Fast/Stop/Dump/Clear NVS), JSON telemetry parser for all message types.
+
+### Open issue: "bromouse" not visible in Chrome device picker
+**Symptom:** robot says `[BLE] advertising as 'bromouse'` on serial, but Chrome's Web Bluetooth picker shows nothing.
+
+**Debugging done:**
+- `{ services: [NUS_SERVICE] }` filter → removed (required UUID in raw adv packet, NimBLE v2 may not include it there).
+- `{ namePrefix: 'bromouse' }` filter only → still not visible.
+- `NimBLEDevice::setPower(9)` → added for max TX power.
+- Explicit `adv->setName("bromouse")` → tried and removed (NimBLE v2 includes device name automatically from `NimBLEDevice::init()`).
+- `g_bleServer->start()` → tried, caused hang/crash (NimBLEService::start() + server->start() conflict in v2). Reverted.
+- OS Bluetooth scan (`system_profiler SPBluetoothDataType`) → does not list bromouse (expected for non-paired BLE peripherals).
+- Python `bleak` scan → crashes with SIGABRT (macOS Bluetooth permission denied to terminal).
+
+**Most likely cause:** macOS Privacy & Security → Bluetooth → Chrome is NOT in the allowed list. The user must manually grant Chrome Bluetooth access in macOS System Settings.
+
+**To fix (user action required):**
+1. macOS System Settings → Privacy & Security → Bluetooth
+2. Add/enable Google Chrome
+3. Re-open `tools/ble-debug.html` in Chrome and click Connect BLE
+
+**Alternative:** Install [nRF Connect for Mobile](https://www.nordicsemi.com/Products/Development-tools/nRF-Connect-for-mobile) on phone — scan for "bromouse" to verify the robot IS advertising before blaming Chrome.
+
+**NimBLE v2 notes:**
+- `NimBLEServerCallbacks::onConnect/onDisconnect` take `(NimBLEServer*, NimBLEConnInfo&)` — NOT `(NimBLEServer*)`.
+- `NimBLECharacteristicCallbacks::onWrite` takes `(NimBLECharacteristic*, NimBLEConnInfo&)`.
+- `NimBLEAdvertising::setScanResponse()` and `setMinPreferred()` removed — use `setMinInterval()`.
+- `NimBLEDevice::setPower(int8_t dbm)` replaces `setPower(ESP_PWR_LVL_P9)`.
+- `NimBLEService::start()` is deprecated but still needed (without it services don't register); do NOT also call `g_bleServer->start()` — it conflicts and hangs.
 
 ---
 

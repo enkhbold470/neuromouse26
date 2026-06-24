@@ -1,0 +1,25 @@
+---
+description: Header-only module conventions for include/ and main.cpp
+globs: include/**/*.h,src/main.cpp
+alwaysApply: false
+---
+
+# Header-only modules
+
+Single translation unit: `src/main.cpp` `#include`s each `include/*.h` once. No second `.cpp` in `[env:main]` without converting file-scope `static` globals to `inline` (C++17).
+
+## Patterns
+
+- Pins/thresholds → `PinConfig.h`. Tuning constants → `Tuning.h` only.
+- No `delay()` in RUN PID paths — use `micros()`/`millis()`.
+- PWM: 200 Hz, 10-bit LEDC via `MicromouseMotor`.
+- Right encoder distance: `rTicks()` wrapper only.
+- `WifiDebug.h` is not compiled into main.
+
+## Motion script
+
+`buildMoveScript` (Planner.h) pushes `PhaseStep`s (max 8): FWD, SPOT_L/R, ALIGN_FRONT, fused fast-run straights. `onPhaseActivate`/`phaseEnter` reset per-phase encoder+yaw snapshots.
+
+## Adding a test env
+
+In `platformio.ini`: `extends = common`, `build_src_filter = +<../test/<file>.cpp>`. Replicate `MOTOR_SLEEP` HIGH in setup.
