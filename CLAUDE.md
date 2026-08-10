@@ -1,211 +1,139 @@
-# CLAUDE.md
+# CLAUDE.md — Micromouse26 ESP32-S3 Firmware Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the single, authoritative guide for AI assistants (Claude, Gemini, etc.) and developers working in this repository.
 
-@GEMINI.md
+> **🏆 3rd Place Overall · All America Micromouse Contest 2026 (AAMC @ UCLA IEEE)**  
+> **MCU:** ESP32-S3 (Xtensa LX7 dual-core, 240 MHz) | **Framework:** Arduino on PlatformIO (stock `espressif32`, Arduino 2.x)
 
 ---
 
-## File layout (post-refactor 2026-05-20)
+## 1. Hardware Architecture & Hardware Context
 
-Domain code is split into header-only modules in `include/`. Each is text-included once into `src/main.cpp` (single TU; `build_src_filter = +<main.cpp>`). To touch a subsystem, open the matching header. The README in `include/` has the full map; the short version:
-
-| File | Owns |
+| Component | Specification & Implementation Details |
 |---|---|
-| `include/Tuning.h` | Every `constexpr` tuning knob (sections [A]–[F], [H]). The ★★★ MAIN POWER KNOB ★★★ is `BASE_BREAKAWAY_PWM`. |
-| `include/IMU.h` | MPU-6500 + `yawDeg`/`gzFilt`/`yawTargetDeg`/`imuReady` + `updateYaw()`. |
-| `include/IRSensors.h` | `PAIRS`, `irVal`, IR-centering EMA state (`irLSm`/`irRSm`/`irFirstSample`), `readIR`/`sampleIR`. |
-| `include/Battery.h` | `readVbat`, `batPct`. |
-| `include/Pose.h` | `robotRow/Col/Heading`, `plannedRow/Col/Heading`, `exploreMode`, `fastRunMode`, `fastRunCruiseTps`, `pendingOffsetTicks`. |
-| `include/MotionScript.h` | `RunPhase`/`TurnDir` enums, `PhaseStep`, `script[]`, `scriptLen/Idx`, `runPhase/Target/TurnDir`, `phaseStartTL/TR/Us`, the `scriptPush*` helpers. |
-| `include/Persistence.h` | NVS save/load for walls + fast-run speed (namespace `mm26`). |
-| `include/Planner.h` | `setupMaze`, `senseAndStoreWalls`, `buildMoveScript` (+ fast-run straight-chain fusion). |
-| `include/OLED.h` | U8G2 instance + menu + run + diag screens + auto gyro-cal. |
-| `src/main.cpp` | Hardware objects (motors, encoders, maze), IR-centering PID, `rTicks`/`stopMotors`/`buttonEdge`, `onPhaseActivate`/`phaseEnter`/`scriptKick`, `setup()`, full `loop()` state machine. ~700 lines. |
-
-**Adding a new tuning knob** → put it in `Tuning.h`, not in any other header.
-**Adding a new screen** → put it in `OLED.h`.
-**Changing motion control numerics** → `Tuning.h`. **Changing motion control behavior** (PID structure, settle logic) → `src/main.cpp` RUN case.
-
-If you ever add a second `.cpp` to `[env:main]`, convert the file-scope `static` globals in the headers to `inline` (C++17) or move definitions into a `.cpp`.
+| **MCU** | ESP32-S3-WROOM (Xtensa LX7 dual-core, 240 MHz). Single translation unit build (`src/main.cpp`). |
+| **Framework & API** | Arduino on PlatformIO using **stock `platform = espressif32`** (Arduino 2.x / ESP-IDF 4.x). LEDC API is 2.x style (`ledcSetup` + `ledcAttachPin` + `ledcWrite`), NOT 3.x `ledcAttach`. |
+| **Motor Driver** | DRV8833 dual H-bridge — one driver channel per motor. Fast decay `drive(±speed)` (inactive IN held LOW); half-duty slow decay `brake()` (writes both INs to `MOTOR_PWM_MAX / 2`). |
+| **Motors** | GA-N20 brushed DC gear motors — **1:30 gear ratio, 500 RPM @ 6V**, powered by 2S LiPo (7.4V nominal). |
+| **Encoders** | Magnetic quadrature encoders (7 CPR disk on motor shaft). Decoded via ESP32-S3 **PCNT hardware peripheral (4× decode)** in `MicromouseEncoderPCNT.h`. Both encoders constructed with `inverted=true`. `CELL_TICKS=1400` is hand-measured per 180 mm cell. Right ticks are scaled by `RIGHT_ENC_SCALE=1.0135f` via the `rTicks()` wrapper. |
+| **IR Sensors** | 4-sensor differential array (SFH4545 narrow 950nm emitters + TEFT4300 phototransistors): LF, L, R, RF. **LF/RF aim ~30° forward-outward** (front detect + look-ahead); **L/R aim perpendicular (~90° sideways)** for true side-wall reads. Differential ambient-subtracted reads in `readIR()`. |
+| **IMU / Gyro** | MPU-6500 (SPI) — DLPF=3 (41 Hz BW) to reject PWM harmonics. Integrated Z-axis yaw (`updateYaw()`) for spot turns and forward yaw-hold. |
+| **Navigation** | 16×16 flood-fill BFS (`MicromouseMaze.h`); home practice active region is 6×3 with goal `(5,2)`. NVS-persisted walls (namespace `mm26`, key `walls`). |
+| **Display & UI** | 0.96" 128×64 SSD1306 OLED (I2C `0x3C`) + single tactile Linear Blue Switch (`BUTTON_1=GPIO42`) + Buzzer (`GPIO40`). Rotary encoder used for OLED menu scrolling and Fast Speed adjustment. |
+| **Battery** | 300 mAh 2S LiPo (7.4V nominal). Resistor divider `BAT_VDIV_MULT=3.751f` → 0–100% linear SOC. |
 
 ---
 
-## Build & Flash
+## 2. Core Development Principles
+
+1. **Single Translation Unit Architecture:** `build_src_filter = +<main.cpp>` means `src/main.cpp` is the only `.cpp` compiled into `[env:main]`. All project headers in `include/` are text-included exactly once. File-scope `static` variables in headers are safe under this pattern.
+2. **No Blocking Delays in Control Loops:** The RUN executor in `main.cpp::loop()` paces its position-PID via `micros()`. Never use `delay()` inside any motion control path.
+3. **Encoders via Hardware PCNT:** `MicromouseEncoderPCNT.h` uses the ESP32-S3 PCNT peripheral for 4× quadrature decoding with zero CPU overhead. All right-encoder distance reads MUST go through the `rTicks()` wrapper (`main.cpp`).
+4. **Arduino 2.x LEDC PWM (200 Hz):** `MOTOR_PWM_FREQ_HZ = 200` (10-bit PWM, 0–1023). 200 Hz empirically yields maximum breakaway torque on this DRV8833 + N20 chassis.
+5. **No Magic Numbers:** Every pin assignment lives in `include/PinConfig.h`; every tuning parameter lives in `include/Tuning.h`.
+6. **Automatic Gyro Calibration:** `autoCalGyroBeforeStart()` (in `include/OLED.h`) runs automatically before every Explore or Fast Run leg.
+7. **Flash On Every Code Edit:** Standard workflow: after making any code edit, compile and flash immediately using `pio run -e main -t upload`. Post-upload chime script is `tools/notify_upload.py`.
+
+---
+
+## 3. Project File Layout
+
+```
+neuromouse26/
+├── include/
+│   ├── README                      Module inventory & header include map
+│   ├── Tuning.h                    Every tunable constant (Sections [A]–[H]). Master knob: BASE_BREAKAWAY_PWM
+│   ├── PinConfig.h                 Pin mappings, PWM/IR limits, IR_CAL defaults, wall thresholds
+│   ├── IMU.h                       MPU-6500 register stack, bias capture, updateYaw() integration
+│   ├── IRSensors.h                 4-sensor IR array, ambient-subtracted reads, EMA filters
+│   ├── IRCalibration.h             Per-cm front IR LUT & estimateFrontDistMM()
+│   ├── MotionScript.h              RunPhase enums, PhaseStep struct, script[] array, pusher helpers
+│   ├── Planner.h                   setupMaze(), senseAndStoreWalls(), buildMoveScript() + straight fusion
+│   ├── MicromouseMaze.h            16×16 grid + flood-fill BFS + bestDirectionBiased()
+│   ├── MicromouseMotor.h           DRV8833 wrapper (LEDC PWM drive/brake/coast)
+│   ├── MicromouseEncoderPCNT.h     ESP32-S3 PCNT 4× quadrature decoder
+│   ├── OLED.h                      SSD1306 U8G2 instance, menu, diagnostic screens, auto gyro-cal
+│   ├── Persistence.h               ESP32 NVS save/load for walls & fast-run cruise speed
+│   ├── Battery.h                   Vbat ADC sampling & 0–100% linear SOC calculation
+│   ├── Pose.h                      Robot pose (row, col, heading), mode flags, fastRunCruiseTps
+│   ├── MicromouseEncoder.h         Legacy ISR encoder (unused by main firmware)
+│   ├── PID.h                       Generic PID struct (unused by main motion stack)
+│   └── WifiDebug.h                 Live HTTP telemetry server & web debugger UI (dormant side env)
+├── src/
+│   └── main.cpp                    Hardware instances, PID controller, setup() & loop() state machine (~700 lines)
+├── test/                           Standalone test sketches (one env per file in platformio.ini)
+├── tools/
+│   └── notify_upload.py            Post-upload audible chime script
+├── platformio.ini                  PlatformIO environment definitions
+├── LICENSE                         MIT License
+├── CONTRIBUTING.md                 Contribution rules
+├── CLAUDE.md                       Authoritative agent & project guide (this file)
+└── README.md                       Public open-source landing page
+```
+
+---
+
+## 4. Build, Upload & Test Commands
 
 ```bash
-~/.platformio/penv/bin/pio run -e main -t upload     # build + flash production firmware
-~/.platformio/penv/bin/pio device monitor             # serial @ 115200
-~/.platformio/penv/bin/pio run -e <env>               # build only
-~/.platformio/penv/bin/pio run -t clean
+# Production Firmware (Main Robot Stack)
+pio run -e main -t upload     # Build and flash main firmware
+pio device monitor            # Serial monitor @ 115200 baud
+
+# Standalone Subsystem Test Environments
+pio run -e ir-test -t upload       # 4-channel IR diagnostics & front distance LUT
+pio run -e encoder-test -t upload  # PCNT tick counts & wheel RPM
+pio run -e mpu6500 -t upload       # Gyro bias capture & yaw integration stream
+pio run -e ws2812b -t upload       # RGB status LED test
+pio run -e wall-follow-pcnt -t upload # Drivetrain reference sketch (no solver)
+
+# Clean Build
+pio run -t clean
 ```
-
-**Convention in this repo:** *every code change is followed by an upload, not just a build.* When iterating on a sketch, flash on every edit so the user can immediately re-test on hardware. The user has standing approval for `pio run -e <env> -t upload` after a code modification — don't ask.
-
-Post-upload chime: `tools/notify_upload.py` (wired as `extra_scripts` in `[common]`).
-
-### Live test sketches (each is a standalone `.cpp` selected via `build_src_filter`)
-
-| Env | Purpose |
-|---|---|
-| `main` | Production firmware — PCNT + IMU + IR + flood-fill solver |
-| `wall-follow-pcnt` | Drivetrain reference. Same script/PID/IMU stack as main, no flood-fill. Tune knobs here first. |
-| `sensor-cal-ble` | Re-capture IR cal (paste output into `PinConfig.h::IR_CAL_*`) |
-| `encoder-test` | Live tick stream for hand-roll measurement |
-| `imu-turn` | Standalone MPU-6500 trapezoidal turn (legacy) |
-| `wall-follow-cells` | Legacy ISR-encoder cell counter (predecessor of `wall-follow-pcnt`) |
-| `motor-ble`, `motor-freq`, `velocity-pid*`, `wall-follow`, `side-open-turn`, `ir-test`, `ir-turn-test` | Older diagnostics, kept for hardware bring-up |
-
-`test/ble-test.cpp`, `test/batt-volt.cpp`, `test/buzzer.cpp`, `test/ws2812b.cpp` have no `[env:*]` block — adapt one of the existing blocks if you need them.
 
 ---
 
-## Architecture
+## 5. Motion Control & Drivetrain Architecture
 
-The production stack (in `src/main.cpp`) and the reference drivetrain (in `test/wall-follow-encoder-pcnt.cpp`) share the same motion code. Tune one, port to the other.
+Movement is managed via a **phase-script over a position-PID core**. A single move produces a list of `PhaseStep` records (max 8) constructed by `buildMoveScript()` in `include/Planner.h`.
 
-### Drivetrain: phase-script over a position-PID core
+### Phase Types (`RunPhase` in `include/MotionScript.h`)
 
-Movement is expressed as a sequence of `PhaseStep` records (max 8). Each step picks a `RunPhase` and a tick/degree target. The executor walks the script, resets encoders + zero-yaw between steps, and exits to a higher layer (IDLE for one-shot tests, EXPLORE_THINK for flood-fill) when the last step settles.
+| Phase | Description & Mechanism |
+|---|---|
+| `PH_FORWARD` | Position-PID with trapezoidal velocity profiling (`vAccel = sqrt(2·a·xDone)`, `vDecel = sqrt(2·a·xRem)`, cruise at `vCruise`). Signed tick targets (negative = reverse). Steering bias combines IR centering + encoder balance + IMU yaw hold. |
+| `PH_SPOT` | Both wheels rotate in opposite directions. Yaw-PID closed on `dy = yawDeg − phaseStartYawDeg`. |
+| `PH_PIVOT` | Single-wheel pivot (inner wheel braked, outer wheel drives). Preserved in code but no longer pushed by `buildMoveScript` (R-pivots bumped side walls). |
+| `PH_ALIGN_FRONT` | Slow creep until front IR sensors reach calibrated wall distance (`irVal[0] ≈ ALIGN_LF_TARGET`, `irVal[3] ≈ ALIGN_RF_TARGET` at 37.5 mm). Used in dead-end 180° exit sequence. |
+| `PH_REVERSE_TO_BACK` | Samples front IR on activation to compute reverse ticks = `−(frontMm + BACKUP_OFFSET_MM) × ticksPerMm`, then reclassifies as `PH_FORWARD`. |
 
-```
-RunPhase variants (include/MotionScript.h):
-  PH_FORWARD          — encoder-tick target. Signed (negative = reverse).
-                        IR centering + IMU yaw hold + encoder balance bias.
-                        Trapezoid velocity profile in the executor.
-  PH_PIVOT            — single-wheel pivot. Inner wheel braked, outer drives.
-                        Kept callable but `buildMoveScript` no longer pushes
-                        it (pivots were replaced with SPOT after R turns
-                        kept bumping walls). Target in degrees (IMU mode).
-  PH_SPOT             — both wheels opposite. Robot rotates about its centre.
-                        90° and 180° both expressed in degrees.
-  PH_REVERSE_TO_BACK  — at activation, samples front IR and computes a reverse
-                        tick target = −(frontMm + BACKUP_OFFSET_MM) × ticks/mm,
-                        then re-classifies itself as PH_FORWARD so the
-                        standard PID handles the reverse motion. Not currently
-                        pushed by `buildMoveScript`; kept available for future
-                        re-anchor primitives.
-  PH_ALIGN_FRONT      — slow creep until LF ≈ ALIGN_LF_TARGET and
-                        RF ≈ ALIGN_RF_TARGET (37.5 mm front-wall gap). Used
-                        in the dead-end exit sequence before the 180° spin.
-```
-
-(The legacy `PH_FWD_TO_WALL` phase was removed in the 2026-05-20 refactor
-along with the unused `trapezoidPos`/`trapezoidVel` helpers.)
-
-`onPhaseActivate()` is called from `scriptKick()` and every endPhase-advance. It's the hook for deferred-target phases (currently only `PH_REVERSE_TO_BACK`).
-
-### Position PID is one block, parameterised per phase
-
-The PID code in the `RUN` state is mode-blind. The `imuMode` selector picks one of two gain banks:
-- `kp/kd/maxPwm/stictionPwm/frictionZone/holdBand/...` — encoder ticks (forward).
-- `yawKp/yawKd/yawMaxPwm/yawStictionPwm/yawFrictionZone/yawHoldBand/...` — degrees (pivot, spot).
-
-Both banks share the same stall-escape + settle-band exit logic, just different bands/units. **Don't fork the PID** when adding a new phase — pick which bank you want and plumb through.
-
-Forward velocity damping uses `(Δavg)/dt` LPF. IMU velocity damping uses `gzFilt` directly (already low-passed in `updateYaw()`).
-
-### Steering bias during forward = sum of three sources
-
-`pwmL = throttle − bias`, `pwmR = throttle + bias`, with `bias` = sum of:
-1. **IMU yaw hold** — `−T.yawHoldKp × yawDeg`. Primary heading reference. Yaw is reset to 0 at every phase boundary, so each leg has its own "straight ahead".
-2. **IR centering** — confidence-weighted `cR·(irR − calR) − cL·(irL − calL)`. The `conf` ramp 200…800 raw counts replaces threshold-based wall detection so there's no on/off snap when a wall fades in/out. Edge events (`dL/dR > ±300`) print one-shot `[EVENT] L wall opened` etc. **Sensor geometry (changed 2026-05-19):** L/R aim ~90° perpendicular (true side reads); LF/RF still ~30° forward-outward (front-detect only). `IR_CAL_L=1800` / `IR_CAL_R=2000` re-captured 2026-05-19 with robot centered in cell (4.5 cm to each side wall). The old "side cone catches front wall at `frontMm < 60`" caveat no longer applies.
-3. **Encoder balance** — `(tL − tR) × T.balanceKp`. Secondary symmetry trim.
-
-Pivot and spot phases skip IR and balance — they're rotational, no lateral position to correct.
-
-### MPU-6500 yaw integration
-
-Configured DLPF=3 (41 Hz BW) to reject motor-PWM harmonics. Z-axis bias captured by 300 samples at boot (robot must be still). `updateYaw()` runs at the top of every loop iteration, integrating `gz − bias` with a `|gz| < 0.05 °/s` deadband and a `gzFilt` LPF (0.7/0.3) for the PID derivative term.
-
-**Convention:** right rotation → `yawDeg < 0`. Pivot/spot progress = `−yawDeg` for right turns, `+yawDeg` for left. The yaw-hold sign in the forward path is `−T.yawHoldKp × yawDeg` to compensate (right drift → negative yaw → positive bias → steer left).
-
-### Cal Gyro is automatic, not button-triggered
-
-`autoCalGyroBeforeStart()` (in `include/OLED.h`) fires on every Explore / Fast Run start. Pipeline: show "CAL GYRO stay still" → `delay(300)` to let button-release vibration die → `calibrateGyroBias(300, 2)` → zero `yawDeg`/`yawTargetDeg`. The user doesn't have to remember to do it.
-
-### Encoder polarity is inverted on both wheels
+### Steering Bias in Forward Motion
 
 ```cpp
-MicromouseEncoderPCNT leftEnc (PCNT_UNIT_0, ENC_L_A, ENC_L_B, /*inverted=*/true);
-MicromouseEncoderPCNT rightEnc(PCNT_UNIT_1, ENC_R_A, ENC_R_B, /*inverted=*/true);
+pwmL = throttle - bias;
+pwmR = throttle + bias;
 ```
 
-`MOTOR_L_INV` / `MOTOR_R_INV` flip the IN1/IN2 pins, which made the magnetic encoders' native +1 direction mechanical reverse. The PCNT `inverted=true` flag mirrors them so `driveForward → positive ticks`. **Do not** unset this without re-tuning all forward distances.
+Where `bias` is the sum of:
+1. **IMU Yaw Hold:** `-YAW_HOLD_KP * yawDeg` (reset to `0` at every phase boundary so each leg has its own straight reference).
+2. **IR Lateral Centering:** Confidence-weighted `cR * (irVal[2] - calR) - cL * (irVal[1] - calL)` using side sensors L (ch 1) & R (ch 2).
+3. **Encoder Balance:** `(tL - tR) * BALANCE_KP`.
 
-### Right-encoder scale + `rTicks()`
+### Fast-Run Straight-Chain Fusion
 
-`RIGHT_ENC_SCALE = 1.0135f` (`PinConfig.h`). All distance math goes through `rTicks()`, never `rightEnc.getTicks()`. If you add a new code path consuming right ticks for distance, use `rTicks()`.
-
-### `CELL_TICKS = 1400` is hand-measured
-
-PCNT 4× decode gives ~7.78 ticks/mm. `CELL_TICKS = 1400` (in `Tuning.h`) was captured by rolling the robot 180 mm by hand on this exact chassis. **It is not derived from `TICKS_PER_REV`** — re-measure by hand-roll if the wheel/tire changes.
-
-`ticksPerMm = CELL_TICKS / 180.0f` is the conversion factor used by `PH_REVERSE_TO_BACK` and the dead-end script.
+In Fast Run mode, `buildMoveScript()` fuses consecutive straight cells into a single `PH_FORWARD` phase. The trapezoidal profile stretches acceleration, cruise, and deceleration over the entire corridor, eliminating per-cell braking.
 
 ---
 
-## Flood-fill explore (`src/main.cpp` only)
+## 6. Navigation & Maze Solver
 
-Active maze region: **6 rows × 3 cols**, start `(0,0)` facing North, goal `(5,2)`. `MicromouseMaze` allocates the full 16×16 grid (from `MAZE_SIZE` in `PinConfig.h`); `setupMaze()` closes the far north and east borders so flood-fill never wanders, then overrides the goal to `(5,2)`.
-
-### Move cycle
-
-```
-EXPLORE_THINK:
-  senseAndStoreWalls()                      // F/L/R relative to heading
-  if isGoal: nvsSaveWalls() → state = GOAL
-  maze.floodFill()
-  bestDir = maze.bestDirectionBiased(...)   // GreenYe: straight > L > R > U,
-                                            // +4 penalty for visited cells
-  buildMoveScript(bestDir):
-    diff==0: FWD(cellTicks + pendingOffset)
-    diff==1: SPOT_R 90 + FWD(cellTicks)
-    diff==3: SPOT_L 90 + FWD(cellTicks)
-    diff==2: ALIGN_FRONT + SPOT_R 180 + FWD(−2 cm) + FWD(1 cell pitch)
-    (fast run only) any trailing FWD is extended through consecutive straight
-    cells so the executor trapezoids over the whole chain
-  scriptKick(); state = RUN
-RUN:
-  ... runs script ...
-  on last step settle: commit plannedRow/Col/Heading → EXPLORE_THINK
-```
-
-### Start-offset and 180° re-anchor
-
-At boot the robot sits with its rear pressed against the back wall of cell `(0,0)` — its centre is `~4.1 cm` behind cell-(0,0)-centre. The first forward leg must travel `CELL_TICKS + START_OFFSET_TICKS` (1400 + 322 ≈ 22.1 cm) to land at cell-(1,0)-centre. `pendingOffsetTicks` carries this extra distance into the next forward leg, then clears.
-
-180° re-anchor (only happens at dead-ends in this maze) is handled inside `buildMoveScript` with an explicit 4-step script:
-1. `PH_ALIGN_FRONT` — creep until LF/RF hit `ALIGN_LF_TARGET` / `ALIGN_RF_TARGET` (37.5 mm gap).
-2. `SPOT_R 180°` — rotate about chassis centre; dead-end wall is now behind us.
-3. `PH_FORWARD(−DEADEND_REVERSE_MM)` — slow reverse 2 cm.
-4. `PH_FORWARD(DEADEND_FWD_MM)` — forward 1 cell pitch.
-
-`BACKUP_OFFSET_MM` (in `Tuning.h`, currently `0.0f`) is the chassis-specific shim for `PH_REVERSE_TO_BACK`. Not used by the current dead-end path but kept for any future re-anchor that wants the rear bumped against a wall directly.
-
-### Wall sensing & NVS
-
-`senseAndStoreWalls()` runs at every cell-centre arrival in EXPLORE mode (skipped in FAST mode). `setWall` mirrors each bit into the adjacent cell — single source of truth. On goal: `nvsSaveWalls()` writes the 256-byte `walls[][]` bitmask to NVS namespace `"mm26"` key `"walls"`. **Fast Run** reads it back and runs the same flood/decide/move loop with sensing disabled. **Clear NVS** menu wipes the key.
-
-IR cal (`IR_CAL_LF/L/R/RF`) is **not** persisted to NVS. Compile-time defaults in `PinConfig.h` are restored on every boot. Re-capture via `sensor-cal-ble` or the on-device menu (if added) and paste the new values into `PinConfig.h`.
+- **Grid System:** `(row, col)` 16×16 grid (`MicromouseMaze.h`). Active practice region is 6×3 with start `(0,0)` facing North and goal `(5,2)`.
+- **Flood-Fill BFS:** `bestDirectionBiased(r, c, heading, &dist)` evaluates distance to goal, preferring straight > left > right > U-turn at equal flood distance, with a +4 penalty for already-visited cells.
+- **NVS Persistence:** On reaching the goal cell, `nvsSaveWalls()` writes the 256-byte wall bitmask to ESP32 NVS namespace `"mm26"` under key `"walls"`. Fast Run reloads this map and skips sensing.
 
 ---
 
-## Critical invariants (easy to break)
-
-- **`frictionZone ≤ holdBand`** — otherwise the robot stalls in a dead zone between them where the stiction floor is disabled but settle hasn't triggered. `Tuning` comment flags this.
-- **`MAX_SCRIPT ≥ 4`** — the 180° anchor sequence is 3 steps plus optional pre-turn. Currently 8.
-- **LEDC API is Arduino 2.x** — `ledcSetup(ch, freq, bits)` + `ledcAttachPin(pin, ch)`, not 3.x's `ledcAttach(pin, freq, bits)`. `platformio.ini` uses `platform = espressif32` (stock), not `pioarduino`. Migrating to ESP-IDF 5.x / Arduino 3.x requires changing the platform line **and** every `ledc*` call together.
-- **`yawDeg` resets at every phase boundary**, not just rotational ones. Forward-leg heading hold relies on this.
-- **Encoder polarity** — both PCNT ctors take `inverted=true`. Don't change without re-tuning.
-- **Reverse targets work natively in `PH_FORWARD`** — the position PID handles negative targets symmetrically (encoders go negative as robot reverses, `posErr = target − avg` stays the right sign). Don't add a separate reverse phase; just use a negative `target`.
-- **`WifiDebug.h` is not compiled into `main`** — it's a dormant ~500-line HTTP server. Don't assume WiFi runs.
-- **The forward PID has limited brake authority by design.** `dynMax = ffMag + 40` at [src/main.cpp:683](src/main.cpp#L683), floored at `FWD_STICTION_FF + 20 = 130`. The trapezoid commands deceleration but the PID can only apply ±130 PWM total — barely above breakaway. Combined with `POS_KD = 0.1` (velocity-error contribution is ~20 PWM at 200 tps overspeed) and `uFF` still pushing forward in `dirSign` regardless of overspeed, **the position loop cannot actively brake against inertia at high cruise**. This is why explore (150 tps, 22-tick decel runway) works fine but fast run overshoots at higher `fastRunCruiseTps`.
-- **`FWD_DECEL_TPS2` is the right knob for fast-run overshoot, not `POS_HOLD_BAND` or `fastRunCruiseTps`.** Current `500 tps²` ≈ 64 mm/s² ≈ 0.0065 g — orders of magnitude below what the chassis can physically brake. Raise `FWD_DECEL_TPS2` (asymmetric from accel is fine — they're independent at [src/main.cpp:662-663](src/main.cpp#L662-L663)) and raise `POS_KD` together so the PID can enforce the steeper command. Widening `POS_HOLD_BAND` makes overshoot worse (declares "done" earlier, leaves more residual velocity into the next SPOT). Lowering `fastRunCruiseTps` is tuning around the bug.
-
----
-
-## State machine (`src/main.cpp`)
+## 7. State Machine (`src/main.cpp`)
 
 ```
 IDLE
@@ -218,20 +146,27 @@ IDLE
 
 FAST_SPEED_EDIT → IDLE      (button saves to NVS, returns to menu)
 EXPLORE_THINK → RUN         (kicks current move's script)
-RUN → EXPLORE_THINK         (script done, more cells, explore/fast)
-EXPLORE_THINK → GOAL        (at goal; explore saves NVS first)
+RUN → EXPLORE_THINK         (script done, pose committed, next move)
+EXPLORE_THINK → GOAL        (reached target cell; saves NVS)
 EXPLORE_THINK → CRASH       (flood = FLOOD_INFINITY, robot boxed in)
 
-GOAL / CRASH → IDLE         (button)
+GOAL / CRASH → IDLE         (button press clears LED and returns to menu)
 ```
-
-Gyro calibration is automatic — runs from `autoCalGyroBeforeStart()` on every
-Explore / Fast Run start. No menu option needed.
-
-`bestDirectionBiased()` returning `FLOOD_INFINITY` is the only crash condition. Unlike the legacy stack, there's no `doTurn()` convergence-failure path because the script's stall-escape exits any phase that can't make progress.
 
 ---
 
-## Battery feed-forward removed
+## 8. Serial Telemetry & Event Logging
 
-The legacy `vScale = NOMINAL_VBAT / Vbat` PWM scaling that wrapped the cascaded velocity-PI loop is gone. Position PID's stiction floor + KD damping handle pack sag implicitly. If long-run distance accuracy starts drifting with battery voltage, re-add the scale at the throttle-magnitude step (`mag = mag * vScale`).
+Enable serial logging by setting `TELEMETRY = true` in `include/Tuning.h` (section [H]). Always set `TELEMETRY = false` before competition runs to prevent Serial print latency from slowing the 199 Hz PID loop.
+
+Log tags: `[IMU]`, `[GCAL/AUTO]`, `[SENSE]`, `[PLAN]`, `[FAST]`, `[EVENT]`, `--- STEP END ---`, `--- MOVE DONE ---`.
+
+---
+
+## 9. Critical Invariants & Known Rules
+
+- **`frictionZone <= holdBand`:** Required so the robot never stalls in a dead zone between breakaway power and settle detection.
+- **`MAX_SCRIPT >= 4`:** Required for the 4-step dead-end exit sequence.
+- **`RIGHT_ENC_SCALE = 1.0135f`:** All right-tick math must use `rTicks()`.
+- **`CELL_TICKS = 1400`:** Hand-measured per 180 mm cell. Re-measure if tires or wheels change.
+- **No `fastFwdRoll`:** End of phase always brakes to a full stop before executing `PH_SPOT` turns to prevent rotational inertia drift.
