@@ -14,3 +14,10 @@ If you discover a security vulnerability or critical issue within the firmware o
 Instead, please report it privately via [GitHub Security Advisories](https://github.com/enkhbold470/neuromouse26/security/advisories).
 
 We appreciate your effort in responsibly disclosing security findings!
+
+## Credentials
+
+- Do **not** commit real WiFi SSIDs/passwords. `include/WifiDebug.h` ships with
+  placeholders (`YOUR_WIFI_SSID` / `YOUR_WIFI_PASSWORD`) and accepts local
+  overrides via `#define` / `-D` build flags.
+- Rotate any credentials that were previously committed to this repository.

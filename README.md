@@ -78,7 +78,7 @@ Driver:         DRV8833 dual H-bridge (one channel per side)
 Encoders:       7 CPR magnetic quadrature disk on motor shaft (PCNT 4× decode)
 IR Emitters:    SFH4545 (950 nm narrow-angle IR LEDs)
 IR Receivers:   TEFT4300 (NPN phototransistors)
-                - LF/RF → 30° forward-outward (front detect + look-ahead)
+                - LF/RF → straight forward (front detect + align)
                 - L/R   → 90° perpendicular (true side-wall reads)
 Gyro/IMU:       MPU-6500 (SPI) — yaw integration for spot turns
 Display:        0.96" SSD1306 128×64 OLED (I2C)
@@ -86,12 +86,12 @@ Tactile Switch: Linear Tactile Blue Keycap Switch (GPIO 42)
 Battery:        300 mAh 2S LiPo (7.4V nominal)
 ```
 
-**Key Measured Constants** (chassis-specific — re-measure if wheels/tires change):
+**Key Measured Constants** (chassis-specific — re-measure if wheels/tires change; values below match current `Tuning.h` / `PinConfig.h`):
 
 | Constant | Value | Notes |
 |---|---|---|
-| `CELL_TICKS` | 1400 | Hand-measured per 180 mm cell. Do NOT derive from CPR |
-| `RIGHT_ENC_SCALE` | 1.0135f | Left/right encoder mechanical balance factor |
+| `CELL_TICKS` | 1373 | Hand-measured per cell pitch. Do NOT derive from CPR |
+| `RIGHT_ENC_SCALE` | 1.0028f | Left/right encoder mechanical balance factor |
 | `MOTOR_PWM_FREQ_HZ` | 200 Hz | Optimal stiction-breaking torque on DRV8833 + N20 |
 | `WHEEL_DIAMETER` | 33.4 mm | |
 | `WHEEL_TRACK_MM` | 80 mm | |
@@ -100,12 +100,15 @@ Battery:        300 mAh 2S LiPo (7.4V nominal)
 
 ## Firmware Architecture
 
+Newcomers: start at [`src/main.cpp`](src/main.cpp) (top comment + `setup`/`loop`), then [`include/README.md`](include/README.md), then `Tuning.h` / `PinConfig.h`.
+
 ```
 src/
   main.cpp                  Hardware instances, PID, setup() + loop() state machine
 include/
+  README.md                 Header map, include order, LEGACY/dormant notes
   Tuning.h                  Every tuning constant — sections [A]–[H]
-  PinConfig.h               All GPIO assignments + PWM/IR caps
+  PinConfig.h               All GPIO assignments + PWM/IR caps (+ LEGACY test knobs)
   IMU.h                     MPU-6500 register stack, bias capture, yaw integration
   IRSensors.h               4-sensor IR, ambient-subtracted reads, EMA smoothing
   IRCalibration.h           Per-cm LUT + estimateFrontDistMM()
@@ -116,7 +119,8 @@ include/
   MicromouseEncoderPCNT.h   ESP32-S3 PCNT 4× quadrature decoder
   OLED.h                    SSD1306 menu, run, and diagnostics screens
   Persistence.h             NVS save/load (walls + fast-run speed)
-  WifiDebug.h               Live HTTP telemetry server & web debugger UI
+  BLECarControl.h           Optional BLE RC mode (OLED menu)
+  WifiDebug.h               DORMANT HTTP debugger (not in env:main)
   Battery.h                 Vbat ADC → 0–100% SOC
   Pose.h                    Robot pose + mode flags
 test/
@@ -129,6 +133,7 @@ test/
 IDLE → [button] → EXPLORE_THINK → RUN → GOAL
                                     ↓
                                   CRASH (flood-fill target unreachable)
+IDLE → BLE_CAR_DRIVE (optional RC) → IDLE
 ```
 
 **RUN** executes the current `PhaseStep`:
@@ -136,7 +141,6 @@ IDLE → [button] → EXPLORE_THINK → RUN → GOAL
 - **`PH_FORWARD`** — trapezoidal velocity profile, position-PID closure, IR lateral centering + yaw hold
 - **`PH_SPOT`** — IMU yaw-PID in-place turn (both wheels opposite)
 - **`PH_ALIGN_FRONT`** — slow creep to IR-calibrated front-wall gap (dead-end exit)
-
 ---
 
 ## Quickstart

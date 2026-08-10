@@ -108,7 +108,7 @@ static void buildMoveScript(AbsDir bestDir) {
         //   2. SPOT 180° — dead-end wall is now behind us.
         //   3. Reverse DEADEND_REVERSE_MM (2 cm) at low speed.
         //   4. Forward DEADEND_FWD_MM (1 cell pitch).
-        float ticksPerMm = (float)CELL_TICKS / 180.0f;
+        float ticksPerMm = (float)CELL_TICKS / CELL_MM;
         long  revTicks   = (long)(DEADEND_REVERSE_MM * ticksPerMm + 0.5f);
         long  fwdTicks   = (long)(DEADEND_FWD_MM     * ticksPerMm + 0.5f);
         scriptPushAlignFront();

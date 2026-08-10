@@ -142,6 +142,10 @@ constexpr float    IR_CENTER_KP  =   2.0f;
 constexpr float    IR_CENTER_KI  =   0.0f;
 constexpr float    IR_CENTER_KD  =   1.0f;
 constexpr int      IR_CENTER_MAX =  30;   // UCLA 2026-05-23: 15 → 60 so IR can overpower YAW_HOLD on wall contact
+// Confidence window for side-IR centering (raw differential counts).
+constexpr float    IR_CONF_LO    = 200.0f;  // below → ignore channel
+constexpr float    IR_CONF_HI    = 800.0f;  // at/above → full confidence
+constexpr float    IR_EDGE_DELTA = 300.0f;  // open-side edge detection delta
 
 // ── [E] DEAD-END HANDLING (PH_ALIGN_FRONT + 180° exit) ──────────────────────
 // Before exiting a dead-end, creep until LF≈ALIGN_LF_TARGET / RF≈ALIGN_RF_TARGET
@@ -169,8 +173,14 @@ constexpr float BACKUP_OFFSET_MM       =   0.0f; // PH_REVERSE_TO_BACK
 
 
 // ── [H] DEBUG FLAGS ─────────────────────────────────────────────────────────
+// TELEMETRY default is false for OSS / competition safety: Serial.printf in the
+// ~200 Hz RUN loop adds latency. Flip to true only while bench-debugging.
 constexpr bool USE_IMU   = true;   // false = encoder-tick turns
 constexpr bool USE_IR    = true;   // false = no IR centering
-constexpr bool TELEMETRY = true;   // Serial.printf control prints
+constexpr bool TELEMETRY = false;  // Serial.printf control prints (keep false for runs)
+
+// Optional BLE RC mode (menu → BLE_CAR_DRIVE). Safe indoor PWM caps.
+constexpr int BLE_CAR_FWD_PWM  = 600;
+constexpr int BLE_CAR_TURN_PWM = 550;
 
 #endif
