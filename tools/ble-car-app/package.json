@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
-    "@sveltejs/kit": "^2.8.0",
+    "@sveltejs/kit": "^2.70.2",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "@types/web-bluetooth": "^0.0.20",
     "svelte": "^5.1.0",
