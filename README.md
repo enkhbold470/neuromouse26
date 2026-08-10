@@ -1,5 +1,10 @@
 # NeuroMouse V2.0 — ESP32-S3 Micromouse Firmware
 
+[![PlatformIO CI](https://github.com/enkhbold470/neuromouse26/actions/workflows/build.yml/badge.svg)](https://github.com/enkhbold470/neuromouse26/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange.svg)](https://platformio.org/)
+[![Award](https://img.shields.io/badge/AAMC%202026-3rd%20Place%20Winner-brightgreen.svg)](#)
+
 **🏆 3rd Place Overall · All America Micromouse Contest 2026 (AAMC @ UCLA IEEE)**
 
 > *"Rapid Prototyping > Complexity."*  
