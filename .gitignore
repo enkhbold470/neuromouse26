@@ -7,13 +7,27 @@
 .vscode/launch.json
 .vscode/ipch
 
+# clangd / compile DB
+compile_commands.json
+.cache/
+
 # macOS
 .DS_Store
 __MACOSX/
 
-# Python cache (notify_upload.py)
+# Agent / browser capture junk
+.playwright-mcp/
+
+# Python
 __pycache__/
 *.pyc
+.venv/
+**/__pycache__/
+
+# JS tooling (belt-and-suspenders; also in tools/ble-car-app/.gitignore)
+node_modules/
+.svelte-kit/
+dist/
 
 # Binary / archive downloads
 *.zip
@@ -23,10 +37,16 @@ __pycache__/
 *.swp
 *.swo
 *~
+*.original.md
 
 # JetBrains / CLion
 .idea/
 cmake-build-*/
 
 # Claude Code / Agent local configs & permissions
-.claude/
+.claude/
+
+# Local secrets (never commit)
+secrets.h
+.env
+.env.*

@@ -1,6 +1,12 @@
-// src/main.cpp — Micromouse26 entry point.
+// src/main.cpp — Micromouse26 entry point ([env:main] single translation unit).
 //
-// Domain code lives in include/* headers. This file owns:
+// Read order for newcomers:
+//   1. This file's section banners (hardware → PID → phase hooks → State → setup/loop)
+//   2. include/README.md (header map + include order)
+//   3. include/Tuning.h (every motion/geometry knob)
+//   4. include/PinConfig.h (pins + LIVE vs LEGACY constant banners)
+//
+// This file owns:
 //   * Hardware object instances (motors, encoders, maze, IR-centering PID).
 //   * Helpers tied to that hardware (rTicks, stopMotors, buttonEdge).
 //   * Phase activation hooks that reach into hardware (onPhaseActivate,
@@ -16,6 +22,7 @@
 //   Persistence.h    NVS save/load for walls + fast speed
 //   Planner.h        setupMaze, senseAndStoreWalls, buildMoveScript
 //   OLED.h           menu/run/diag screens + auto gyro cal
+//   BLECarControl.h  optional BLE RC mode (menu → BLE_CAR_DRIVE)
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -144,9 +151,7 @@ struct PID {
 #include "OLED.h"
 #include "BLECarControl.h"
 
-// ── BLE car-control PWM (selected for safe indoor RC driving) ───────────────
-constexpr int BLE_CAR_FWD_PWM  = 600;
-constexpr int BLE_CAR_TURN_PWM = 550;
+// BLE car-control PWM constants live in Tuning.h [H] (BLE_CAR_*_PWM).
 
 // ── Common helpers tied to hardware ─────────────────────────────────────────
 void stopMotors() { leftMotor.brake(); rightMotor.brake(); }
@@ -172,7 +177,7 @@ static void onPhaseActivate() {
         sampleIR();
         float frontMm    = IRCal::estimateFrontDistMM(irVal[0], irVal[3]);
         float distMm     = frontMm + BACKUP_OFFSET_MM;
-        float ticksPerMm = (float)CELL_TICKS / 180.0f;
+        float ticksPerMm = (float)CELL_TICKS / CELL_MM;
         long  ticks      = -(long)(distMm * ticksPerMm + 0.5f);
         Serial.printf("[BACKUP] frontMm=%.1f offsetMm=%.1f → target=%ld ticks (reverse)\n",
                       frontMm, BACKUP_OFFSET_MM, ticks);
@@ -254,7 +259,7 @@ void setup() {
     nvsLoadFastSpeed();
     Serial.printf("[FSPEED] loaded = %.0f tps (%.0f mm/s)\n",
                   fastRunCruiseTps,
-                  fastRunCruiseTps * 180.0f / (float)CELL_TICKS);
+                  fastRunCruiseTps * CELL_MM / (float)CELL_TICKS);
 
     menuEncRef = rightEnc.getTicks();
     oledMenu();
@@ -408,7 +413,7 @@ void loop() {
             nvsSaveFastSpeed();
             Serial.printf("[FSPEED] saved = %.0f tps (%.0f mm/s)\n",
                           fastRunCruiseTps,
-                          fastRunCruiseTps * 180.0f / (float)CELL_TICKS);
+                          fastRunCruiseTps * CELL_MM / (float)CELL_TICKS);
             menuEncRef = rightEnc.getTicks();
             oledMenu();
             state = IDLE;
@@ -879,9 +884,6 @@ void loop() {
         float corr = 0.0f;
         if (runPhase == PH_FORWARD && USE_IR) {
             sampleIR();
-            constexpr float IR_CONF_LO    = 200.0f;
-            constexpr float IR_CONF_HI    = 800.0f;
-            constexpr float IR_EDGE_DELTA = 300.0f;
 
             if (irFirstSample) {
                 irLSm = irVal[1]; irRSm = irVal[2];

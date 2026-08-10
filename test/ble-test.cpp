@@ -41,13 +41,13 @@ void blePrintf(const char* fmt, ...) {
     blePrint(buf);
 }
 
-// ── Server callbacks ──────────────────────────────────────────────────────────
+// ── Server callbacks (NimBLE 2.x signatures) ──────────────────────────────────
 class ServerCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* s) override {
+    void onConnect(NimBLEServer*, NimBLEConnInfo&) override {
         bleConnected = true;
         Serial.println("[BLE] client connected");
     }
-    void onDisconnect(NimBLEServer* s) override {
+    void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
         bleConnected = false;
         Serial.println("[BLE] client disconnected — restarting advertising");
         NimBLEDevice::startAdvertising();
@@ -56,7 +56,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 // ── RX callback — phone → ESP ─────────────────────────────────────────────────
 class RXCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* c) override {
+    void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
         std::string val = c->getValue();
         if (!val.empty()) {
             Serial.printf("[BLE-RX] received: %s\n", val.c_str());
@@ -98,10 +98,12 @@ void setup() {
     );
     pRX->setCallbacks(new RXCallbacks());
 
-    pService->start();
-
+    // NimBLE 2.x: Service::start() is a no-op; advertising starts the GATT DB.
+    // Device name must be set explicitly for namePrefix filters.
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+    pAdv->setName("Micromouse26");
     pAdv->addServiceUUID(NUS_SERVICE_UUID);
+    pAdv->enableScanResponse(true);
     pAdv->start();
 
     Serial.println("[BLE] advertising started — connect with phone app");

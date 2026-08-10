@@ -1,9 +1,8 @@
-#ifndef MICROMOUSE_ENCODER_PCNT_H
-#define MICROMOUSE_ENCODER_PCNT_H
-
-// Full 4x quadrature encoder via ESP32-S3 PCNT peripheral. Zero CPU/ISR cost
-// at running speed — pulse counter is silicon. Compare to MicromouseEncoder.h
-// (rising-edge ISR, half-quadrature, ~205 ticks/rev effective).
+// include/MicromouseEncoderPCNT.h — ESP32-S3 PCNT 4× quadrature decoder.
+//
+// Production encoder path for [env:main]. Zero CPU/ISR cost at running speed —
+// pulse counter is silicon. Compare to MicromouseEncoder.h (LEGACY rising-edge
+// ISR, half-quadrature, ~205 ticks/rev effective).
 //
 // Layout per PCNT unit:
 //   ch0: pulse=A, ctrl=B → +1 on A-rising  when B=0, −1 when B=1
@@ -17,6 +16,9 @@
 // ~14000 counts/sec — polling at 200 Hz drains ~70 counts/call, safe.
 //
 // Assumes ESP-IDF 4.x legacy driver/pcnt.h (Arduino-2.x espressif32 stock).
+
+#ifndef MICROMOUSE_ENCODER_PCNT_H
+#define MICROMOUSE_ENCODER_PCNT_H
 
 #include <Arduino.h>
 #include "driver/pcnt.h"
