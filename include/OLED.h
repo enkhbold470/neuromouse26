@@ -150,7 +150,7 @@ static void oledTerminal(const char* title, const char* msg) {
 
 static void oledEncTest() {
     long tL = leftEnc.getTicks();
-    long tR = rightEnc.getTicks();
+    long tR = (long)(rightEnc.getTicks() * RIGHT_ENC_SCALE);
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(0, 8, "Enc Test");

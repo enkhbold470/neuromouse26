@@ -123,7 +123,7 @@ constexpr float    CELL_CENTER_FRONT_MM =  44.0f;  // front-IR distance at cell 
 // INVARIANT: YAW_FRICTION_ZONE ≤ YAW_HOLD_BAND (else dead-zone).
 constexpr float    YAW_KP            =   6.0f;
 constexpr float    YAW_KD            =   0.3f;
-constexpr float    YAW_FRICTION_ZONE =   3.0f;
+constexpr float    YAW_FRICTION_ZONE =   1.5f;
 constexpr float    YAW_STK_SOFT_BAND =   2.0f;
 constexpr float    YAW_HOLD_BAND     =   1.5f;
 constexpr uint32_t YAW_SETTLE_MS     =  80;
