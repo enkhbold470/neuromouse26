@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/enkhbold470/neuromouse26/security/advisories/new
+    about: Report security issues privately (do not open a public issue).
+  - name: Contributing guide
+    url: https://github.com/enkhbold470/neuromouse26/blob/main/CONTRIBUTING.md
+    about: Scope, build rules, and PR workflow.
+  - name: Support
+    url: https://github.com/enkhbold470/neuromouse26/blob/main/SUPPORT.md
+    about: Where to ask questions and report bugs.

@@ -1,9 +1,21 @@
+// include/PinConfig.h — pins + hardware constants for Micromouse26.
+//
+// LIVE (used by [env:main]): pin map, MOTOR_PWM_*, polarity, RIGHT_ENC_SCALE,
+// BAT_VDIV_MULT, CELL_MM / WHEEL_*, IR_CAL_* / WALL_*_THRESH, maze bitmasks.
+//
+// LEGACY / test-only (below the "Cascaded velocity PID" banner): VPID_*,
+// TURN_* trapezoid, TICKS_PER_CELL=350, DRIVE_PWM / TURN_PWM, etc. Those
+// serve older wall-follow sketches under test/ — they are NOT the production
+// motion stack (that lives in Tuning.h [B]/[F] + main.cpp RUN).
+//
+// New main-firmware knobs → Tuning.h. New pins → this file's Pins section.
+
 #ifndef PIN_CONFIG_H
 #define PIN_CONFIG_H
 
 #include <Arduino.h>
 
-// rgb led
+// rgb led (onboard WS2812)
 constexpr uint8_t rgb_pin      = 48;
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
@@ -31,7 +43,7 @@ constexpr uint8_t ENC_R_B          = 39;
 // At cell center, front sensor → front wall = 90 − 45 = 45 mm.
 // For "X mm front gap" alignment target → robot center sits at
 // cell_center + (45 − X) mm in current heading.
-// IR_CAL_*, IR_DIST_TABLE (IRCalibration.h), and ALIGN_*_TARGET (main.cpp)
+// IR_CAL_*, IR_DIST_TABLE (IRCalibration.h), and ALIGN_*_TARGET (Tuning.h [E])
 // must be re-captured at the new 90° geometry — old values were for 30°
 // and are STALE.
 constexpr uint8_t RX_L             = 10;
@@ -114,7 +126,9 @@ constexpr int     TURN_PWM         = 200;
 constexpr int     DRIVE_PWM_MIN    = 100;     // 200 Hz motors reliably start
                                               // around 10 % duty
 
-// ── Cascaded velocity PID — SOTA, calibrated 2026-05-17 ──────────────────────
+// ── LEGACY / test-only: Cascaded velocity PID (NOT used by [env:main]) ───────
+// Consumed by older wall-follow sketches under test/. Production forward
+// motion uses Tuning.h FWD_* + POS_* and the RUN executor in main.cpp.
 // Inner loop runs at 1 / VPID_LOOP_US Hz. Cascade is:
 //   speed   PI on (vL+vR)/2 → target  → pidSpeed
 //   straight PI on (curL-curR) → 0    → pidStraight   (P on integral of dvel)
@@ -143,7 +157,8 @@ constexpr float   OFF_R            = 0.0f;
 // Default cell-cruise target mm/s. Recalibrate motors before raising.
 constexpr int     CELL_TARGET_MMS  = 250;
 
-// ── Gyro turn (trapezoidal ω + PID on integrated yaw) ────────────────────────
+// ── LEGACY / test-only: Gyro turn trapezoid (NOT used by [env:main]) ─────────
+// Production turns use Tuning.h [C] YAW_* + PH_SPOT in main.cpp.
 // Surface-independent. Peak/accel scaled for TURN_PWM cap above.
 // Locked to test/mpu6500.cpp working values — that test runs the same
 // trapezoid+PID and converges cleanly. Do not lower peak/accel; ramp must

@@ -1,3 +1,9 @@
+// include/MicromouseMotor.h — DRV8833 dual-H-bridge channel wrapper.
+//
+// Arduino 2.x LEDC (ledcSetup + ledcAttachPin + ledcWrite). drive(±speed) is
+// fast-decay (inactive IN held LOW); brake() writes both INs to MOTOR_PWM_MAX/2
+// (half-duty slow decay). Used by [env:main] for left/right motors.
+
 #ifndef MICROMOUSE_MOTOR_H
 #define MICROMOUSE_MOTOR_H
 

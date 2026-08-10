@@ -1,3 +1,10 @@
+// include/PID.h — LEGACY generic PID helper.
+//
+// Unused by [env:main]. The production IR-centering controller is the local
+// `struct PID` inside src/main.cpp (gains from Tuning.h [D]). Keep this file
+// only if an external sketch still wants a reusable PID; otherwise prefer the
+// main.cpp instance as the source of truth.
+
 #ifndef PID_H
 #define PID_H
 

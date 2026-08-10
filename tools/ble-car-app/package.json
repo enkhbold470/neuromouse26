@@ -2,7 +2,11 @@
   "name": "mm26-ble-car-app",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Web Bluetooth RC controller for the Micromouse26 BLE Car menu mode.",
+  "engines": {
+    "node": ">=18.13"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite dev --host",

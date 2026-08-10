@@ -1,8 +1,8 @@
 // include/Planner.h — maze setup, wall sensing, move-script construction.
 //
 // `setupMaze` closes the active sub-region's far borders and sets the
-// centre goal cells listed in Tuning.h::GOAL_CENTRE_* (default for the
-// 7×7 sub-region is one cell at (GOAL_ROW, GOAL_COL)).
+// centre goal cells listed in Tuning.h::GOAL_CENTRE_* (default classical
+// 16×16 centre-4; can be reduced to a single practice cell).
 // `senseAndStoreWalls` samples IR + writes F/L/R walls into the maze.
 // `buildMoveScript` decides between SPOT 90 / SPOT 180 + recover / 1-cell FWD,
 // then in fast-run extends the FWD through any straight cells ahead.
@@ -108,7 +108,7 @@ static void buildMoveScript(AbsDir bestDir) {
         //   2. SPOT 180° — dead-end wall is now behind us.
         //   3. Reverse DEADEND_REVERSE_MM (2 cm) at low speed.
         //   4. Forward DEADEND_FWD_MM (1 cell pitch).
-        float ticksPerMm = (float)CELL_TICKS / 180.0f;
+        float ticksPerMm = (float)CELL_TICKS / CELL_MM;
         long  revTicks   = (long)(DEADEND_REVERSE_MM * ticksPerMm + 0.5f);
         long  fwdTicks   = (long)(DEADEND_FWD_MM     * ticksPerMm + 0.5f);
         scriptPushAlignFront();

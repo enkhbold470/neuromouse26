@@ -1,19 +1,20 @@
-#ifndef IR_CALIBRATION_H
-#define IR_CALIBRATION_H
-
-#include <Arduino.h>
-
-// IR sensor distance calibration table — LF and RF only.
+// include/IRCalibration.h — front IR distance LUT (LF + RF only).
+//
+// Used by PH_REVERSE_TO_BACK / bump recovery via IRCal::estimateFrontDistMM().
 // Anchors: 1, 2, 5, 8, 12 cm captured 2026-05-19; 4 cm anchor added
 // 2026-05-23. Rows 3, 6, 7, 9, 10, 11 cm are linear interp between anchors.
 //
 // LF and RF columns are monotonically decreasing in raw count vs distance,
 // so piecewise-linear interp is safe. L/R sensors are NOT in this table —
-// they're side-aimed (~90° perpendicular as of 2026-05-19), used only for
-// centering bias in driveChain(), not for distance estimation.
+// they're side-aimed (~90° perpendicular), used only for centering bias.
 //
 // Front sensors saturate near 3914 at d<2cm — interp reliable from ~2 cm
 // out. Below 2 cm treat as "very close" (clamp 10 mm).
+
+#ifndef IR_CALIBRATION_H
+#define IR_CALIBRATION_H
+
+#include <Arduino.h>
 
 namespace IRCal {
 

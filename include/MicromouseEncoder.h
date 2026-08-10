@@ -1,3 +1,9 @@
+// include/MicromouseEncoder.h — LEGACY ISR half-quadrature encoder.
+//
+// Unused by [env:main]. Prefer MicromouseEncoderPCNT.h (hardware 4× decode).
+// Kept for a few older test/ sketches (encoder-test, mpu6500, ir-turn-test,
+// motor-freq-config). Do not add new main-firmware dependencies on this file.
+
 #ifndef MICROMOUSE_ENCODER_H
 #define MICROMOUSE_ENCODER_H
 
