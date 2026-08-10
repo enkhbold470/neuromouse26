@@ -1,2 +1,10 @@
 .venv/
-vision/__pycache__
+vision/__pycache__/
+vision/map.json
+vision/corners.json
+vision/hsv.json
+vision/runs/
+vision/marker.png
+vision/bg_ref.png
+upload-chime.wav
+*.mp3

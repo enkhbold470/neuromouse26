@@ -9,6 +9,22 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - main
+          - sensor-cal
+          - encoder-test
+          - imu-turn
+          - motor-freq
+          - pivot-turn
+          - ir-turn-test
+          - wall-follow-pcnt
+          - goal-blink
+          - ws2812b
+          - batt-volt
+          - ble-test
 
     steps:
       - name: Checkout Code
@@ -19,18 +35,20 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache PlatformIO Core & Packages
+      - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/pip
+            ~/.platformio/packages
+            ~/.platformio/platforms
             ~/.platformio/.cache
-          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'requirements-ci.txt') }}
           restore-keys: |
             ${{ runner.os }}-pio-
 
       - name: Install PlatformIO Core
-        run: pip install --upgrade platformio
+        run: pip install -r requirements-ci.txt
 
-      - name: Run PlatformIO Build (main env)
-        run: pio run -e main
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}

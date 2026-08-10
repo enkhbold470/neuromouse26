@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this firmware, please cite it as below."
+type: software
+title: "NeuroMouse V2.0 — ESP32-S3 Micromouse Firmware"
+authors:
+  - family-names: Ganbold
+    given-names: Inky
+  - family-names: Chen
+    given-names: "Yu Hong (Elijah)"
+repository-code: "https://github.com/enkhbold470/neuromouse26"
+url: "https://github.com/enkhbold470/neuromouse26"
+license: MIT
+version: 2.0.0
+date-released: "2026-05-24"
+keywords:
+  - micromouse
+  - esp32-s3
+  - platformio
+  - flood-fill
+  - pid-control
+abstract: >-
+  Competition micromouse firmware for ESP32-S3 (Arduino / PlatformIO) featuring
+  hardware PCNT quadrature decoding, phase-script position-PID motion, and a
+  16×16 flood-fill BFS maze solver. Placed 3rd overall at the 2026 All America
+  Micromouse Contest (AAMC @ UCLA IEEE).
