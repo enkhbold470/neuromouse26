@@ -11,6 +11,6 @@
 
 If you discover a security vulnerability or critical issue within the firmware or web telemetry interface (`WifiDebug.h`), please do not open a public issue.
 
-Instead, please send an email to **enkhbold470@gmail.com** or report it via GitHub Security Advisories.
+Instead, please report it privately via [GitHub Security Advisories](https://github.com/enkhbold470/neuromouse26/security/advisories).
 
 We appreciate your effort in responsibly disclosing security findings!

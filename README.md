@@ -5,10 +5,16 @@
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange.svg)](https://platformio.org/)
 [![Award](https://img.shields.io/badge/AAMC%202026-3rd%20Place%20Winner-brightgreen.svg)](#)
 
-**🏆 3rd Place Overall · All America Micromouse Contest 2026 (AAMC @ UCLA IEEE)**
+---
 
-> *"Rapid Prototyping > Complexity."*  
-> We built two mice. The ugly one won.
+## 🎬 Competition Run Demos
+
+[![Watch Full Competition Run on YouTube](https://img.shields.io/badge/YouTube-Watch%20Full%20AAMC%20Run-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=2M4ZANPrZ4s)
+
+| 1. Explore Leg (Flood-Fill BFS) | 2. Fast Run (Straight-Chain Accel) | 3. Goal Reached & Celebration Spin |
+|---|---|---|
+| ![Maze Explore Run](docs/images/maze_explore.gif) | ![Fast Run Acceleration](docs/images/maze_fastrun.gif) | ![Goal Cell Reached](docs/images/maze_goal.gif) |
+| **Maze Mapping** — Flood-fill BFS exploring unexplored cells | **Fast Run** — Replaying optimal path with straight fusion | **Goal Reached** — 180° mechanical turn + RGB LED celebration |
 
 ---
 
