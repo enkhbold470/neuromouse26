@@ -1,9 +1,18 @@
+// include/WifiDebug.h — DORMANT HTTP telemetry / live-tuning dashboard.
+//
+// NOT included by [env:main]. Historical wall-follow / web-debugger side path.
+// Do not commit real WiFi credentials — set them locally (or via build flags)
+// before flashing any sketch that includes this header.
 #pragma once
 #include <WiFi.h>
 #include <WebServer.h>
 
-#define WIFI_SSID "NETGEAR38"
-#define WIFI_PASS "mightygiant145"
+#ifndef WIFI_SSID
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS "YOUR_WIFI_PASSWORD"
+#endif
 #define WIFI_DEBUG_PORT 80
 
 // ── Tuning Config ─────────────────────────────────────────────────────────────

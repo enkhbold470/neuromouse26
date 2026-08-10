@@ -15,10 +15,10 @@ This file is the single, authoritative guide for AI assistants (Claude, Gemini, 
 | **Framework & API** | Arduino on PlatformIO using **stock `platform = espressif32`** (Arduino 2.x / ESP-IDF 4.x). LEDC API is 2.x style (`ledcSetup` + `ledcAttachPin` + `ledcWrite`), NOT 3.x `ledcAttach`. |
 | **Motor Driver** | DRV8833 dual H-bridge — one driver channel per motor. Fast decay `drive(±speed)` (inactive IN held LOW); half-duty slow decay `brake()` (writes both INs to `MOTOR_PWM_MAX / 2`). |
 | **Motors** | GA-N20 brushed DC gear motors — **1:30 gear ratio, 500 RPM @ 6V**, powered by 2S LiPo (7.4V nominal). |
-| **Encoders** | Magnetic quadrature encoders (7 CPR disk on motor shaft). Decoded via ESP32-S3 **PCNT hardware peripheral (4× decode)** in `MicromouseEncoderPCNT.h`. Both encoders constructed with `inverted=true`. `CELL_TICKS=1400` is hand-measured per 180 mm cell. Right ticks are scaled by `RIGHT_ENC_SCALE=1.0135f` via the `rTicks()` wrapper. |
-| **IR Sensors** | 4-sensor differential array (SFH4545 narrow 950nm emitters + TEFT4300 phototransistors): LF, L, R, RF. **LF/RF aim ~30° forward-outward** (front detect + look-ahead); **L/R aim perpendicular (~90° sideways)** for true side-wall reads. Differential ambient-subtracted reads in `readIR()`. |
+| **Encoders** | Magnetic quadrature encoders (7 CPR disk on motor shaft). Decoded via ESP32-S3 **PCNT hardware peripheral (4× decode)** in `MicromouseEncoderPCNT.h`. Both encoders constructed with `inverted=false` (polarity handled in PinConfig / wiring). `CELL_TICKS` (currently 1373 in `Tuning.h` [F]) is hand-measured per ~180 mm cell. Right ticks are scaled by `RIGHT_ENC_SCALE` (currently `1.0028f` in `PinConfig.h`) via the `rTicks()` wrapper. |
+| **IR Sensors** | 4-sensor differential array (SFH4545 narrow 950nm emitters + TEFT4300 phototransistors): LF, L, R, RF. **All four face perpendicular to their target wall** (LF/RF straight forward; L/R ~90° sideways) — see `PinConfig.h` geometry notes. Differential ambient-subtracted reads in `readIR()`. |
 | **IMU / Gyro** | MPU-6500 (SPI) — DLPF=3 (41 Hz BW) to reject PWM harmonics. Integrated Z-axis yaw (`updateYaw()`) for spot turns and forward yaw-hold. |
-| **Navigation** | 16×16 flood-fill BFS (`MicromouseMaze.h`); home practice active region is 6×3 with goal `(5,2)`. NVS-persisted walls (namespace `mm26`, key `walls`). |
+| **Navigation** | 16×16 flood-fill BFS (`MicromouseMaze.h`). Competition default is classical 4-cell centre goal via `GOAL_CENTRE_*` in `Tuning.h` (also supports a single-cell practice goal). NVS-persisted walls (namespace `mm26`, key `walls`). |
 | **Display & UI** | 0.96" 128×64 SSD1306 OLED (I2C `0x3C`) + single tactile Linear Blue Switch (`BUTTON_1=GPIO42`) + Buzzer (`GPIO40`). Rotary encoder used for OLED menu scrolling and Fast Speed adjustment. |
 | **Battery** | 300 mAh 2S LiPo (7.4V nominal). Resistor divider `BAT_VDIV_MULT=3.751f` → 0–100% linear SOC. |
 
@@ -41,9 +41,9 @@ This file is the single, authoritative guide for AI assistants (Claude, Gemini, 
 ```
 neuromouse26/
 ├── include/
-│   ├── README                      Module inventory & header include map
+│   ├── README.md                   Module inventory & header include map (start here)
 │   ├── Tuning.h                    Every tunable constant (Sections [A]–[H]). Master knob: BASE_BREAKAWAY_PWM
-│   ├── PinConfig.h                 Pin mappings, PWM/IR limits, IR_CAL defaults, wall thresholds
+│   ├── PinConfig.h                 Pin mappings, PWM/IR limits, IR_CAL defaults, wall thresholds (+ LEGACY test knobs)
 │   ├── IMU.h                       MPU-6500 register stack, bias capture, updateYaw() integration
 │   ├── IRSensors.h                 4-sensor IR array, ambient-subtracted reads, EMA filters
 │   ├── IRCalibration.h             Per-cm front IR LUT & estimateFrontDistMM()
@@ -56,11 +56,12 @@ neuromouse26/
 │   ├── Persistence.h               ESP32 NVS save/load for walls & fast-run cruise speed
 │   ├── Battery.h                   Vbat ADC sampling & 0–100% linear SOC calculation
 │   ├── Pose.h                      Robot pose (row, col, heading), mode flags, fastRunCruiseTps
-│   ├── MicromouseEncoder.h         Legacy ISR encoder (unused by main firmware)
-│   ├── PID.h                       Generic PID struct (unused by main motion stack)
-│   └── WifiDebug.h                 Live HTTP telemetry server & web debugger UI (dormant side env)
+│   ├── BLECarControl.h             Optional BLE RC mode (OLED menu → BLE_CAR_DRIVE)
+│   ├── MicromouseEncoder.h         LEGACY ISR encoder (unused by main; some test/ sketches)
+│   ├── PID.h                       LEGACY generic PID (unused — main embeds its own)
+│   └── WifiDebug.h                 DORMANT HTTP debugger (not in env:main; placeholder WiFi creds)
 ├── src/
-│   └── main.cpp                    Hardware instances, PID controller, setup() & loop() state machine (~700 lines)
+│   └── main.cpp                    Hardware instances, PID controller, setup() & loop() state machine
 ├── test/                           Standalone test sketches (one env per file in platformio.ini)
 ├── tools/
 │   └── notify_upload.py            Post-upload audible chime script
@@ -127,7 +128,7 @@ In Fast Run mode, `buildMoveScript()` fuses consecutive straight cells into a si
 
 ## 6. Navigation & Maze Solver
 
-- **Grid System:** `(row, col)` 16×16 grid (`MicromouseMaze.h`). Active practice region is 6×3 with start `(0,0)` facing North and goal `(5,2)`.
+- **Grid System:** `(row, col)` 16×16 grid (`MicromouseMaze.h`). Start `(0,0)` facing North. Goals from `Tuning.h` `GOAL_CENTRE_*` (default 4-cell centre `{7,7},{7,8},{8,7},{8,8}`).
 - **Flood-Fill BFS:** `bestDirectionBiased(r, c, heading, &dist)` evaluates distance to goal, preferring straight > left > right > U-turn at equal flood distance, with a +4 penalty for already-visited cells.
 - **NVS Persistence:** On reaching the goal cell, `nvsSaveWalls()` writes the 256-byte wall bitmask to ESP32 NVS namespace `"mm26"` under key `"walls"`. Fast Run reloads this map and skips sensing.
 
@@ -142,6 +143,7 @@ IDLE
  ├─ menu Fast Speed  → FAST_SPEED_EDIT (encoder knob adjusts fastRunCruiseTps)
  ├─ menu Enc Test    → ENC_TEST
  ├─ menu IR Test     → IR_TEST
+ ├─ menu BLE Car     → BLE_CAR_DRIVE (NimBLE RC; see BLECarControl.h)
  └─ menu Clear NVS   → IDLE (wipes saved walls)
 
 FAST_SPEED_EDIT → IDLE      (button saves to NVS, returns to menu)
@@ -149,6 +151,7 @@ EXPLORE_THINK → RUN         (kicks current move's script)
 RUN → EXPLORE_THINK         (script done, pose committed, next move)
 EXPLORE_THINK → GOAL        (reached target cell; saves NVS)
 EXPLORE_THINK → CRASH       (flood = FLOOD_INFINITY, robot boxed in)
+BLE_CAR_DRIVE → IDLE        (button press stops motors, returns to menu)
 
 GOAL / CRASH → IDLE         (button press clears LED and returns to menu)
 ```
@@ -157,7 +160,7 @@ GOAL / CRASH → IDLE         (button press clears LED and returns to menu)
 
 ## 8. Serial Telemetry & Event Logging
 
-Enable serial logging by setting `TELEMETRY = true` in `include/Tuning.h` (section [H]). Always set `TELEMETRY = false` before competition runs to prevent Serial print latency from slowing the 199 Hz PID loop.
+Serial logging is off by default (`TELEMETRY = false` in `include/Tuning.h` [H]). Set `TELEMETRY = true` only while bench-debugging — leave false for competition / fast runs so Serial print latency does not slow the ~200 Hz PID loop.
 
 Log tags: `[IMU]`, `[GCAL/AUTO]`, `[SENSE]`, `[PLAN]`, `[FAST]`, `[EVENT]`, `--- STEP END ---`, `--- MOVE DONE ---`.
 
@@ -167,6 +170,6 @@ Log tags: `[IMU]`, `[GCAL/AUTO]`, `[SENSE]`, `[PLAN]`, `[FAST]`, `[EVENT]`, `---
 
 - **`frictionZone <= holdBand`:** Required so the robot never stalls in a dead zone between breakaway power and settle detection.
 - **`MAX_SCRIPT >= 4`:** Required for the 4-step dead-end exit sequence.
-- **`RIGHT_ENC_SCALE = 1.0135f`:** All right-tick math must use `rTicks()`.
-- **`CELL_TICKS = 1400`:** Hand-measured per 180 mm cell. Re-measure if tires or wheels change.
+- **`RIGHT_ENC_SCALE` (PinConfig.h):** All right-tick math must use `rTicks()`.
+- **`CELL_TICKS` (Tuning.h [F]):** Hand-measured per cell pitch (see current value in Tuning.h). Re-measure if tires or wheels change.
 - **No `fastFwdRoll`:** End of phase always brakes to a full stop before executing `PH_SPOT` turns to prevent rotational inertia drift.

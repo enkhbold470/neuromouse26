@@ -1,3 +1,10 @@
+// include/MicromouseMaze.h — 16×16 wall grid + flood-fill BFS solver.
+//
+// Goals come from Tuning.h GOAL_CENTRE_* (classical 4-cell centre or a single
+// practice cell). bestDirectionBiased() prefers straight > left > right >
+// U-turn at equal flood distance, with a penalty for already-visited cells.
+// Wall bitmasks: WALL_NORTH/EAST/SOUTH/WEST from PinConfig.h.
+
 #ifndef MICROMOUSE_MAZE_H
 #define MICROMOUSE_MAZE_H
 
