@@ -183,6 +183,7 @@ re-angling. Home practice used a compact sub-region; competition ran the full
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community standards |
 | [THIRD_PARTY.md](THIRD_PARTY.md) | Dependency & media attribution |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
+| [docs/OSS_FOLLOWUPS.md](docs/OSS_FOLLOWUPS.md) | Human-gated post-launch checklist |
 
 ## Team & acknowledgments
 
