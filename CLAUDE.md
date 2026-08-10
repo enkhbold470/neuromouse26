@@ -17,7 +17,7 @@ This file is the single, authoritative guide for AI assistants (Claude, Gemini, 
 | **Motors** | GA-N20 brushed DC gear motors — **1:30 gear ratio, 500 RPM @ 6V**, powered by 2S LiPo (7.4V nominal). |
 | **Encoders** | Magnetic quadrature encoders (7 CPR disk on motor shaft). Decoded via ESP32-S3 **PCNT hardware peripheral (4× decode)** in `MicromouseEncoderPCNT.h`. Both encoders constructed with `inverted=false` (polarity handled in PinConfig / wiring). `CELL_TICKS` (currently 1373 in `Tuning.h` [F]) is hand-measured per ~180 mm cell. Right ticks are scaled by `RIGHT_ENC_SCALE` (currently `1.0028f` in `PinConfig.h`) via the `rTicks()` wrapper. |
 | **IR Sensors** | 4-sensor differential array (SFH4545 narrow 950nm emitters + TEFT4300 phototransistors): LF, L, R, RF. **All four face perpendicular to their target wall** (LF/RF straight forward; L/R ~90° sideways) — see `PinConfig.h` geometry notes. Differential ambient-subtracted reads in `readIR()`. |
-| **IMU / Gyro** | MPU-6500 (SPI) — DLPF=3 (41 Hz BW) to reject PWM harmonics. Integrated Z-axis yaw (`updateYaw()`) for spot turns and forward yaw-hold. |
+| **IMU / Gyro** | MPU-6500 (**I2C** `0x68`) — DLPF=3 (41 Hz BW) to reject PWM harmonics. Integrated Z-axis yaw (`updateYaw()`) for spot turns and forward yaw-hold. |
 | **Navigation** | 16×16 flood-fill BFS (`MicromouseMaze.h`). Competition default is classical 4-cell centre goal via `GOAL_CENTRE_*` in `Tuning.h` (also supports a single-cell practice goal). NVS-persisted walls (namespace `mm26`, key `walls`). |
 | **Display & UI** | 0.96" 128×64 SSD1306 OLED (I2C `0x3C`) + single tactile Linear Blue Switch (`BUTTON_1=GPIO42`) + Buzzer (`GPIO40`). Rotary encoder used for OLED menu scrolling and Fast Speed adjustment. |
 | **Battery** | 300 mAh 2S LiPo (7.4V nominal). Resistor divider `BAT_VDIV_MULT=3.751f` → 0–100% linear SOC. |
@@ -63,11 +63,14 @@ neuromouse26/
 ├── src/
 │   └── main.cpp                    Hardware instances, PID controller, setup() & loop() state machine
 ├── test/                           Standalone test sketches (one env per file in platformio.ini)
-├── tools/
-│   └── notify_upload.py            Post-upload audible chime script
+├── tools/                          Optional helpers (see tools/README.md)
+│   ├── notify_upload.py            Post-upload audible chime script
+│   ├── ble-car-app/                Web Bluetooth RC UI
+│   └── vision/                     Optional OpenCV maze helpers
 ├── platformio.ini                  PlatformIO environment definitions
 ├── LICENSE                         MIT License
 ├── CONTRIBUTING.md                 Contribution rules
+├── THIRD_PARTY.md                  Third-party licenses & attribution
 ├── CLAUDE.md                       Authoritative agent & project guide (this file)
 └── README.md                       Public open-source landing page
 ```
@@ -81,12 +84,14 @@ neuromouse26/
 pio run -e main -t upload     # Build and flash main firmware
 pio device monitor            # Serial monitor @ 115200 baud
 
-# Standalone Subsystem Test Environments
-pio run -e ir-test -t upload       # 4-channel IR diagnostics & front distance LUT
-pio run -e encoder-test -t upload  # PCNT tick counts & wheel RPM
-pio run -e mpu6500 -t upload       # Gyro bias capture & yaw integration stream
-pio run -e ws2812b -t upload       # RGB status LED test
+# Standalone Subsystem Test Environments (must exist in platformio.ini)
+pio run -e encoder-test -t upload     # PCNT tick counts & wheel RPM
+pio run -e imu-turn -t upload         # Gyro bias + yaw (test/mpu6500.cpp)
+pio run -e ws2812b -t upload          # Onboard WS2812 status LED
 pio run -e wall-follow-pcnt -t upload # Drivetrain reference sketch (no solver)
+pio run -e sensor-cal -t upload       # IR / sensor calibration helpers
+pio run -e batt-volt -t upload        # Battery divider sanity check
+pio run -e ble-test -t upload         # Nordic UART BLE smoke test
 
 # Clean Build
 pio run -t clean

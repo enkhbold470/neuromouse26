@@ -1,44 +1,46 @@
 # tools/
 
-Helper scripts for Micromouse26 firmware development.
+**Optional** developer utilities. Firmware build/flash only needs PlatformIO —
+nothing under `tools/` is required to compile `[env:main]`.
 
-## `ir_monitor.py`
+## Layout
 
-Live GUI for 4 IR sensors over USB serial. Bars + rolling plot.
-
-```bash
-pip install pyserial               # only dep beyond stdlib tkinter
-python tools/ir_monitor.py         # auto-pick ESP32 port
-python tools/ir_monitor.py /dev/cu.usbmodem1101   # explicit port
-```
-
-Parses both `L:1234 LF:... RF:... R:...` and `L 1234 (min/avg/max) ...`
-output from `test/ir-test.cpp` / `test/sensor_cal.cpp`. Click **Reset peaks**
-to clear the white tick marks.
-
-## `ble-debug.html`
-
-Web Bluetooth dashboard for `pivot-mouse-v1` (`test/motor-ble-drive.cpp` etc).
-Sends single-char commands (`1`-`5` cells, `R`/`L` turns, `s` stop, `?`
-status) and streams TX notifications.
-
-```bash
-open tools/ble-debug.html          # macOS
-# or serve any HTTP and open in Chrome/Edge (Web BT needs https/localhost)
-```
-
-Requires browser with Web Bluetooth (Chrome, Edge, Opera; Safari ✗).
+| Path | Purpose |
+|---|---|
+| `notify_upload.py` | PlatformIO post-upload chime (already wired in `platformio.ini`) |
+| `ir_monitor.py` | Tk IR bar/plot UI over USB serial |
+| `ble-debug.html` | Simple Web Bluetooth debug page |
+| `ble-car-app/` | SvelteKit Web Bluetooth RC UI for OLED **BLE Car** mode |
+| `vision/` | Optional OpenCV + Flask maze-vision helpers |
 
 ## `notify_upload.py`
 
-PlatformIO post-upload hook — plays a sound on successful `pio run -t upload`.
-Already wired via `platformio.ini` (`extra_scripts = post:tools/notify_upload.py`).
-No manual invocation. macOS uses `Glass.aiff`; Windows uses `playsound` + MP3;
-Linux falls back to terminal bell.
+Runs only on `pio run -t upload` (not during compile-only CI). Uses system
+sounds (macOS `Glass.aiff`, Linux `paplay`/`aplay` when available, else terminal
+bell). On Windows, optional `pip install playsound` plus a local
+`tools/upload-chime.wav` if you want a custom sound.
 
-## `.venv/`
+## `ir_monitor.py`
 
-Local Python venv for the scripts above. Activate:
 ```bash
+python3 -m venv tools/.venv
 source tools/.venv/bin/activate
+pip install pyserial
+# Debian/Ubuntu may also need: sudo apt install python3-tk
+python tools/ir_monitor.py                 # auto-pick ESP32 port
+python tools/ir_monitor.py /dev/ttyACM0    # explicit port
 ```
+
+## `ble-debug.html`
+
+Open in Chrome/Edge (Web Bluetooth). Prefer serving over `http://localhost` or HTTPS.
+
+## `ble-car-app/`
+
+See [`ble-car-app/README.md`](ble-car-app/README.md). Uses **npm** + committed
+`package-lock.json` (`npm ci`).
+
+## `vision/`
+
+See [`vision/README.md`](vision/README.md). Runtime files such as `map.json` /
+`corners.json` are gitignored — calibrate locally.
