@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Open-source readiness pass: community health files, CI matrix, dead env cleanup,
   documentation accuracy vs firmware, third-party notices, and repo hygiene.
+- Document remaining human-gated follow-ups in `docs/OSS_FOLLOWUPS.md` (Linear
+  integration unavailable in cloud agent without API key).
 
 ## [2.0.0] — 2026-05
 
