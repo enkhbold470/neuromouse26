@@ -996,6 +996,14 @@ void loop() {
         // Latching RC drive: lastCmd persists until next BLE write. F/B drive
         // both wheels same direction; L/R spot-turn opposite directions; S
         // brakes both. No PID, no encoders, no IR — pure RC.
+
+        // Watchdog: if no command received within WATCHDOG_MS, stop motors
+        // to prevent runaway on BLE disconnect or phone crash.
+        if (BLECar::connected && (millis() - BLECar::lastCmdMs > BLECar::WATCHDOG_MS)) {
+            BLECar::lastCmd = 'S';
+            stopMotors();
+        }
+
         switch (BLECar::lastCmd) {
         case 'F':
             leftMotor.drive(-BLE_CAR_FWD_PWM);

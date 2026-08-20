@@ -3,7 +3,16 @@
 // NOT included by [env:main]. Historical wall-follow / web-debugger side path.
 // Do not commit real WiFi credentials — set them locally (or via build flags)
 // before flashing any sketch that includes this header.
+//
+// ⚠️  COMPILE-TIME GUARD: This header is DORMANT and MUST NOT be included in
+// production builds. Including it will trigger a compile error.
+// To use for debugging, you MUST explicitly define WIFI_DEBUG_ENABLE before
+// including this header.
 #pragma once
+
+#ifndef WIFI_DEBUG_ENABLE
+#error "WifiDebug.h is DORMANT — define WIFI_DEBUG_ENABLE=1 to use for debugging only. Do not include in production builds."
+#endif
 #include <WiFi.h>
 #include <WebServer.h>
 

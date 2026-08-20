@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include "Tuning.h"
+#include <assert.h>
 
 enum TurnDir { TURN_NONE, TURN_RIGHT, TURN_LEFT };
 
@@ -51,6 +52,7 @@ static uint32_t phaseStartUs = 0;
 static void scriptReset() { scriptLen = 0; scriptIdx = 0; }
 
 static void scriptPush(RunPhase ph, long target, TurnDir d = TURN_NONE) {
+    assert(scriptLen < MAX_SCRIPT);
     if (scriptLen < MAX_SCRIPT) script[scriptLen++] = { ph, target, d };
 }
 
