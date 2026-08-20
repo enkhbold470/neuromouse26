@@ -187,11 +187,11 @@ Log tags: `[IMU]`, `[GCAL/AUTO]`, `[SENSE]`, `[PLAN]`, `[FAST]`, `[EVENT]`, `---
 
 | Role | Name |
 |---|---|
-| Firmware / hardware / competition | **Inky Ganbold** |
+| Firmware / hardware / competition | **Enkhbold Ganbold** |
 | Co-builder (V1 PCB + V2 protoboard) | **Yu Hong (Elijah) Chen** |
 
 
-Copyright line everywhere: `Inky Ganbold, Yu Hong (Elijah) Chen`.
+Copyright line everywhere: `Enkhbold Ganbold, Yu Hong (Elijah) Chen`.
 
 ### README (public landing page)
 
@@ -243,9 +243,9 @@ git branch -f archive/full-history main && git push --force origin archive/full-
 TREE=$(git write-tree)          # after git add
 PARENT=$(git rev-parse HEAD)
 NEW=$(printf '%s\n' 'your subject' '' | \
-  GIT_AUTHOR_NAME='Inky Ganbold' \
+  GIT_AUTHOR_NAME='Enkhbold Ganbold' \
   GIT_AUTHOR_EMAIL='53986637+enkhbold470@users.noreply.github.com' \
-  GIT_COMMITTER_NAME='Inky Ganbold' \
+  GIT_COMMITTER_NAME='Enkhbold Ganbold' \
   GIT_COMMITTER_EMAIL='53986637+enkhbold470@users.noreply.github.com' \
   git commit-tree "$TREE" -p "$PARENT")
 git reset --hard "$NEW"
