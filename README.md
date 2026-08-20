@@ -137,7 +137,7 @@ Set `TELEMETRY = false` in `include/Tuning.h` before a competition run. Serial p
 
 ## Team
 
-**Inky Ganbold · Yu Hong (Elijah) Chen**
+**Enkhbold Ganbold · Yu Hong (Elijah) Chen**
 
 Huge thanks to Elijah for the grind, to [IEEE Student Branch at UCLA](https://projects.ieeebruins.com/micromouse/aamc) for putting on AAMC, and to Green Ye ([greenye.net](https://greenye.net), [MicromouseUSA.com](https://micromouseusa.com)) for keeping the knowledge base alive.
 
@@ -145,6 +145,6 @@ Huge thanks to Elijah for the grind, to [IEEE Student Branch at UCLA](https://pr
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Inky Ganbold, Yu Hong (Elijah) Chen.
+[MIT](LICENSE) — Copyright (c) 2026 Enkhbold Ganbold, Yu Hong (Elijah) Chen.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Pins live in `PinConfig.h`. Tuning lives in `Tuning.h`. LEDC is Arduino 2.x (`ledcSetup` + `ledcAttachPin`).

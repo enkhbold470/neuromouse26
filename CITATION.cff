@@ -4,7 +4,7 @@ type: software
 title: "NeuroMouse V2.0 — ESP32-S3 Micromouse Firmware"
 authors:
   - family-names: Ganbold
-    given-names: Inky
+    given-names: Enkhbold
   - family-names: Chen
     given-names: "Yu Hong (Elijah)"
 repository-code: "https://github.com/enkhbold470/neuromouse26"
