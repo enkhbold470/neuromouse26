@@ -178,3 +178,106 @@ Log tags: `[IMU]`, `[GCAL/AUTO]`, `[SENSE]`, `[PLAN]`, `[FAST]`, `[EVENT]`, `---
 - **`RIGHT_ENC_SCALE` (PinConfig.h):** All right-tick math must use `rTicks()`.
 - **`CELL_TICKS` (Tuning.h [F]):** Hand-measured per cell pitch (see current value in Tuning.h). Re-measure if tires or wheels change.
 - **No `fastFwdRoll`:** End of phase always brakes to a full stop before executing `PH_SPOT` turns to prevent rotational inertia drift.
+
+---
+
+## 10. Open-Source & Repository Maintenance (Aug 2026)
+
+### Team & attribution (canonical)
+
+| Role | Name |
+|---|---|
+| Firmware / hardware / competition | **Inky Ganbold** |
+| Co-builder (V1 PCB + V2 protoboard) | **Yu Hong (Elijah) Chen** |
+
+
+Copyright line everywhere: `Inky Ganbold, Yu Hong (Elijah) Chen`.
+
+### README (public landing page)
+
+Current README structure (keep media-first):
+
+1. Title + AAMC 3rd place badge
+2. **Competition GIFs** (`docs/images/maze_*.gif`) — immediately after title, not buried in text
+3. **Hardware photos** (`docs/images/20260523_*.jpg`)
+4. **Web debugger screenshots** (`docs/images/sim_gui_*.png`)
+5. Engineering story: V1 PCB vs V2 protoboard, 6×3 home maze vs 16×16 UCLA, bootstrap parts
+6. ESP32-S3 angle: most OSS micromice are STM32; this repo bridges the gap
+7. Stack table — **MPU-6500 is I2C `0x68`**, shared bus with OLED (GPIO 8/9). Never document as SPI.
+8. Short firmware + quickstart sections
+9. Team (two names only) + links to LinkedIn / Medium / YouTube
+
+LinkedIn post draft lives in chat history (Aug 2026 session); tone = engineering process over victory lap, open-source announcement.
+
+### Git history rules
+
+**Never squash `main` to a single commit.** The repo has ~175 commits of real development history. Users expect that timeline intact.
+
+| Branch | Purpose |
+|---|---|
+| `main` | Production; full history |
+| `archive/full-history` | Mirror of `main` (backup after history rewrites) |
+
+If history must be rewritten (message cleanup, strip co-authors, strip names from old blobs):
+
+```bash
+# Use git-filter-repo, NOT orphan/squash
+git filter-repo --force --refs refs/heads/main \
+  --replace-text /path/to/replacements.txt \
+  --message-callback '...'
+
+git remote add origin https://github.com/enkhbold470/neuromouse26.git
+git push --force origin main
+git branch -f archive/full-history main && git push --force origin archive/full-history
+```
+
+**Commit message hygiene:**
+
+- No `Co-authored-by: Cursor <cursoragent@cursor.com>` — strip from history if reintroduced
+- No explicit "remove person X" subjects — bake attribution fixes into `git filter-repo --replace-text` across all commits instead
+- Prefer short imperative subjects: `docs(readme): …`, `fix: …`, `feat: …`
+
+**Avoiding Cursor co-author on new commits:** Cursor IDE injects `Co-authored-by: Cursor` even on `git commit --amend`. Bypass with low-level commit:
+
+```bash
+TREE=$(git write-tree)          # after git add
+PARENT=$(git rev-parse HEAD)
+NEW=$(printf '%s\n' 'your subject' '' | \
+  GIT_AUTHOR_NAME='Inky Ganbold' \
+  GIT_AUTHOR_EMAIL='53986637+enkhbold470@users.noreply.github.com' \
+  GIT_COMMITTER_NAME='Inky Ganbold' \
+  GIT_COMMITTER_EMAIL='53986637+enkhbold470@users.noreply.github.com' \
+  git commit-tree "$TREE" -p "$PARENT")
+git reset --hard "$NEW"
+```
+
+### History rewrites already applied (Aug 2026)
+
+1. **Restored full history** after mistaken single-commit squash (`e33e0d1` → restored from `archive/full-history`)
+2. **Stripped Cursor co-authors** from all commit messages via `filter-repo`
+3. **Renamed** generic `chore(oss): multi-agent open-source readiness audit (#11)` → `chore: add OSS community files, CI matrix, and repo hygiene`
+4. **Fixed README** MPU-6500 bus: SPI → I2C (`0330033` / `e271659`)
+
+Current tip (verify with `git log -1 --oneline`): `e271659 docs(readme): fix MPU-6500 bus type to I2C` · **175 commits** on `main`.
+
+### OSS audit commit content (reference)
+
+The large OSS pass (`fa3e307` lineage, subject renamed) added: CI matrix, issue templates, SECURITY/CoC/SUPPORT/CITATION/CHANGELOG/THIRD_PARTY, scrubbed WiFi placeholders, pinned PlatformIO deps, removed junk (`.playwright-mcp/`, `*.original.md`), synced docs with live firmware. See `docs/OSS_FOLLOWUPS.md` for remaining human-gated items.
+
+### Images in `docs/images/`
+
+| File | Content |
+|---|---|
+| `maze_explore.gif` | Explore leg — flood-fill BFS |
+| `maze_fastrun.gif` | Fast run — straight-chain accel |
+| `maze_goal.gif` | Goal + celebration spin |
+| `20260523_204208.jpg` | V2.0 in maze corner |
+| `20260523_204539.jpg` | OLED IR test screen |
+| `20260523_204623.jpg` | Top-down — blue switch + 2S LiPo |
+| `20260523_204636.jpg` | ESP32-S3 + MPU-6500 + OLED close-up |
+| `20260523_232430.jpg` | Dev loop — flood-fill map + live robot |
+| `sim_gui_run.png` | Web debugger — run state |
+| `sim_gui_turn.png` | Turn telemetry + PID |
+| `sim_gui_telemetry.png` | Full telemetry dashboard |
+
+All tracked in git; embed in README with relative paths `docs/images/...`.
