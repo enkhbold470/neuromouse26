@@ -75,7 +75,7 @@ Low budget, off-the-shelf parts. AliExpress for the base hardware. Amazon overni
 | **MCU** | ESP32-S3-WROOM (Xtensa LX7 dual-core, 240 MHz) · PlatformIO · Arduino 2.x |
 | **Screen** | 0.96" I2C OLED (SSD1306) — it was a banger |
 | **Sensors** | SFH4545 emitters + TEFT4300 phototransistors (LF / L / R / RF) |
-| **Gyro** | MPU-6500 (SPI) |
+| **Gyro** | MPU-6500 (I2C `0x68`, shared bus with the OLED) |
 | **Motors** | GA-N20, 1:30, 500 RPM @ 6 V (7 CPR encoder) |
 | **Driver** | DRV8833 dual H-bridge |
 | **Control** | Position-PID, IMU yaw-hold, flood-fill BFS |
