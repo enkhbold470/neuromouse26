@@ -55,7 +55,7 @@
 </style>
 </head>
 <body>
-<h1>neuromouse — PID tuner</h1>
+<h1>NeuroMouse26 — PID tuner</h1>
 <div id="status">disconnected</div>
 
 <div class="row">
@@ -201,7 +201,7 @@
     while (terminal.childElementCount > 800) terminal.removeChild(terminal.firstChild);
   }
   function setConnected(ok) {
-    statusEl.textContent = ok ? 'connected — neuromouse' : 'disconnected';
+    statusEl.textContent = ok ? 'connected — NeuroMouse26' : 'disconnected';
     statusEl.className = ok ? 'connected' : '';
     document.getElementById('btnConnect').disabled    = ok;
     document.getElementById('btnDisconnect').disabled = !ok;

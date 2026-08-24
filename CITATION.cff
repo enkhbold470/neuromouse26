@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this firmware, please cite it as below."
 type: software
-title: "NeuroMouse V2.0 — ESP32-S3 Micromouse Firmware"
+title: "NeuroMouse26 — Podium-Tested ESP32-S3 Micromouse"
 authors:
   - family-names: Ganbold
     given-names: Enkhbold
@@ -19,7 +19,8 @@ keywords:
   - flood-fill
   - pid-control
 abstract: >-
-  Competition micromouse firmware for ESP32-S3 (Arduino / PlatformIO) featuring
-  hardware PCNT quadrature decoding, phase-script position-PID motion, and a
-  16×16 flood-fill BFS maze solver. Placed 3rd overall at the 2026 All America
-  Micromouse Contest (AAMC @ UCLA IEEE).
+  NeuroMouse26 is an award-winning open-source Micromouse robotics project built
+  on the ESP32-S3. It autonomously explores and solves a 16×16 maze using
+  flood-fill BFS, position-PID motion control, infrared wall sensing, and 4×
+  quadrature encoder decoding; the robot placed 3rd overall at the 2026 All
+  America Micromouse Contest at UCLA IEEE.

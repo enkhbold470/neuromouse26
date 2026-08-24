@@ -1,4 +1,7 @@
-# Micromouse Motor-Control — Doc Index
+# NeuroMouse26 Technical Documentation
+
+Return to the [NeuroMouse26 project homepage](./) or browse the
+[source repository](https://github.com/enkhbold470/neuromouse26).
 
 > **Historical notes.** Several files in this folder describe an earlier
 > ISR-encoder / motor-test stack. For the **current** competition firmware,

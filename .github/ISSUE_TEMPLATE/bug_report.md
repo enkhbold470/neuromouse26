@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Create a report to help us improve NeuroMouse firmware
+about: Create a report to help us improve NeuroMouse26 firmware
 title: '[BUG] '
 labels: 'bug'
 assignees: ''
