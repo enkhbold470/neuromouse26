@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NeuroMouse26 — Open-Source ESP32-S3 Micromouse</title>
+  <meta name="description" content="NeuroMouse26 is an award-winning open-source ESP32-S3 Micromouse with flood-fill BFS, position-PID control, IR sensing, and 4× encoders.">
+  <link rel="canonical" href="https://enkhbold470.github.io/neuromouse26/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="NeuroMouse26 — Open-Source ESP32-S3 Micromouse">
+  <meta property="og:description" content="Podium-tested, open-source Micromouse firmware and build documentation.">
+  <meta property="og:url" content="https://enkhbold470.github.io/neuromouse26/">
+  <meta property="og:image" content="https://enkhbold470.github.io/neuromouse26/images/20260523_204208.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "name": "NeuroMouse26",
+    "alternateName": "NeuroMouse26 V2.0",
+    "description": "NeuroMouse26 is an award-winning open-source Micromouse robotics project built on the ESP32-S3. It autonomously explores and solves a 16×16 maze using flood-fill BFS, position-PID motion control, infrared wall sensing, and 4× quadrature encoder decoding; the robot placed 3rd overall at the 2026 All America Micromouse Contest at UCLA IEEE.",
+    "url": "https://enkhbold470.github.io/neuromouse26/",
+    "codeRepository": "https://github.com/enkhbold470/neuromouse26",
+    "license": "https://opensource.org/license/mit",
+    "programmingLanguage": ["C++", "Python", "JavaScript"],
+    "runtimePlatform": "ESP32-S3 with Arduino and PlatformIO",
+    "version": "2.0.0",
+    "datePublished": "2026-05-24",
+    "author": [
+      {"@type": "Person", "name": "Enkhbold Ganbold"},
+      {"@type": "Person", "name": "Yu Hong (Elijah) Chen"}
+    ],
+    "keywords": "Micromouse, ESP32-S3, flood-fill BFS, position PID, quadrature encoder, robotics"
+  }
+  </script>
+</head>
+<body>
+  <header class="hero">
+    <nav aria-label="Primary">
+      <a class="wordmark" href="#top">NeuroMouse26</a>
+      <div>
+        <a href="#technology">Technology</a>
+        <a href="#build">Build</a>
+        <a href="https://github.com/enkhbold470/neuromouse26/blob/main/docs/00_INDEX.md">Docs</a>
+        <a class="button small" href="https://github.com/enkhbold470/neuromouse26">GitHub</a>
+      </div>
+    </nav>
+    <div id="top" class="hero-grid">
+      <div>
+        <p class="eyebrow">3rd place overall · AAMC 2026</p>
+        <h1>NeuroMouse26</h1>
+        <p class="lede">NeuroMouse26 is an award-winning open-source Micromouse robotics project built on the ESP32-S3. It autonomously explores and solves a 16×16 maze using flood-fill BFS, position-PID motion control, infrared wall sensing, and 4× quadrature encoder decoding; the robot placed 3rd overall at the 2026 All America Micromouse Contest at UCLA IEEE.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/enkhbold470/neuromouse26">Explore the source</a>
+          <a class="button ghost" href="https://www.youtube.com/watch?v=2M4ZANPrZ4s">Watch the competition run</a>
+        </div>
+      </div>
+      <figure>
+        <img src="images/20260523_204208.jpg" alt="NeuroMouse26 robot positioned beside a Micromouse maze wall" width="1200" height="900">
+        <figcaption>The hand-built V2.0 competition chassis.</figcaption>
+      </figure>
+    </div>
+  </header>
+
+  <main>
+    <section aria-labelledby="result-title" class="result">
+      <div class="stat"><strong>3rd</strong><span>overall at AAMC 2026</span></div>
+      <div>
+        <p class="eyebrow">Competition proven</p>
+        <h2 id="result-title">From exploration to fast run</h2>
+        <p>NeuroMouse26 mapped the full 16×16 competition maze, saved its wall map, and replayed an optimized route. The project is independent and is not affiliated with or endorsed by IEEE, UCLA, or the AAMC organizers.</p>
+      </div>
+    </section>
+
+    <section id="technology" aria-labelledby="technology-title">
+      <p class="eyebrow">Technical stack</p>
+      <h2 id="technology-title">Small robot, complete navigation stack</h2>
+      <div class="cards">
+        <article><span>01</span><h3>Plan</h3><p>Flood-fill BFS explores a 16×16 maze and computes a route to the classical center goal.</p></article>
+        <article><span>02</span><h3>Sense</h3><p>Four infrared channels detect front and side walls with ambient-subtracted readings.</p></article>
+        <article><span>03</span><h3>Control</h3><p>Position-PID motion, IR centering, and MPU-6500 yaw feedback execute each phase.</p></article>
+        <article><span>04</span><h3>Measure</h3><p>ESP32-S3 PCNT hardware decodes magnetic quadrature encoders at 4× resolution.</p></article>
+      </div>
+    </section>
+
+    <section class="media" aria-labelledby="runs-title">
+      <div>
+        <p class="eyebrow">See it move</p>
+        <h2 id="runs-title">Explore. Learn. Accelerate.</h2>
+        <p>The fast-run planner fuses consecutive straight cells into one trapezoidal motion profile, while the wall map persists in ESP32 nonvolatile storage between runs.</p>
+      </div>
+      <div class="run-grid">
+        <figure><img src="images/maze_explore.gif" alt="NeuroMouse26 autonomously exploring a maze"><figcaption>Autonomous exploration</figcaption></figure>
+        <figure><img src="images/maze_fastrun.gif" alt="NeuroMouse26 accelerating during its optimized fast run"><figcaption>Optimized fast run</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="build" aria-labelledby="build-title" class="build">
+      <div>
+        <p class="eyebrow">Open source</p>
+        <h2 id="build-title">Build NeuroMouse26</h2>
+        <p>The firmware targets an ESP32-S3-WROOM using Arduino on PlatformIO. The reference chassis uses GA-N20 motors, a DRV8833 driver, magnetic encoders, four IR receivers, and an MPU-6500 IMU.</p>
+        <p><a href="https://github.com/enkhbold470/neuromouse26/blob/main/README.md#quickstart">Read the complete build and first-run instructions →</a></p>
+      </div>
+      <pre aria-label="Build commands"><code>git clone https://github.com/enkhbold470/neuromouse26.git
+cd neuromouse26
+pio run -e main
+pio run -e main -t upload
+pio device monitor</code></pre>
+    </section>
+
+    <section aria-labelledby="guides-title">
+      <p class="eyebrow">Engineering guides</p>
+      <h2 id="guides-title">Read the implementation</h2>
+      <div class="guide-grid">
+        <a href="https://github.com/enkhbold470/neuromouse26/blob/main/CLAUDE.md"><strong>ESP32-S3 Micromouse firmware architecture</strong><span>Understand the full hardware and software stack.</span></a>
+        <a href="https://github.com/enkhbold470/neuromouse26/blob/main/include/Planner.h"><strong>Micromouse flood-fill BFS implementation</strong><span>Follow sensing, maze updates, and motion-script planning.</span></a>
+        <a href="https://github.com/enkhbold470/neuromouse26/blob/main/docs/05_PID_LOOP.md"><strong>Micromouse position-PID tuning</strong><span>Read the control-loop experiments and tuning notes.</span></a>
+        <a href="https://github.com/enkhbold470/neuromouse26/blob/main/include/MicromouseEncoderPCNT.h"><strong>ESP32-S3 PCNT 4× quadrature decoding</strong><span>Inspect the hardware encoder implementation.</span></a>
+      </div>
+    </section>
+
+    <section aria-labelledby="team-title" class="team">
+      <p class="eyebrow">The team</p>
+      <h2 id="team-title">Built for the 2026 All America Micromouse Contest</h2>
+      <ul aria-label="NeuroMouse26 team members">
+        <li>Enkhbold Ganbold</li>
+        <li>Yu Hong (Elijah) Chen</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <a class="wordmark" href="#top">NeuroMouse26</a>
+    <p>Open-source ESP32-S3 Micromouse firmware under the MIT License.</p>
+    <p><a href="https://github.com/enkhbold470/neuromouse26">GitHub</a> · <a href="https://github.com/enkhbold470/neuromouse26/blob/main/docs/00_INDEX.md">Technical docs</a> · <a href="https://www.youtube.com/watch?v=2M4ZANPrZ4s">Video</a></p>
+  </footer>
+</body>
+</html>

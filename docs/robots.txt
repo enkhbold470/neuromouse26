@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://enkhbold470.github.io/neuromouse26/sitemap.xml

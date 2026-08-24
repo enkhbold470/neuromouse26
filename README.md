@@ -1,4 +1,6 @@
-# NeuroMouse V2.0 — ESP32-S3 Micromouse
+# NeuroMouse26 — Podium-Tested ESP32-S3 Micromouse
+
+NeuroMouse26 is an award-winning open-source Micromouse robotics project built on the ESP32-S3. It autonomously explores and solves a 16×16 maze using flood-fill BFS, position-PID motion control, infrared wall sensing, and 4× quadrature encoder decoding; the robot placed 3rd overall at the 2026 All America Micromouse Contest at UCLA IEEE.
 
 **3rd Place Overall · All America Micromouse Contest (AAMC) 2026 · UCLA IEEE**
 
@@ -8,6 +10,8 @@
 [![Award](https://img.shields.io/badge/AAMC%202026-3rd%20Place-brightgreen.svg)](#)
 
 [![Watch Full Competition Run on YouTube](https://img.shields.io/badge/YouTube-Watch%20the%20AAMC%20run-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=2M4ZANPrZ4s)
+
+[Project website](https://enkhbold470.github.io/neuromouse26/) · [Competition video](https://www.youtube.com/watch?v=2M4ZANPrZ4s) · [Technical documentation](docs/00_INDEX.md)
 
 ---
 

@@ -1,4 +1,4 @@
-# CLAUDE.md — Micromouse26 ESP32-S3 Firmware Guide
+# CLAUDE.md — NeuroMouse26 ESP32-S3 Firmware Guide
 
 This file is the single, authoritative guide for AI assistants (Claude, Gemini, etc.) and developers working in this repository.
 
