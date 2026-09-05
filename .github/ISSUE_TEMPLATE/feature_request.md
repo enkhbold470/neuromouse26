@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea or enhancement for NeuroMouse firmware
+about: Suggest an idea or enhancement for NeuroMouse26 firmware
 title: '[FEATURE] '
 labels: 'enhancement'
 assignees: ''
